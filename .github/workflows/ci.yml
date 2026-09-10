@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Build all packages
+        run: |
+          npx tsc -p packages/shared/tsconfig.json
+          npx tsc -p packages/providers/tsconfig.json
+          npx tsc -p packages/core/tsconfig.json
+          npx tsc -p packages/scanner/tsconfig.json
+          npx tsc -p packages/strategy/tsconfig.json
+          npx tsc -p packages/execution/tsconfig.json
+          npx tsc -p packages/position/tsconfig.json
+          npx tsc -p apps/trader/tsconfig.json
+
+      - name: Unit tests (no network)
+        run: npx vitest run packages
+
+      # Live provider tests are opt-in (network + rate limits):
+      # npx vitest run tests/integration
+
+  db-migrate:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: trader
+          POSTGRES_PASSWORD: trader
+          POSTGRES_DB: trader
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U trader"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - name: Run migrations
+        run: npx tsx infra/scripts/migrate.ts
+        env:
+          DATABASE_URL: postgresql://trader:trader@localhost:5432/trader
