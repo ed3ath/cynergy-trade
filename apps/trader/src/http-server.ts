@@ -37,8 +37,9 @@ export function startHttpServer(opts: {
   logger: Logger;
   getStatus: () => StatusPayload;
   getMetrics: () => Record<string, number>;
+  getReport?: () => unknown;
 }): { close: () => void } {
-  const { port, host, authToken, emergency, logger, getStatus, getMetrics } = opts;
+  const { port, host, authToken, emergency, logger, getStatus, getMetrics, getReport } = opts;
   const startedAt = Date.now();
 
   const server = createServer((req, res) => {
@@ -71,6 +72,11 @@ export function startHttpServer(opts: {
         const status = getStatus();
         status.uptimeMs = Date.now() - startedAt;
         return respond(res, 200, status);
+      }
+
+      if (req.method === "GET" && path === "/report") {
+        if (!getReport) return respond(res, 404, { error: "reporting not enabled" });
+        return respond(res, 200, getReport());
       }
 
       if (req.method === "GET" && path === "/metrics") {

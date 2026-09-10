@@ -131,6 +131,33 @@ const positionManager = new PositionManager(
   log.child({ component: "position" }),
 );
 
+// ─── Reporting ────────────────────────────────────────────────────────────────
+const { ReportTracker, buildDailyReport, formatReportText } = await import("./report.js");
+const reportTracker = new ReportTracker();
+
+function emitDailyReport(): void {
+  const report = buildDailyReport(
+    reportTracker, portfolio, positionManager.getOpenPositions(),
+    performanceTracker, config.trading.mode,
+  );
+  log.info("Daily report", { report: JSON.stringify(report) });
+  console.info(formatReportText(report));
+  void journal.recordSystemEvent("DAILY_REPORT", formatReportText(report), {
+    netPnlUsd: report.netPnlUsd,
+    trades: report.trades,
+  }).catch(() => undefined);
+}
+
+// Daily at 00:01 UTC
+function scheduleDailyReport(): void {
+  const now = new Date();
+  const next = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1, 0, 1));
+  setTimeout(() => {
+    emitDailyReport();
+    scheduleDailyReport(); // 24h apart — DST-immune via UTC recompute
+  }, next.getTime() - now.getTime());
+}
+
 // ─── Portfolio state (in-memory; persisted to DB in Phase 1) ─────────────────
 // ponytail: load from DB on startup
 let portfolio: PortfolioSnapshot = {
@@ -226,6 +253,22 @@ async function decisionCycle(): Promise<void> {
         portfolio.currentDrawdownPct = portfolio.peakValueUsd > 0
           ? ((portfolio.peakValueUsd - portfolio.totalValueUsd) / portfolio.peakValueUsd) * 100
           : 0;
+
+        // Feed the performance tracker (drives sizing multipliers with shrinkage)
+        performanceTracker.record({
+          strategyId: position.strategyId,
+          pnlUsd: realizedPnl,
+          feesUsd: exitResult.feeUsd,
+          slippageUsd: position.sizeUsd * (exitResult.actualSlippageBps / 10_000),
+          durationMs: Date.now() - position.openedAt.getTime(),
+          timestamp: new Date(),
+        });
+        reportTracker.recordClose({
+          strategyId: position.strategyId,
+          pnlUsd: realizedPnl,
+          feesUsd: exitResult.feeUsd,
+          closedAt: new Date(),
+        });
 
         // Daily loss limit → stop new entries
         if (portfolio.dailyPnlUsd <= -config.risk.maxDailyLossUsd && !emergency.isStopNewEntries()) {
@@ -417,6 +460,10 @@ const httpServerOpts: Parameters<typeof startHttpServer>[0] = {
     kill_switch_active: emergency.isKillSwitchActive() ? 1 : 0,
     trades_today: performanceTrades,
   }),
+  getReport: () => buildDailyReport(
+    reportTracker, portfolio, positionManager.getOpenPositions(),
+    performanceTracker, config.trading.mode,
+  ),
 };
 if (monitorToken) httpServerOpts.authToken = monitorToken;
 const httpServer = startHttpServer(httpServerOpts);
@@ -464,4 +511,5 @@ process.on("SIGTERM", () => void shutdown("SIGTERM"));
 
 // Run one cycle immediately on startup
 await decisionCycle();
+scheduleDailyReport();
 log.info("Initial decision cycle complete — running autonomously");

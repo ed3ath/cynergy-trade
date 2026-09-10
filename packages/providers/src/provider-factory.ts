@@ -24,11 +24,15 @@ import { GoPlusSecurityProvider } from "./solana/goplus-provider.js";
 import { BirdeyeMarketProvider } from "./solana/birdeye-provider.js";
 import { CompositeSecurityProvider } from "./solana/composite-security.js";
 import { SolanaRpcProvider } from "./solana/solana-rpc-provider.js";
+import { RaydiumDiscoveryProvider } from "./solana/raydium-discovery.js";
+import { BirdeyeHolderProvider } from "./solana/birdeye-holder.js";
 
 export function createProviderRegistry(config: ProvidersConfig): ProviderRegistry {
   const heliusKey = config.helius.apiKey;
   const birdeyeKey = config.birdeye.apiKey;
   const goplusEnabled = config.goplus.enabled;
+  // Discovery needs real RPC; public RPC polling only when explicitly opted in (rate limits)
+  const publicDiscovery = process.env["ENABLE_PUBLIC_DISCOVERY"] === "true";
 
   // ── Chain data: real RPC when Helius key present ───────────────────────────
   const chain = heliusKey
@@ -63,12 +67,35 @@ export function createProviderRegistry(config: ProvidersConfig): ProviderRegistr
 
   const monitoring = chain instanceof SolanaRpcProvider ? chain : new MockTransactionMonitoringProvider();
 
+  // ── Discovery: Raydium polling when real RPC available ─────────────────────
+  let discoveryRpc: SolanaRpcProvider | null = null;
+  if (chain instanceof SolanaRpcProvider) {
+    discoveryRpc = chain;
+  } else if (publicDiscovery) {
+    discoveryRpc = new SolanaRpcProvider("https://api.mainnet-beta.solana.com");
+  }
+
+  let discovery;
+  if (discoveryRpc instanceof SolanaRpcProvider) {
+    discovery = new RaydiumDiscoveryProvider(discoveryRpc, {
+      // paid RPC polls faster; public RPC must stay gentle
+      pollIntervalMs: heliusKey ? 10_000 : 30_000,
+    });
+  } else {
+    discovery = new MockDiscoveryProvider();
+  }
+
+  // ── Holders: Birdeye when key present (unverified shape — gated) ──────────
+  const holders = birdeyeKey && config.birdeye.enabled
+    ? new BirdeyeHolderProvider(birdeyeKey)
+    : new MockHolderAnalyticsProvider();
+
   return {
-    discovery: new MockDiscoveryProvider(), // ponytail: Helius webhook discovery
+    discovery,
     marketData: market,
     liquidity,
     security,
-    holders: new MockHolderAnalyticsProvider(), // ponytail: Birdeye holder profiles
+    holders,
     chain,
     quote,
     execution,

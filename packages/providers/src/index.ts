@@ -5,6 +5,8 @@ export * from "./solana/jupiter-provider.js";
 export * from "./solana/jupiter-execution.js";
 export * from "./solana/goplus-provider.js";
 export * from "./solana/birdeye-provider.js";
+export * from "./solana/birdeye-holder.js";
+export * from "./solana/raydium-discovery.js";
 export * from "./solana/composite-security.js";
 export * from "./solana/solana-rpc-provider.js";
 export * from "./provider-factory.js";

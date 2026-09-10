@@ -72,6 +72,19 @@ export class SolanaRpcProvider extends AbstractProvider
     return result;
   }
 
+  /** Recent signatures for a program/address, newest first. */
+  async getSignaturesForAddress(
+    address: string,
+    limit: number,
+    before?: string,
+  ): Promise<Array<{ signature: string; slot: number; err: unknown; blockTime?: number }>> {
+    const params: unknown[] = [address, { limit }];
+    if (before) (params[1] as { before: string }).before = before;
+    type Sig = { signature: string; slot: number; err: unknown; blockTime?: number };
+    const result = await this.rpc<Sig[] | null>("getSignaturesForAddress", params);
+    return (result as Sig[]) ?? [];
+  }
+
   async getRecentBlockhash(): Promise<{ blockhash: string; lastValidBlockHeight: number }> {
     const result = await this.rpc<{ value: { blockhash: string; lastValidBlockHeight: number } }>(
       "getLatestBlockhash", [{ commitment: "confirmed" }],
