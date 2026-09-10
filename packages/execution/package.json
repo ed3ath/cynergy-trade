@@ -18,7 +18,9 @@
   "dependencies": {
     "@autonomous-trader/shared": "*",
     "@autonomous-trader/providers": "*",
-    "@autonomous-trader/core": "*"
+    "@autonomous-trader/core": "*",
+    "@solana/web3.js": "^1.95.0",
+    "bs58": "^6.0.0"
   },
   "devDependencies": {
     "typescript": "*",

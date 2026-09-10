@@ -29,13 +29,21 @@ import {
   Database,
   JournalRepository,
   createNullJournal,
+  classifyRegime,
+  SolPriceSampler,
+  type RegimeResult,
 } from "@autonomous-trader/core";
 import {
   createProviderRegistry,
 } from "@autonomous-trader/providers";
 import { Scanner, type ScannerConfig } from "@autonomous-trader/scanner";
 import { StrategyEngine, FreshMomentumStrategy, type StrategyContext } from "@autonomous-trader/strategy";
-import { createExecutionRouter } from "@autonomous-trader/execution";
+import {
+  createExecutionRouter,
+  PgIdempotencyGuard,
+  InMemoryIdempotencyGuard,
+  FallbackIdempotencyGuard,
+} from "@autonomous-trader/execution";
 import { PositionManager } from "@autonomous-trader/position";
 
 // ─── Bootstrap ────────────────────────────────────────────────────────────────
@@ -118,11 +126,32 @@ const riskEngine = new RiskEngine(
 );
 
 // ─── Execution router ─────────────────────────────────────────────────────────
+// Durable idempotency when DB up; memory-only guard otherwise (paper/dev)
+const idempotencyGuard = db
+  ? new FallbackIdempotencyGuard(new PgIdempotencyGuard(db), new InMemoryIdempotencyGuard())
+  : new InMemoryIdempotencyGuard();
+
+// Wallet: required for LIVE, optional otherwise
+const { loadWalletFromEnv } = await import("@autonomous-trader/execution");
+const wallet = loadWalletFromEnv();
+if (wallet) {
+  log.info("Trading wallet loaded", { publicKey: wallet.publicKey });
+  if (config.trading.walletPublicKey && config.trading.walletPublicKey !== wallet.publicKey) {
+    throw new Error("WALLET_PUBLIC_KEY env does not match WALLET_PRIVATE_KEY-derived key");
+  }
+}
+if (config.trading.mode === "LIVE" && !wallet) {
+  throw new Error("LIVE mode requires WALLET_PRIVATE_KEY — refusing to start");
+}
+
 const executionRouter = createExecutionRouter(config.trading.mode, {
   quote, execution, monitoring, chain,
-  walletPublicKey: config.trading.walletPublicKey ?? "mock_wallet",
-  signTransaction: async (tx) => tx, // ponytail: real wallet signing in Phase 6
+  walletPublicKey: wallet?.publicKey ?? config.trading.walletPublicKey ?? "mock_wallet",
+  signTransaction: wallet
+    ? (tx) => wallet.signTransaction(tx)
+    : async (tx) => tx, // paper/shadow only — LIVE refuses to boot without wallet above
   logger: log.child({ component: "execution" }),
+  guard: idempotencyGuard,
 });
 
 // ─── Position manager ─────────────────────────────────────────────────────────
@@ -174,12 +203,50 @@ let portfolio: PortfolioSnapshot = {
   snapshotAt: new Date(),
 };
 
+// ─── Market regime (spec §48) ─────────────────────────────────────────────────
+const WSOL = "So11111111111111111111111111111111111111112";
+const USDC = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+const solSampler = new SolPriceSampler(60, 60_000);
+let currentRegime: RegimeResult = {
+  regime: "UNKNOWN", solTrendPct1h: 0, volatilityPct: 0, confidence: 0, reasons: ["not yet sampled"],
+};
+
+/** Sample SOL/USD from a Jupiter quote (free, no key) and reclassify regime. */
+async function updateRegime(): Promise<void> {
+  try {
+    const q = await quote.getQuote({
+      inputMint: WSOL, outputMint: USDC,
+      amount: 1_000_000_000n, // 1 SOL
+      slippageBps: 100,
+      chain: "solana",
+    });
+    // outputAmount is 6-dec USDC for 1 SOL → price = raw/1e6
+    solSampler.add(Number(q.outputAmount) / 1e6);
+  } catch {
+    // quote failure — keep last samples; UNKNOWN-ish handling via confidence
+  }
+
+  currentRegime = classifyRegime({
+    solPrices: solSampler.prices(),
+    drawdownPct: portfolio.currentDrawdownPct,
+    maxDrawdownPct: config.risk.maxDrawdownPct,
+    dailyLossUsd: Math.max(0, -portfolio.dailyPnlUsd),
+    maxDailyLossUsd: config.risk.maxDailyLossUsd,
+    recentWinRate: performanceTracker.getStats("strategy-fresh-momentum").sampleSize >= 30
+      ? performanceTracker.getStats("strategy-fresh-momentum").winRate
+      : null,
+  });
+}
+
 // ─── Main decision loop ───────────────────────────────────────────────────────
 async function decisionCycle(): Promise<void> {
   if (emergency.isKillSwitchActive()) {
     log.warn("Kill switch active — skipping decision cycle");
     return;
   }
+
+  // 0. Refresh market regime (SOL trend/vol + drawdown state)
+  await updateRegime();
 
   // 1. Update portfolio from open positions
   const openPositions = positionManager.getOpenPositions();
@@ -302,7 +369,7 @@ async function decisionCycle(): Promise<void> {
     try {
       const strategyCtx: StrategyContext = {
         candidate,
-        marketRegime: "UNKNOWN", // ponytail: regime detection in Phase 2
+        marketRegime: currentRegime.regime,
         portfolioValueUsd: portfolio.totalValueUsd,
         availableCapitalUsd: portfolio.availableCapitalUsd,
         openPositionCount: portfolio.openPositions,
@@ -348,7 +415,7 @@ async function decisionCycle(): Promise<void> {
         portfolio,
         liquidity: liqSnap,
         security: secAssess,
-        marketRegime: "UNKNOWN",
+        marketRegime: currentRegime.regime,
         strategyConfidence: strategyDecision.confidence,
         strategyPerformanceMultiplier: stats.performanceMultiplier,
         openPositionCount: portfolio.openPositions,
@@ -440,6 +507,14 @@ const httpServerOpts: Parameters<typeof startHttpServer>[0] = {
       stopNewEntries: emergency.isStopNewEntries(),
       tradingMode: emergency.getTradingMode(),
       disabledStrategies: [...emergency.getState().disabledStrategies],
+    },
+    regime: {
+      current: currentRegime.regime,
+      solTrendPct: Math.round(currentRegime.solTrendPct1h * 100) / 100,
+      volatilityPct: Math.round(currentRegime.volatilityPct * 100) / 100,
+      confidence: Math.round(currentRegime.confidence * 100) / 100,
+      reasons: currentRegime.reasons,
+      solSamples: solSampler.size,
     },
     watchlist: scanner.getWatchlist().slice(0, 20).map((c) => ({
       token: c.tokenAddress,

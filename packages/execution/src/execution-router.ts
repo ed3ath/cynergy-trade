@@ -28,22 +28,21 @@ export interface ExecutionRouter {
   execute(intent: TradeIntent, currentPriceUsd: number): Promise<ExecutionResult>;
 }
 
-// ─── Idempotency guard ────────────────────────────────────────────────────────
-const executed = new Set<string>(); // in-memory; swap for Redis in prod
+// ─── Idempotency: injected guard (in-memory default, DB/Redis in production) ──
+import type { IdempotencyGuard } from "./idempotency.js";
+import { assertNotDuplicate, InMemoryIdempotencyGuard } from "./idempotency.js";
 
-function guardDuplicate(intentId: string): void {
-  if (executed.has(intentId)) {
-    throw new ExecutionError(`Duplicate execution prevented for intent ${intentId}`, { intentId });
-  }
-  executed.add(intentId);
-}
+const defaultGuard = new InMemoryIdempotencyGuard();
 
 // ─── Paper execution (no I/O) ─────────────────────────────────────────────────
 export class PaperExecutionRouter implements ExecutionRouter {
-  constructor(private readonly logger: Logger) {}
+  constructor(
+    private readonly logger: Logger,
+    private readonly guard: IdempotencyGuard = defaultGuard,
+  ) {}
 
   async execute(intent: TradeIntent, currentPriceUsd: number): Promise<ExecutionResult> {
-    guardDuplicate(intent.id);
+    await assertNotDuplicate(this.guard, intent.id);
 
     const orderId = generateOrderId();
     const sm = new OrderStateMachine();
@@ -101,10 +100,11 @@ export class ShadowExecutionRouter implements ExecutionRouter {
     private readonly quoteProvider: SwapQuoteProvider,
     private readonly logger: Logger,
     private readonly solMint = "So11111111111111111111111111111111111111112",
+    private readonly guard: IdempotencyGuard = defaultGuard,
   ) {}
 
   async execute(intent: TradeIntent, currentPriceUsd: number): Promise<ExecutionResult> {
-    guardDuplicate(intent.id);
+    await assertNotDuplicate(this.guard, intent.id);
 
     const orderId = generateOrderId();
     const sm = new OrderStateMachine();
@@ -169,10 +169,11 @@ export class LiveExecutionRouter implements ExecutionRouter {
     private readonly signTransaction: (tx: Uint8Array) => Promise<Uint8Array>,
     private readonly logger: Logger,
     private readonly solMint = "So11111111111111111111111111111111111111112",
+    private readonly guard: IdempotencyGuard = defaultGuard,
   ) {}
 
   async execute(intent: TradeIntent, currentPriceUsd: number): Promise<ExecutionResult> {
-    guardDuplicate(intent.id);
+    await assertNotDuplicate(this.guard, intent.id);
 
     if (intent.expiresAt <= new Date()) {
       throw new ExecutionError("Intent expired before execution", { intentId: intent.id });
@@ -293,15 +294,16 @@ export function createExecutionRouter(
     walletPublicKey?: string;
     signTransaction?: (tx: Uint8Array) => Promise<Uint8Array>;
     logger: Logger;
+    guard?: IdempotencyGuard;
   },
 ): ExecutionRouter {
   switch (mode) {
     case "PAPER":
-      return new PaperExecutionRouter(deps.logger);
+      return new PaperExecutionRouter(deps.logger, deps.guard ?? defaultGuard);
 
     case "SHADOW":
       if (!deps.quote) throw new Error("Shadow mode requires quoteProvider");
-      return new ShadowExecutionRouter(deps.quote, deps.logger);
+      return new ShadowExecutionRouter(deps.quote, deps.logger, undefined, deps.guard ?? defaultGuard);
 
     case "LIVE":
       if (!deps.quote || !deps.execution || !deps.monitoring || !deps.chain ||
@@ -310,7 +312,8 @@ export function createExecutionRouter(
       }
       return new LiveExecutionRouter(
         deps.quote, deps.execution, deps.monitoring, deps.chain,
-        deps.walletPublicKey, deps.signTransaction, deps.logger,
+        deps.walletPublicKey, deps.signTransaction, deps.logger, undefined,
+        deps.guard ?? defaultGuard,
       );
   }
 }

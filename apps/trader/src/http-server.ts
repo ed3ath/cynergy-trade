@@ -24,6 +24,14 @@ export interface StatusPayload {
     tradingMode: string;
     disabledStrategies: string[];
   };
+  regime: {
+    current: string;
+    solTrendPct: number;
+    volatilityPct: number;
+    confidence: number;
+    reasons: string[];
+    solSamples: number;
+  };
   watchlist: Array<{ token: string; score: number; status: string }>;
   uptimeMs: number;
   version: string;
