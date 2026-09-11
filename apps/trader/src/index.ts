@@ -160,6 +160,19 @@ const positionManager = new PositionManager(
   log.child({ component: "position" }),
 );
 
+// ─── Alerting (spec §65) — critical events only, Telegram transport ──────────
+const { Alerter } = await import("./alerter.js");
+const alertBotToken = process.env["ALERT_TELEGRAM_BOT_TOKEN"];
+const alertChatId = process.env["ALERT_TELEGRAM_CHAT_ID"];
+const alertCfg = { dedupeWindowMs: 10 * 60_000 } as import("./alerter.js").AlerterConfig;
+if (alertBotToken) alertCfg.botToken = alertBotToken;
+if (alertChatId) alertCfg.chatId = alertChatId;
+const alerter = new Alerter(alertCfg, log.child({ component: "alerter" }));
+if (alerter.isEnabled) log.info("Telegram alerting enabled");
+if (!alerter.isEnabled && config.trading.mode === "LIVE") {
+  log.warn("LIVE mode without alerting configured (ALERT_TELEGRAM_BOT_TOKEN/CHAT_ID)");
+}
+
 // ─── Reporting ────────────────────────────────────────────────────────────────
 const { ReportTracker, buildDailyReport, formatReportText } = await import("./report.js");
 const reportTracker = new ReportTracker();
@@ -187,8 +200,7 @@ function scheduleDailyReport(): void {
   }, next.getTime() - now.getTime());
 }
 
-// ─── Portfolio state (in-memory; persisted to DB in Phase 1) ─────────────────
-// ponytail: load from DB on startup
+// ─── Portfolio state ──────────────────────────────────────────────────────────
 let portfolio: PortfolioSnapshot = {
   totalValueUsd: 10_000,
   availableCapitalUsd: 10_000,
@@ -202,6 +214,43 @@ let portfolio: PortfolioSnapshot = {
   peakValueUsd: 10_000,
   snapshotAt: new Date(),
 };
+
+// Restart recovery: restore open positions + portfolio baseline from journal.
+// Without this, a restart orphans open positions with no exit engine watching.
+if (db) {
+  try {
+    const restored = await journal.getOpenPositions(config.trading.mode);
+    for (const p of restored) positionManager.restorePosition(p);
+
+    const snap = await journal.getLatestPortfolioSnapshot(config.trading.mode);
+    if (snap) {
+      portfolio = { ...snap, snapshotAt: new Date() };
+    }
+    // Allocated capital is authoritative from live positions, not the snapshot
+    portfolio.allocatedUsd = positionManager.getTotalExposureUsd();
+    portfolio.openPositions = positionManager.getOpenPositions().length;
+    portfolio.availableCapitalUsd = portfolio.totalValueUsd - portfolio.allocatedUsd;
+
+    if (restored.length > 0) {
+      log.warn("State restored after restart", {
+        positions: restored.length,
+        allocatedUsd: portfolio.allocatedUsd.toFixed(2),
+        peakValueUsd: portfolio.peakValueUsd.toFixed(2),
+        drawdownPct: portfolio.currentDrawdownPct.toFixed(2),
+      });
+      alerter.alert("WARNING", "restart-with-positions",
+        `Restarted with ${restored.length} open position(s) restored from journal. ` +
+        `Allocated $${portfolio.allocatedUsd.toFixed(2)}, drawdown ${portfolio.currentDrawdownPct.toFixed(1)}%.`);
+      await journal.recordSystemEvent("STARTUP", "Restored positions after restart", {
+        count: restored.length,
+      });
+    }
+  } catch (err) {
+    log.error("State restore failed — continuing with fresh portfolio (positions in DB unmanaged!)", {
+      error: (err as Error).message,
+    });
+  }
+}
 
 // ─── Market regime (spec §48) ─────────────────────────────────────────────────
 const WSOL = "So11111111111111111111111111111111111111112";
@@ -239,11 +288,20 @@ async function updateRegime(): Promise<void> {
 }
 
 // ─── Main decision loop ───────────────────────────────────────────────────────
+let killSwitchAlerted = false;
+
 async function decisionCycle(): Promise<void> {
   if (emergency.isKillSwitchActive()) {
+    if (!killSwitchAlerted) {
+      killSwitchAlerted = true;
+      alerter.alert("CRITICAL", "kill-switch",
+        "KILL SWITCH ACTIVE — trading halted, positions flagged for close. " +
+        "Resume via /emergency/resume?confirm=yes when resolved.");
+    }
     log.warn("Kill switch active — skipping decision cycle");
     return;
   }
+  killSwitchAlerted = false;
 
   // 0. Refresh market regime (SOL trend/vol + drawdown state)
   await updateRegime();
@@ -273,6 +331,11 @@ async function decisionCycle(): Promise<void> {
           reason: exitSignal.reason,
           urgency: exitSignal.urgency,
         });
+        if (exitSignal.urgency === "EMERGENCY") {
+          alerter.alert("WARNING", `emergency-exit:${position.tokenAddress}`,
+            `EMERGENCY EXIT ${position.tokenAddress}: ${exitSignal.reason} ` +
+            `(pnl ${position.unrealizedPnlPct.toFixed(1)}%)`);
+        }
 
         const exitIntent: TradeIntent = {
           id: generateTradeIntentId(),
@@ -345,6 +408,8 @@ async function decisionCycle(): Promise<void> {
           log.error("DAILY LOSS LIMIT REACHED — new entries stopped", {
             dailyPnl: portfolio.dailyPnlUsd,
           });
+          alerter.alert("CRITICAL", "daily-loss-limit",
+            `Daily loss limit hit: ${portfolio.dailyPnlUsd.toFixed(2)} USD. New entries stopped automatically.`);
         }
 
         log.info("Position closed", {
@@ -356,6 +421,9 @@ async function decisionCycle(): Promise<void> {
       }
     } catch (err) {
       log.error("Position monitoring error", { positionId: position.id, error: (err as Error).message });
+      alerter.alert("CRITICAL", `position-monitor-error:${position.id}`,
+        `Position monitoring FAILED for ${position.tokenAddress}: ${(err as Error).message}. ` +
+        `Position is unmanaged until this resolves — investigate immediately.`);
     }
   }
 

@@ -231,6 +231,21 @@ export class PositionManager {
     return result;
   }
 
+  /** Re-register a position loaded from persistence (restart recovery).
+   *  No execution — the position already exists on-chain/on-paper. */
+  restorePosition(position: Position): void {
+    if (this.positions.has(position.id)) return;
+    this.positions.set(position.id, position);
+    this.stateMachines.set(position.id, new PositionStateMachine(position.status));
+    this.logger.warn("Position restored from persistence", {
+      positionId: position.id,
+      token: position.tokenAddress,
+      status: position.status,
+      entryPrice: position.entryPrice,
+      ageHours: ((Date.now() - position.openedAt.getTime()) / 3_600_000).toFixed(1),
+    });
+  }
+
   getOpenPositions(): Position[] {
     return [...this.positions.values()].filter((p) => p.status === "OPEN");
   }

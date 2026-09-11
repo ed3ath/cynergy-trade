@@ -212,6 +212,115 @@ export class JournalRepository {
     );
   }
 
+  // ─── Restore on restart ────────────────────────────────────────────────────
+  /** Open positions for a mode — used to restore the position manager on boot. */
+  async getOpenPositions(mode: "PAPER" | "SHADOW" | "LIVE"): Promise<Position[]> {
+    const { rows } = await this.db.query<{
+      id: string;
+      token_address: string;
+      chain: string;
+      status: string;
+      strategy_id: string;
+      entry_price: string;
+      current_price: string | null;
+      size_usd: string;
+      size_tokens: string | null;
+      stop_loss: string;
+      take_profit_1: string | null;
+      take_profit_2: string | null;
+      trailing_stop_pct: string | null;
+      peak_price: string | null;
+      unrealized_pnl_usd: string | null;
+      unrealized_pnl_pct: string | null;
+      drawdown_from_peak_pct: string | null;
+      entry_tx_signature: string | null;
+      exit_reason: string | null;
+      opened_at: Date;
+    }>(
+      `SELECT p.id, p.token_address, p.chain, p.status, p.strategy_id,
+              p.entry_price, p.current_price, p.size_usd, p.size_tokens,
+              p.stop_loss, p.take_profit_1, p.take_profit_2, p.trailing_stop_pct,
+              p.peak_price, p.unrealized_pnl_usd, p.unrealized_pnl_pct,
+              p.drawdown_from_peak_pct, o.tx_signature AS entry_tx_signature,
+              p.exit_reason, p.opened_at
+       FROM positions p
+       LEFT JOIN orders o ON o.id = p.entry_order_id
+       WHERE p.status IN ('OPENING','OPEN','PARTIAL_EXIT','CLOSING') AND p.mode = $1
+       ORDER BY p.opened_at`,
+      [mode],
+    );
+
+    return rows.map((r) => {
+      const position: Position = {
+        id: r.id,
+        tokenAddress: r.token_address,
+        chain: r.chain as Position["chain"],
+        status: r.status as Position["status"],
+        mode,
+        strategyId: r.strategy_id,
+        entryPrice: parseFloat(r.entry_price),
+        currentPrice: r.current_price !== null ? parseFloat(r.current_price) : parseFloat(r.entry_price),
+        sizeUsd: parseFloat(r.size_usd),
+        sizeTokens: r.size_tokens !== null ? BigInt(r.size_tokens) : 0n,
+        stopLoss: parseFloat(r.stop_loss),
+        peakPrice: r.peak_price !== null ? parseFloat(r.peak_price) : parseFloat(r.entry_price),
+        unrealizedPnlUsd: r.unrealized_pnl_usd !== null ? parseFloat(r.unrealized_pnl_usd) : 0,
+        unrealizedPnlPct: r.unrealized_pnl_pct !== null ? parseFloat(r.unrealized_pnl_pct) : 0,
+        drawdownFromPeakPct: r.drawdown_from_peak_pct !== null ? parseFloat(r.drawdown_from_peak_pct) : 0,
+        openedAt: new Date(r.opened_at),
+        updatedAt: new Date(),
+      };
+      if (r.take_profit_1 !== null)    position.takeProfit1 = parseFloat(r.take_profit_1);
+      if (r.take_profit_2 !== null)    position.takeProfit2 = parseFloat(r.take_profit_2);
+      if (r.trailing_stop_pct !== null) position.trailingStopPct = parseFloat(r.trailing_stop_pct);
+      if (r.entry_tx_signature !== null) position.entryTxSignature = r.entry_tx_signature;
+      if (r.exit_reason !== null)       position.exitReason = r.exit_reason;
+      return position;
+    });
+  }
+
+  /** Last persisted portfolio snapshot for a mode — total value / peak baseline. */
+  async getLatestPortfolioSnapshot(
+    mode: "PAPER" | "SHADOW" | "LIVE",
+  ): Promise<PortfolioSnapshot | null> {
+    const { rows } = await this.db.query<{
+      total_value_usd: string;
+      available_usd: string;
+      allocated_usd: string;
+      open_positions: number;
+      daily_pnl_usd: string | null;
+      weekly_pnl_usd: string | null;
+      monthly_pnl_usd: string | null;
+      all_time_pnl_usd: string | null;
+      drawdown_pct: string | null;
+      peak_value_usd: string | null;
+      snapshot_at: Date;
+    }>(
+      `SELECT total_value_usd, available_usd, allocated_usd, open_positions,
+              daily_pnl_usd, weekly_pnl_usd, monthly_pnl_usd, all_time_pnl_usd,
+              drawdown_pct, peak_value_usd, snapshot_at
+       FROM portfolio_snapshots WHERE mode = $1
+       ORDER BY snapshot_at DESC LIMIT 1`,
+      [mode],
+    );
+    const r = rows[0];
+    if (!r) return null;
+
+    return {
+      totalValueUsd: parseFloat(r.total_value_usd),
+      availableCapitalUsd: parseFloat(r.available_usd),
+      allocatedUsd: parseFloat(r.allocated_usd),
+      openPositions: r.open_positions,
+      dailyPnlUsd: r.daily_pnl_usd !== null ? parseFloat(r.daily_pnl_usd) : 0,
+      weeklyPnlUsd: r.weekly_pnl_usd !== null ? parseFloat(r.weekly_pnl_usd) : 0,
+      monthlyPnlUsd: r.monthly_pnl_usd !== null ? parseFloat(r.monthly_pnl_usd) : 0,
+      allTimePnlUsd: r.all_time_pnl_usd !== null ? parseFloat(r.all_time_pnl_usd) : 0,
+      currentDrawdownPct: r.drawdown_pct !== null ? parseFloat(r.drawdown_pct) : 0,
+      peakValueUsd: r.peak_value_usd !== null ? parseFloat(r.peak_value_usd) : parseFloat(r.total_value_usd),
+      snapshotAt: new Date(r.snapshot_at),
+    };
+  }
+
   // ─── Portfolio snapshots ───────────────────────────────────────────────────
   async recordPortfolioSnapshot(snap: PortfolioSnapshot, mode: "PAPER" | "SHADOW" | "LIVE"): Promise<void> {
     await this.db.query(
