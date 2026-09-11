@@ -1,0 +1,85 @@
+# Production stack: postgres + redis + trader.
+# Usage: see docs/deployment.md
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: trader-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: trader
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-trader}
+      POSTGRES_DB: trader
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trader"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: trader-redis
+    restart: unless-stopped
+    command: redis-server --save 60 1 --loglevel warning
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  trader:
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile
+    container_name: trader
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file:
+      - path: ../../.env
+        required: false
+    environment:
+      # Override points — .env supplies the rest
+      DATABASE_URL: postgresql://trader:${POSTGRES_PASSWORD:-trader}@postgres:5432/trader
+      REDIS_URL: redis://redis:6379
+      SERVER_HOST: 0.0.0.0
+    ports:
+      - "${TRADER_PORT:-3000}:3000"
+    # Long-lived decision loop; docker restart handles crashes (self-heal §50)
+    stop_grace_period: 30s
+
+  # Optional observability: docker compose --profile obs up
+  prometheus:
+    profiles: ["obs"]
+    image: prom/prometheus:v2.54.1
+    restart: unless-stopped
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=30d"
+
+  grafana:
+    profiles: ["obs"]
+    image: grafana/grafana:11.2.2
+    restart: unless-stopped
+    ports:
+      - "3001:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+    volumes:
+      - grafana_data:/var/lib/grafana
+
+volumes:
+  postgres_data:
+  redis_data:
+  prometheus_data:
+  grafana_data:

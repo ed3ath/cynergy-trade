@@ -335,6 +335,70 @@ export class JournalRepository {
     );
   }
 
+  // ─── Shadow decisions (signal-quality evidence, spec §43) ──────────────────
+  async insertShadowDecision(d: {
+    tokenAddress: string;
+    strategyId: string;
+    decisionPrice: number;
+    confidence: number;
+    horizonMinutes: number;
+    decidedAt: Date;
+  }): Promise<void> {
+    await this.db.query(
+      `INSERT INTO shadow_decisions
+        (token_address, strategy_id, decision, decision_price, confidence, horizon_minutes, decided_at)
+       VALUES ($1,$2,'ENTER',$3,$4,$5,$6)`,
+      [d.tokenAddress, d.strategyId, d.decisionPrice, d.confidence, d.horizonMinutes, d.decidedAt],
+    );
+  }
+
+  async getDueShadowDecisions(horizonMinutes: number, limit: number): Promise<Array<{
+    id: number;
+    tokenAddress: string;
+    decisionPrice: number;
+    decidedAt: Date;
+  }>> {
+    const { rows } = await this.db.query<{ id: number; token_address: string; decision_price: string; decided_at: Date }>(
+      `SELECT id, token_address, decision_price, decided_at
+       FROM shadow_decisions
+       WHERE evaluated_at IS NULL AND decided_at < NOW() - ($1 || ' minutes')::interval
+       ORDER BY decided_at LIMIT $2`,
+      [String(horizonMinutes), limit],
+    );
+    return rows.map((r) => ({
+      id: r.id,
+      tokenAddress: r.token_address,
+      decisionPrice: parseFloat(r.decision_price),
+      decidedAt: new Date(r.decided_at),
+    }));
+  }
+
+  async updateShadowOutcome(id: number, outcomePrice: number, returnPct: number): Promise<void> {
+    await this.db.query(
+      `UPDATE shadow_decisions SET outcome_price = $2, outcome_return_pct = $3,
+              evaluated_at = NOW() WHERE id = $1`,
+      [id, outcomePrice, returnPct],
+    );
+  }
+
+  async getShadowStats(): Promise<{ total: number; evaluated: number; avgReturnPct: number; winRate: number }> {
+    const { rows } = await this.db.query<{ total: string; evaluated: string; avg_ret: string | null; win_rate: string | null }>(
+      `SELECT COUNT(*) AS total,
+              COUNT(evaluated_at) AS evaluated,
+              AVG(outcome_return_pct) FILTER (WHERE evaluated_at IS NOT NULL) AS avg_ret,
+              AVG(CASE WHEN outcome_return_pct > 0 THEN 1.0 ELSE 0 END)
+                FILTER (WHERE evaluated_at IS NOT NULL) AS win_rate
+       FROM shadow_decisions`,
+    );
+    const r = rows[0];
+    return {
+      total: parseInt(r?.total ?? "0", 10),
+      evaluated: parseInt(r?.evaluated ?? "0", 10),
+      avgReturnPct: r?.avg_ret !== null && r?.avg_ret !== undefined ? parseFloat(r.avg_ret) : 0,
+      winRate: r?.win_rate !== null && r?.win_rate !== undefined ? parseFloat(r.win_rate) : 0,
+    };
+  }
+
   // ─── System events ─────────────────────────────────────────────────────────
   async recordSystemEvent(
     type: string,

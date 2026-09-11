@@ -47,6 +47,8 @@ import {
 import { PositionManager } from "@autonomous-trader/position";
 
 // ─── Bootstrap ────────────────────────────────────────────────────────────────
+import { join } from "node:path";
+
 const config = loadConfig();
 configureLogger({ level: config.log.level, pretty: config.log.pretty ?? true });
 const log = createLogger({ service: "trader", mode: config.trading.mode });
@@ -63,6 +65,9 @@ let journal: JournalRepository | ReturnType<typeof createNullJournal>;
 try {
   db = new Database(config.database.url, config.database.poolMin, config.database.poolMax);
   await db.connect();
+  // Self-migrate: schema always current at boot (also covers fresh containers)
+  const { runMigrations } = await import("@autonomous-trader/core");
+  await runMigrations(db, join(process.cwd(), "infra/migrations"));
   journal = new JournalRepository(db);
 } catch (err) {
   db = null;
@@ -172,6 +177,14 @@ if (alerter.isEnabled) log.info("Telegram alerting enabled");
 if (!alerter.isEnabled && config.trading.mode === "LIVE") {
   log.warn("LIVE mode without alerting configured (ALERT_TELEGRAM_BOT_TOKEN/CHAT_ID)");
 }
+
+// ─── Shadow-decision tracking (signal quality, spec §43) ────────────────────
+const { ShadowTracker } = await import("./shadow-tracker.js");
+const shadowTracker = new ShadowTracker(
+  market,
+  db ? (journal as JournalRepository) : null,
+  log.child({ component: "shadow" }),
+);
 
 // ─── Reporting ────────────────────────────────────────────────────────────────
 const { ReportTracker, buildDailyReport, formatReportText } = await import("./report.js");
@@ -305,6 +318,9 @@ async function decisionCycle(): Promise<void> {
 
   // 0. Refresh market regime (SOL trend/vol + drawdown state)
   await updateRegime();
+
+  // 0.5 Evaluate matured shadow decisions (signal-quality evidence)
+  await shadowTracker.evaluateDue();
 
   // 1. Update portfolio from open positions
   const openPositions = positionManager.getOpenPositions();
@@ -452,6 +468,18 @@ async function decisionCycle(): Promise<void> {
 
       const strategyDecision = ensembleResult.bestDecision;
       const stats = performanceTracker.getStats(strategyDecision.strategyId);
+
+      // Shadow-track every ENTER signal at decision price — signal quality
+      // evidence independent of risk approval or execution (spec §43)
+      if (candidate.market && candidate.market.priceUsd > 0) {
+        await shadowTracker.record({
+          tokenAddress: candidate.tokenAddress,
+          strategyId: strategyDecision.strategyId,
+          decisionPrice: candidate.market.priceUsd,
+          confidence: strategyDecision.confidence,
+          decidedAt: new Date(),
+        });
+      }
 
       // Journal the strategy decision with full feature snapshot for reproducibility
       await journal.recordStrategyDecision(strategyDecision, candidate.features);
@@ -602,6 +630,10 @@ const httpServerOpts: Parameters<typeof startHttpServer>[0] = {
     watchlist_size: scanner.getWatchlist().length,
     kill_switch_active: emergency.isKillSwitchActive() ? 1 : 0,
     trades_today: performanceTrades,
+    shadow_signals_total: shadowTracker.getStats().signals,
+    shadow_evaluated_total: shadowTracker.getStats().evaluated,
+    shadow_avg_return_pct: round(shadowTracker.getStats().avgReturnPct),
+    shadow_signal_win_rate: round(shadowTracker.getStats().winRate * 100),
   }),
   getReport: () => buildDailyReport(
     reportTracker, portfolio, positionManager.getOpenPositions(),

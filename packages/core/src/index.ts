@@ -6,4 +6,5 @@ export * from "./db/database.js";
 export * from "./db/journal.js";
 export * from "./db/pg-emergency-persistence.js";
 export * from "./db/null-journal.js";
+export * from "./db/run-migrations.js";
 export * from "./regime/regime-detector.js";
