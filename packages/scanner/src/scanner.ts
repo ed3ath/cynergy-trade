@@ -7,6 +7,10 @@ import type {
   DataFreshnessConfig,
   TokenDiscoveredEvent,
   Logger,
+  MarketSnapshot,
+  LiquiditySnapshot,
+  HolderSnapshot,
+  SecurityAssessment,
 } from "@autonomous-trader/shared";
 import type {
   TokenDiscoveryProvider,
@@ -36,6 +40,14 @@ export interface ScannerConfig {
   maxCandidateAgeMs: number;  // archive candidates older than this
 }
 
+/** Persistence sink for time-series snapshots — the backtester's dataset. */
+export interface SnapshotStore {
+  recordMarketSnapshot(snap: MarketSnapshot): Promise<void>;
+  recordLiquiditySnapshot(snap: LiquiditySnapshot): Promise<void>;
+  recordHolderSnapshot(snap: HolderSnapshot): Promise<void>;
+  recordSecurityAssessment(a: SecurityAssessment): Promise<void>;
+}
+
 export class Scanner {
   // tokenAddress → candidate
   private readonly candidates = new Map<string, TokenCandidate>();
@@ -44,6 +56,7 @@ export class Scanner {
   private running = false;
   private refreshTimer?: ReturnType<typeof setInterval>;
   private unsubscribeDiscovery?: () => void;
+  private lastPersistedAt = new Map<string, number>(); // token → epoch ms
 
   constructor(
     private readonly config: ScannerConfig,
@@ -55,6 +68,10 @@ export class Scanner {
       holders: HolderAnalyticsProvider;
     },
     private readonly logger: Logger,
+    /** When set, snapshots are persisted (throttled) — required for backtesting data. */
+    private readonly snapshotStore: SnapshotStore | null = null,
+    /** Minimum ms between persisted snapshot batches per token. */
+    private readonly persistThrottleMs = 60_000,
   ) {}
 
   async start(): Promise<void> {
@@ -232,6 +249,8 @@ export class Scanner {
     if (security.status === "fulfilled")  candidate.security  = security.value;
     if (holders.status === "fulfilled")   candidate.holders   = holders.value;
 
+    this.persistSnapshots(candidate);
+
     // Merge all features
     const featureSets = [
       candidate.market    ? computeMarketFeatures(candidate.market)       : {},
@@ -240,6 +259,22 @@ export class Scanner {
       candidate.holders   ? computeHolderFeatures(candidate.holders)      : {},
     ];
     candidate.features = mergeFeatures(candidate.features, ...featureSets);
+  }
+
+  /** Persist fetched snapshots (throttled per token) — fire-and-forget, never blocks trading. */
+  private persistSnapshots(candidate: TokenCandidate): void {
+    if (!this.snapshotStore) return;
+    const last = this.lastPersistedAt.get(candidate.tokenAddress) ?? 0;
+    if (Date.now() - last < this.persistThrottleMs) return;
+    this.lastPersistedAt.set(candidate.tokenAddress, Date.now());
+
+    const store = this.snapshotStore;
+    // fire-and-forget with individual error swallowing — persistence must never
+    // break the pipeline; a lost row costs one sample, an exception costs the cycle
+    if (candidate.market)    void store.recordMarketSnapshot(candidate.market).catch(() => undefined);
+    if (candidate.liquidity) void store.recordLiquiditySnapshot(candidate.liquidity).catch(() => undefined);
+    if (candidate.holders)   void store.recordHolderSnapshot(candidate.holders).catch(() => undefined);
+    if (candidate.security)  void store.recordSecurityAssessment(candidate.security).catch(() => undefined);
   }
 
   private archiveStale(): void {

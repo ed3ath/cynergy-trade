@@ -116,7 +116,12 @@ const scannerConfig: ScannerConfig = {
   maxCandidateAgeMs: 4 * 60 * 60 * 1000,
 };
 
-const scanner = new Scanner(scannerConfig, { discovery, market, liquidity, security, holders }, log.child({ component: "scanner" }));
+const scanner = new Scanner(
+  scannerConfig,
+  { discovery, market, liquidity, security, holders },
+  log.child({ component: "scanner" }),
+  db ? (journal as JournalRepository) : null, // snapshot persistence → backtester dataset
+);
 
 // ─── Strategy engine ──────────────────────────────────────────────────────────
 const strategyEngine = new StrategyEngine(log.child({ component: "strategy" }));
@@ -228,10 +233,23 @@ let portfolio: PortfolioSnapshot = {
   snapshotAt: new Date(),
 };
 
+// Base capital (deposits excluded): mark-to-market formula is
+//   totalValue = baseCapital + allTimeRealizedPnl + Σ unrealizedPnl
+// Persisted so the formula survives restarts without drift.
+let baseCapitalUsd = parseFloat(process.env["STARTING_CAPITAL_USD"] ?? "10000");
+
 // Restart recovery: restore open positions + portfolio baseline from journal.
 // Without this, a restart orphans open positions with no exit engine watching.
 if (db) {
   try {
+    // Base capital: persisted once, exact across restarts
+    const storedBase = await journal.getSystemState("base_capital_usd");
+    if (storedBase !== null) {
+      baseCapitalUsd = parseFloat(storedBase);
+    } else {
+      await journal.setSystemState("base_capital_usd", String(baseCapitalUsd));
+    }
+
     const restored = await journal.getOpenPositions(config.trading.mode);
     for (const p of restored) positionManager.restorePosition(p);
 
@@ -302,6 +320,25 @@ async function updateRegime(): Promise<void> {
 
 // ─── Main decision loop ───────────────────────────────────────────────────────
 let killSwitchAlerted = false;
+let pnlDayKey = utcDayKey(new Date());
+let pnlWeekKey = utcWeekKey(new Date());
+
+function utcDayKey(d: Date): string {
+  return d.toISOString().slice(0, 10);
+}
+/** ISO week key YYYY-Www — resets weekly PnL on Monday 00:00 UTC. */
+function utcWeekKey(d: Date): string {
+  const date = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+  const dayNum = (date.getUTCDay() + 6) % 7; // Mon=0
+  date.setUTCDate(date.getUTCDate() - dayNum + 3); // nearest Thursday
+  const isoYear = date.getUTCFullYear();
+  const jan4 = new Date(Date.UTC(isoYear, 0, 4));
+  const jan4DayNum = (jan4.getUTCDay() + 6) % 7;
+  const week1Thu = new Date(jan4);
+  week1Thu.setUTCDate(jan4.getUTCDate() - jan4DayNum + 3);
+  const week = 1 + Math.round((date.getTime() - week1Thu.getTime()) / (7 * 86_400_000));
+  return `${isoYear}-W${String(week).padStart(2, "0")}`;
+}
 
 async function decisionCycle(): Promise<void> {
   if (emergency.isKillSwitchActive()) {
@@ -322,8 +359,32 @@ async function decisionCycle(): Promise<void> {
   // 0.5 Evaluate matured shadow decisions (signal-quality evidence)
   await shadowTracker.evaluateDue();
 
-  // 1. Update portfolio from open positions
+  // 1. Portfolio: PnL window rollover (UTC), then mark-to-market
   const openPositions = positionManager.getOpenPositions();
+
+  // Rollover daily/weekly PnL windows (spec §36 — "daily loss" means daily)
+  const today = utcDayKey(new Date());
+  if (today !== pnlDayKey) {
+    pnlDayKey = today;
+    portfolio.dailyPnlUsd = 0;
+    log.info("Daily PnL window rolled", { day: today });
+  }
+  const thisWeek = utcWeekKey(new Date());
+  if (thisWeek !== pnlWeekKey) {
+    pnlWeekKey = thisWeek;
+    portfolio.weeklyPnlUsd = 0;
+  }
+
+  // Mark-to-market: unrealized swings now feed drawdown/loss gates immediately
+  const unrealizedTotal = openPositions.reduce((s, p) => s + p.unrealizedPnlUsd, 0);
+  portfolio.totalValueUsd = baseCapitalUsd + portfolio.allTimePnlUsd + unrealizedTotal;
+  if (portfolio.totalValueUsd > portfolio.peakValueUsd) {
+    portfolio.peakValueUsd = portfolio.totalValueUsd;
+  }
+  portfolio.currentDrawdownPct = portfolio.peakValueUsd > 0
+    ? Math.max(0, ((portfolio.peakValueUsd - portfolio.totalValueUsd) / portfolio.peakValueUsd) * 100)
+    : 0;
+
   portfolio.openPositions = openPositions.length;
   portfolio.allocatedUsd = positionManager.getTotalExposureUsd();
   portfolio.availableCapitalUsd = portfolio.totalValueUsd - portfolio.allocatedUsd;
@@ -384,21 +445,14 @@ async function decisionCycle(): Promise<void> {
           });
         }
 
-        // Realize PnL into portfolio
+        // Realize PnL into the PnL ledgers. totalValue/drawdown are NOT touched
+        // here — the mark-to-market formula in step 1 owns them (unrealized was
+        // already reflected; realized just moves it into allTimePnlUsd).
         const realizedPnl = position.unrealizedPnlUsd;
-        portfolio.totalValueUsd += realizedPnl;
         portfolio.dailyPnlUsd += realizedPnl;
         portfolio.weeklyPnlUsd += realizedPnl;
         portfolio.monthlyPnlUsd += realizedPnl;
         portfolio.allTimePnlUsd += realizedPnl;
-
-        // Track drawdown from peak
-        if (portfolio.totalValueUsd > portfolio.peakValueUsd) {
-          portfolio.peakValueUsd = portfolio.totalValueUsd;
-        }
-        portfolio.currentDrawdownPct = portfolio.peakValueUsd > 0
-          ? ((portfolio.peakValueUsd - portfolio.totalValueUsd) / portfolio.peakValueUsd) * 100
-          : 0;
 
         // Feed the performance tracker (drives sizing multipliers with shrinkage)
         performanceTracker.record({

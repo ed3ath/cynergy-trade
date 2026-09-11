@@ -59,3 +59,13 @@ jobs:
         run: npx tsx infra/scripts/migrate.ts
         env:
           DATABASE_URL: postgresql://trader:trader@localhost:5432/trader
+
+      - name: End-to-end: trader boots, self-migrates, persists snapshots
+        run: |
+          SERVER_PORT=3999 TRADING_MODE=PAPER timeout 75 npx tsx apps/trader/src/index.ts > trader.log 2>&1 || true
+          grep -q "Autonomous trader starting" trader.log
+          COUNT=$(node -e "const {Client}=require('pg');(async()=>{const c=new Client({connectionString:process.env.DATABASE_URL});await c.connect();const r=await c.query('SELECT COUNT(*)::int AS n FROM token_market_snapshots');console.log(r.rows[0].n);await c.end();})()")
+          echo "market snapshots: $COUNT"
+          if [ "$COUNT" -eq 0 ]; then echo "FAIL: no snapshots persisted"; exit 1; fi
+        env:
+          DATABASE_URL: postgresql://trader:trader@localhost:5432/trader
