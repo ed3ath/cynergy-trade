@@ -9,8 +9,6 @@ import type { ProvidersConfig } from "@autonomous-trader/shared";
 import type { ProviderRegistry } from "./interfaces.js";
 import {
   MockDiscoveryProvider,
-  MockMarketDataProvider,
-  MockLiquidityProvider,
   MockSecurityProvider,
   MockHolderAnalyticsProvider,
   MockSwapQuoteProvider,
@@ -26,6 +24,7 @@ import { CompositeSecurityProvider } from "./solana/composite-security.js";
 import { SolanaRpcProvider } from "./solana/solana-rpc-provider.js";
 import { RaydiumDiscoveryProvider } from "./solana/raydium-discovery.js";
 import { BirdeyeHolderProvider } from "./solana/birdeye-holder.js";
+import { DexScreenerProvider } from "./solana/dexscreener-provider.js";
 
 export function createProviderRegistry(config: ProvidersConfig): ProviderRegistry {
   const heliusKey = config.helius.apiKey;
@@ -39,11 +38,12 @@ export function createProviderRegistry(config: ProvidersConfig): ProviderRegistr
     ? new SolanaRpcProvider(`https://mainnet.helius-rpc.com/?api-key=${heliusKey}`)
     : new MockChainDataProvider();
 
-  // ── Market + liquidity: Birdeye when key present ───────────────────────────
+  // ── Market + liquidity: Birdeye when key present, else DexScreener (free, real) ──
   const birdeye = birdeyeKey && config.birdeye.enabled ? new BirdeyeMarketProvider(birdeyeKey) : null;
+  const dexscreener = new DexScreenerProvider();
 
-  const market = birdeye ?? new MockMarketDataProvider();
-  const liquidity = birdeye ?? new MockLiquidityProvider();
+  const market = birdeye ?? dexscreener;
+  const liquidity = birdeye ?? dexscreener;
 
   // ── Security: composite GoPlus + Birdeye when available ────────────────────
   const securityProviders = [goplusEnabled ? new GoPlusSecurityProvider() : null].filter(

@@ -61,3 +61,28 @@ describe.skipIf(!(await networkAvailable()))("live provider integration", () => 
     expect(typeof balance).toBe("bigint");
   }, 30_000);
 });
+
+describe.skipIf(!(await networkAvailable()))("live dexscreener integration", () => {
+  it("returns real market + liquidity for BONK", async () => {
+    const { DexScreenerProvider } = await import("@autonomous-trader/providers");
+    const p = new DexScreenerProvider();
+
+    const market = await p.getMarketSnapshot(BONK, "solana");
+    expect(market.provider).toBe("dexscreener");
+    expect(market.priceUsd).toBeGreaterThan(0);
+    expect(market.volumeUsd24h).toBeGreaterThan(10_000); // BONK always trades
+    expect(market.priceChange24h).not.toBe(0);
+    expect(market.confidence).toBeGreaterThanOrEqual(0.5);
+
+    const liq = await p.getLiquiditySnapshot(BONK, "solana");
+    expect(liq.liquidityUsd).toBeGreaterThan(10_000);
+    expect(liq.poolAddress).toMatch(/^[1-9A-HJ-NP-Za-km-z]{32,44}$/);
+    expect(liq.poolAgeMs).toBeGreaterThan(365 * 24 * 3600 * 1000); // BONK pair is old
+  });
+
+  it("unknown mint throws (missing data → UNKNOWN, never SAFE)", async () => {
+    const { DexScreenerProvider } = await import("@autonomous-trader/providers");
+    const p = new DexScreenerProvider();
+    await expect(p.getMarketSnapshot("11111111111111111111111111111111", "solana")).rejects.toThrow();
+  });
+});
