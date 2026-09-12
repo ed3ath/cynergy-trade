@@ -1,0 +1,342 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cynergy Trade Monitor</title>
+<style>
+  /* Reference palette (dataviz skill) — roles only, light+dark via both scopes */
+  :root { color-scheme: light; }
+  :root[data-theme="dark"] { color-scheme: dark; }
+  body {
+    --page:        #f9f9f7;  --surface:   #fcfcfb;
+    --ink:         #0b0b0b;  --ink-2:     #52514e;  --muted: #898781;
+    --grid:        #e1e0d9;  --baseline:  #c3c2b7;
+    --series-1:    #2a78d6;
+    --good:        #006300;  --warning:   #fab219;  --critical: #d03b3b;
+    --ring:        rgba(11,11,11,0.10);
+  }
+  @media (prefers-color-scheme: dark) {
+    body:not([data-theme="light"]) {
+      --page:      #0d0d0d;  --surface:   #1a1a19;
+      --ink:       #ffffff;  --ink-2:     #c3c2b7;  --muted: #898781;
+      --grid:      #2c2c2a;  --baseline:  #383835;
+      --series-1:  #3987e5;
+      --good:      #0ca30c;  --critical:  #d03b3b;
+      --ring:      rgba(255,255,255,0.10);
+    }
+  }
+  body[data-theme="dark"] {
+    --page:      #0d0d0d;  --surface:   #1a1a19;
+    --ink:       #ffffff;  --ink-2:     #c3c2b7;  --muted: #898781;
+    --grid:      #2c2c2a;  --baseline:  #383835;
+    --series-1:  #3987e5;
+    --good:      #0ca30c;  --critical:  #d03b3b;
+    --ring:      rgba(255,255,255,0.10);
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 20px; background: var(--page); color: var(--ink);
+    font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  header { display: flex; align-items: baseline; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; }
+  header h1 { font-size: 16px; margin: 0; }
+  header .sub { color: var(--ink-2); }
+  #banner {
+    display: none; align-items: center; gap: 8px; padding: 8px 12px; margin-bottom: 14px;
+    border: 1px solid var(--critical); border-radius: 8px; color: var(--critical); font-weight: 600;
+  }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 14px; }
+  .tile {
+    background: var(--surface); border: 1px solid var(--ring); border-radius: 10px; padding: 12px 14px;
+  }
+  .tile .label { color: var(--ink-2); font-size: 12px; }
+  .tile .value { font-size: 22px; font-weight: 600; margin-top: 2px; }
+  .tile.hero .value { font-size: 44px; }
+  .tile .delta { font-size: 12px; margin-top: 2px; }
+  .delta.up   { color: var(--good); }
+  .delta.down { color: var(--critical); }
+  .chip { display: inline-flex; align-items: center; gap: 6px; }
+  .chip .dot { width: 8px; height: 8px; border-radius: 50%; }
+  section {
+    background: var(--surface); border: 1px solid var(--ring); border-radius: 10px;
+    padding: 14px; margin-bottom: 14px;
+  }
+  section h2 { font-size: 13px; color: var(--ink-2); margin: 0 0 10px; font-weight: 600; }
+  #equity-wrap { position: relative; }
+  #equity-svg { width: 100%; height: 240px; display: block; }
+  #equity-svg text { font: 11px system-ui, sans-serif; fill: var(--muted); }
+  #tooltip {
+    position: absolute; display: none; pointer-events: none; background: var(--surface);
+    border: 1px solid var(--ring); border-radius: 8px; padding: 6px 10px; box-shadow: 0 2px 8px rgba(0,0,0,.15);
+    white-space: nowrap; z-index: 2;
+  }
+  #tooltip .v { font-weight: 600; }
+  #tooltip .t { color: var(--ink-2); font-size: 11px; }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th { text-align: left; color: var(--muted); font-weight: 500; font-size: 11px; padding: 4px 8px; border-bottom: 1px solid var(--baseline); }
+  td { padding: 5px 8px; border-bottom: 1px solid var(--grid); }
+  td.num, th.num { text-align: right; }
+  .mono { font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
+  details { margin-top: 8px; }
+  summary { color: var(--ink-2); font-size: 12px; cursor: pointer; }
+  .refreshing { opacity: .55; transition: opacity .2s; }
+  .empty { color: var(--muted); padding: 8px; }
+  @media (max-width: 600px) { body { padding: 12px; } .tile.hero .value { font-size: 34px; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Cynergy Trade Monitor</h1>
+  <span class="sub" id="mode-chip"></span>
+  <span class="sub" id="uptime"></span>
+</header>
+<div id="banner"><span>⛔</span><span id="banner-text"></span></div>
+
+<div class="tiles" id="tiles"></div>
+
+<section>
+  <h2>Equity — total value over time (paper)</h2>
+  <div id="equity-wrap">
+    <svg id="equity-svg" viewBox="0 0 800 240" preserveAspectRatio="none" role="img" aria-label="Equity curve"></svg>
+    <div id="tooltip"></div>
+  </div>
+  <details><summary>Table view</summary><div id="equity-table"></div></details>
+</section>
+
+<section>
+  <h2>Open positions</h2>
+  <div id="positions"></div>
+</section>
+
+<section>
+  <h2>Watchlist</h2>
+  <div id="watchlist"></div>
+</section>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const fmtUsd = (n) => "$" + n.toLocaleString("en-US", { maximumFractionDigits: 2 });
+const fmtPct = (n) => (n >= 0 ? "+" : "") + n.toFixed(2) + "%";
+const cssVar = (name) => getComputedStyle(document.body).getPropertyValue(name).trim();
+
+function h(tag, attrs, ...children) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (k === "class") el.className = v;
+    else if (k === "text") el.textContent = v;
+    else if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
+    else el.setAttribute(k, v);
+  }
+  for (const c of children) if (c != null) el.append(c);
+  return el;
+}
+function tile(label, value, delta) {
+  const t = h("div", { class: "tile" + (delta && delta.hero ? " hero" : "") },
+    h("div", { class: "label", text: label }),
+    h("div", { class: "value", text: value }));
+  if (delta) t.append(h("div", { class: "delta " + delta.cls, text: delta.text }));
+  return t;
+}
+
+// ── /status + /metrics ────────────────────────────────────────────────────────
+function parseMetrics(text) {
+  const m = {};
+  for (const line of text.split("\n")) {
+    const match = /^([a-z_]+)\s+(-?[0-9.eE+]+)$/.exec(line.trim());
+    if (match) m[match[1]] = parseFloat(match[2]);
+  }
+  return m;
+}
+function regimeChip(regime) {
+  const color = { RISK_ON: "good", NEUTRAL: "warning", VOLATILE: "warning", RISK_OFF: "critical" }[regime] || "muted";
+  return h("span", { class: "chip" },
+    h("span", { class: "dot", style: `background: var(--${color === "muted" ? "muted" : color})` }),
+    h("span", { text: regime }));
+}
+function relTime(iso) {
+  const mins = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 60000));
+  return mins < 60 ? mins + "m ago" : Math.round(mins / 60) + "h ago";
+}
+
+async function refreshStatus() {
+  document.body.classList.add("refreshing");
+  try {
+    const [status, metricsText] = await Promise.all([
+      fetch("/status").then((r) => r.json()),
+      fetch("/metrics").then((r) => r.text()),
+    ]);
+    const m = parseMetrics(metricsText);
+    const p = status.portfolio;
+
+    $("mode-chip").replaceChildren(
+      regimeChip(status.regime.current),
+      h("span", { text: ` · ${status.emergency.tradingMode} · v${status.version}` }));
+    const up = Math.floor(status.uptimeMs / 60000);
+    $("uptime").textContent = up < 60 ? `up ${up}m` : `up ${Math.floor(up / 60)}h ${up % 60}m`;
+
+    const banner = $("banner");
+    if (status.emergency.killSwitch || status.emergency.stopNewEntries) {
+      $("banner-text").textContent = status.emergency.killSwitch
+        ? "Kill switch ACTIVE — trading halted"
+        : "New entries stopped — exits only";
+      banner.style.display = "flex";
+    } else banner.style.display = "none";
+
+    const daily = p.dailyPnlUsd;
+    const tiles = $("tiles");
+    tiles.replaceChildren(
+      tile("Total value", fmtUsd(p.totalValueUsd), { hero: true, cls: daily >= 0 ? "up" : "down", text: `daily ${fmtUsd(daily)}` }),
+      tile("Drawdown", p.currentDrawdownPct.toFixed(3) + "%"),
+      tile("Open positions", String(p.openPositions)),
+      tile("Available", fmtUsd(p.availableCapitalUsd)),
+      tile("All-time PnL", fmtUsd(p.allTimePnlUsd), { cls: p.allTimePnlUsd >= 0 ? "up" : "down", text: `weekly ${fmtUsd(p.weeklyPnlUsd)}` }),
+      tile("Shadow win rate", m.shadow_signal_win_rate != null ? m.shadow_signal_win_rate.toFixed(1) + "%" : "—",
+        { cls: (m.shadow_avg_return_pct || 0) >= 0 ? "up" : "down",
+          text: m.shadow_avg_return_pct != null ? `avg ${fmtPct(m.shadow_avg_return_pct)}` : "" }),
+    );
+
+    const pos = $("positions");
+    if (!status.positions.length) pos.replaceChildren(h("div", { class: "empty", text: "No open positions" }));
+    else {
+      const tbl = h("table");
+      tbl.append(h("tr", {}, h("th", { text: "Token" }), h("th", { class: "num", text: "Size" }),
+        h("th", { class: "num", text: "PnL %" }), h("th", { class: "num", text: "PnL $" }), h("th", { text: "Opened" })));
+      for (const x of status.positions) {
+        tbl.append(h("tr", {},
+          h("td", { class: "mono", text: x.tokenAddress.slice(0, 6) + "…" + x.tokenAddress.slice(-4) }),
+          h("td", { class: "num", text: fmtUsd(x.sizeUsd) }),
+          h("td", { class: "num", text: fmtPct(x.unrealizedPnlPct), style: `color: var(--${x.unrealizedPnlPct >= 0 ? "good" : "critical"})` }),
+          h("td", { class: "num", text: fmtUsd(x.unrealizedPnlUsd) }),
+          h("td", { text: relTime(x.openedAt) })));
+      }
+      pos.replaceChildren(tbl);
+    }
+
+    const wl = $("watchlist");
+    if (!status.watchlist.length) wl.replaceChildren(h("div", { class: "empty", text: "Watchlist empty" }));
+    else {
+      const tbl = h("table");
+      tbl.append(h("tr", {}, h("th", { text: "Token" }), h("th", { class: "num", text: "Score" }), h("th", { text: "Status" })));
+      for (const x of status.watchlist) {
+        tbl.append(h("tr", {},
+          h("td", { class: "mono", text: x.token.slice(0, 6) + "…" + x.token.slice(-4) }),
+          h("td", { class: "num", text: String(x.score) }),
+          h("td", { text: x.status })));
+      }
+      wl.replaceChildren(tbl);
+    }
+  } catch (e) {
+    $("mode-chip").textContent = "monitor unreachable";
+  } finally {
+    document.body.classList.remove("refreshing");
+  }
+}
+
+// ── /history → equity line ────────────────────────────────────────────────────
+let history = [];
+async function refreshHistory() {
+  try {
+    history = await fetch("/history").then((r) => r.json());
+  } catch { /* keep last frame */ }
+  drawEquity();
+}
+function niceTicks(min, max, count) {
+  const span = max - min || 1;
+  const step = Math.pow(10, Math.floor(Math.log10(span / count)));
+  for (const m of [1, 2, 5, 10]) if (span / (step * m) <= count) { return { step: step * m }; }
+  return { step };
+}
+function drawEquity() {
+  const svg = $("equity-svg");
+  const W = 800, H = 240, L = 56, R = 14, T = 14, B = 26;
+  svg.replaceChildren();
+  if (history.length < 2) {
+    const t = h("text", { x: W / 2, y: H / 2, "text-anchor": "middle" });
+    t.textContent = "collecting data…";
+    svg.append(t);
+    return;
+  }
+  const vals = history.map((d) => d.totalValueUsd);
+  let lo = Math.min(...vals), hi = Math.max(...vals);
+  const pad = (hi - lo || hi * 0.01) * 0.08;
+  lo -= pad; hi += pad;
+  const x = (i) => L + (i / (history.length - 1)) * (W - L - R);
+  const y = (v) => T + (1 - (v - lo) / (hi - lo)) * (H - T - B);
+
+  // gridlines + y ticks
+  const { step } = niceTicks(lo, hi, 4);
+  for (let v = Math.ceil(lo / step) * step; v <= hi; v += step) {
+    svg.append(h("line", { x1: L, x2: W - R, y1: y(v), y2: y(v), stroke: cssVar("--grid"), "stroke-width": 1 }));
+    const t = h("text", { x: L - 8, y: y(v) + 4, "text-anchor": "end" });
+    t.textContent = Math.round(v).toLocaleString("en-US");
+    svg.append(t);
+  }
+  // x ticks (time)
+  for (let k = 0; k <= 4; k++) {
+    const i = Math.round((k / 4) * (history.length - 1));
+    const t = h("text", { x: x(i), y: H - 8, "text-anchor": k === 0 ? "start" : k === 4 ? "end" : "middle" });
+    t.textContent = new Date(history[i].at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    svg.append(t);
+  }
+  // area wash (10%) + 2px line
+  const line = history.map((d, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(d.totalValueUsd).toFixed(1)}`).join("");
+  svg.append(h("path", { d: `${line}L${x(history.length - 1)},${y(lo)}L${x(0)},${y(lo)}Z`, fill: cssVar("--series-1"), opacity: 0.1 }));
+  svg.append(h("path", { d: line, fill: "none", stroke: cssVar("--series-1"), "stroke-width": 2, "stroke-linejoin": "round", "stroke-linecap": "round" }));
+  // end dot (r4 + 2px surface ring) + end label
+  const last = history[history.length - 1];
+  svg.append(h("circle", { cx: x(history.length - 1), cy: y(last.totalValueUsd), r: 6, fill: cssVar("--surface") }));
+  svg.append(h("circle", { cx: x(history.length - 1), cy: y(last.totalValueUsd), r: 4, fill: cssVar("--series-1") }));
+  const el = h("text", { x: x(history.length - 1) - 6, y: y(last.totalValueUsd) - 10, "text-anchor": "end" });
+  el.textContent = fmtUsd(last.totalValueUsd);
+  svg.append(el);
+
+  // crosshair + tooltip
+  const cross = h("line", { y1: T, y2: H - B, stroke: cssVar("--baseline"), "stroke-width": 1, visibility: "hidden" });
+  const dot = h("circle", { r: 4, fill: cssVar("--series-1"), stroke: cssVar("--surface"), "stroke-width": 2, visibility: "hidden" });
+  svg.append(cross, dot);
+  const overlay = h("rect", { x: L, y: T, width: W - L - R, height: H - T - B, fill: "transparent" });
+  overlay.style.cursor = "crosshair";
+  overlay.addEventListener("pointermove", (ev) => {
+    const rect = svg.getBoundingClientRect();
+    const px = ((ev.clientX - rect.left) / rect.width) * W;
+    const i = Math.max(0, Math.min(history.length - 1, Math.round(((px - L) / (W - L - R)) * (history.length - 1))));
+    const d = history[i];
+    cross.setAttribute("x1", x(i)); cross.setAttribute("x2", x(i)); cross.setAttribute("visibility", "visible");
+    dot.setAttribute("cx", x(i)); dot.setAttribute("cy", y(d.totalValueUsd)); dot.setAttribute("visibility", "visible");
+    const tip = $("tooltip");
+    tip.replaceChildren(h("div", { class: "v", text: fmtUsd(d.totalValueUsd) }),
+      h("div", { class: "t", text: new Date(d.at).toLocaleString() + ` · dd ${d.drawdownPct.toFixed(3)}%` }));
+    tip.style.display = "block";
+    const wrap = $("equity-wrap").getBoundingClientRect();
+    let tx = ev.clientX - wrap.left + 14, ty = ev.clientY - wrap.top - 10;
+    if (tx + 170 > wrap.width) tx -= 190;
+    tip.style.left = tx + "px"; tip.style.top = ty + "px";
+  });
+  overlay.addEventListener("pointerleave", () => {
+    cross.setAttribute("visibility", "hidden"); dot.setAttribute("visibility", "hidden");
+    $("tooltip").style.display = "none";
+  });
+  svg.append(overlay);
+
+  // table view
+  const tbl = h("table");
+  tbl.append(h("tr", {}, h("th", { text: "Time" }), h("th", { class: "num", text: "Total value" }), h("th", { class: "num", text: "Drawdown" })));
+  const stride = Math.max(1, Math.floor(history.length / 24));
+  for (let i = 0; i < history.length; i += stride) {
+    const d = history[i];
+    tbl.append(h("tr", {},
+      h("td", { text: new Date(d.at).toLocaleTimeString() }),
+      h("td", { class: "num", text: fmtUsd(d.totalValueUsd) }),
+      h("td", { class: "num", text: d.drawdownPct.toFixed(3) + "%" })));
+  }
+  $("equity-table").replaceChildren(tbl);
+}
+
+refreshStatus(); refreshHistory();
+setInterval(refreshStatus, 10_000);
+setInterval(refreshHistory, 60_000);
+</script>
+</body>
+</html>

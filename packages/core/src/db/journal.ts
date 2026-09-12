@@ -322,6 +322,30 @@ export class JournalRepository {
   }
 
   // ─── Portfolio snapshots ───────────────────────────────────────────────────
+  /** Equity-curve points (oldest first) for a mode — feeds the dashboard. */
+  async getPortfolioHistory(
+    mode: "PAPER" | "SHADOW" | "LIVE",
+    limit = 500,
+  ): Promise<Array<{ at: string; totalValueUsd: number; drawdownPct: number }>> {
+    const { rows } = await this.db.query<{
+      total_value_usd: string;
+      drawdown_pct: string | null;
+      snapshot_at: Date;
+    }>(
+      `SELECT total_value_usd, drawdown_pct, snapshot_at FROM (
+         SELECT total_value_usd, drawdown_pct, snapshot_at
+         FROM portfolio_snapshots WHERE mode = $1
+         ORDER BY snapshot_at DESC LIMIT $2
+       ) recent ORDER BY snapshot_at ASC`,
+      [mode, limit],
+    );
+    return rows.map((r) => ({
+      at: new Date(r.snapshot_at).toISOString(),
+      totalValueUsd: parseFloat(r.total_value_usd),
+      drawdownPct: r.drawdown_pct !== null ? parseFloat(r.drawdown_pct) : 0,
+    }));
+  }
+
   async recordPortfolioSnapshot(snap: PortfolioSnapshot, mode: "PAPER" | "SHADOW" | "LIVE"): Promise<void> {
     await this.db.query(
       `INSERT INTO portfolio_snapshots

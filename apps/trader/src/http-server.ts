@@ -46,8 +46,12 @@ export function startHttpServer(opts: {
   getStatus: () => StatusPayload;
   getMetrics: () => Record<string, number>;
   getReport?: () => unknown;
+  /** Equity-curve points for GET /history. */
+  getHistory?: () => Promise<unknown>;
+  /** Preloaded dashboard HTML served at GET /. */
+  dashboardHtml?: string | undefined;
 }): { close: () => void } {
-  const { port, host, authToken, emergency, logger, getStatus, getMetrics, getReport } = opts;
+  const { port, host, authToken, emergency, logger, getStatus, getMetrics, getReport, getHistory, dashboardHtml } = opts;
   const startedAt = Date.now();
 
   const server = createServer((req, res) => {
@@ -72,6 +76,18 @@ export function startHttpServer(opts: {
       }
 
       // ── Routes ──────────────────────────────────────────────────────────────
+      if (req.method === "GET" && (path === "/" || path === "/index.html")) {
+        if (!dashboardHtml) return respond(res, 404, { error: "dashboard not bundled" });
+        res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+        res.end(dashboardHtml);
+        return;
+      }
+
+      if (req.method === "GET" && path === "/history") {
+        if (!getHistory) return respond(res, 404, { error: "history not enabled" });
+        return respond(res, 200, await getHistory());
+      }
+
       if (req.method === "GET" && path === "/health") {
         return respond(res, 200, { status: "ok", uptimeMs: Date.now() - startedAt });
       }

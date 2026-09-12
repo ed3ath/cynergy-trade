@@ -33,6 +33,7 @@ import {
   SolPriceSampler,
   type RegimeResult,
 } from "@autonomous-trader/core";
+import { readFileSync } from "node:fs";
 import {
   createProviderRegistry,
 } from "@autonomous-trader/providers";
@@ -646,6 +647,14 @@ async function decisionCycle(): Promise<void> {
 
 // ─── HTTP monitoring + emergency control ──────────────────────────────────────
 const { startHttpServer } = await import("./http-server.js");
+function loadDashboardHtml(): string | undefined {
+  try {
+    return readFileSync(new URL("../public/dashboard.html", import.meta.url), "utf8");
+  } catch {
+    log.warn("dashboard.html not found — GET / disabled");
+    return undefined;
+  }
+}
 const monitorToken = process.env["MONITOR_TOKEN"];
 const httpServerOpts: Parameters<typeof startHttpServer>[0] = {
   port: config.server.port,
@@ -696,6 +705,11 @@ const httpServerOpts: Parameters<typeof startHttpServer>[0] = {
     reportTracker, portfolio, positionManager.getOpenPositions(),
     performanceTracker, config.trading.mode,
   ),
+  getHistory: () =>
+    db
+      ? (journal as JournalRepository).getPortfolioHistory(config.trading.mode, 500)
+      : Promise.resolve([]),
+  dashboardHtml: loadDashboardHtml(),
 };
 if (monitorToken) httpServerOpts.authToken = monitorToken;
 const httpServer = startHttpServer(httpServerOpts);
