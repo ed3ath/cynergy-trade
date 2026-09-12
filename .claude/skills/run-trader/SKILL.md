@@ -41,5 +41,5 @@ across restarts when postgres is up.
 
 ## NEVER
 
-- Do not set `TRADING_MODE=LIVE` casually — wallet signing is still a stub (ponytail) and the idempotency guard is in-memory.
+- Do not set `TRADING_MODE=LIVE` casually — follow the LIVE checklist in `docs/deployment.md` first.
 - Do not resubmit a transaction with UNKNOWN status — investigate the signature first.
