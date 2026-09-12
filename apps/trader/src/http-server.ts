@@ -132,6 +132,13 @@ export function startHttpServer(opts: {
 }
 
 function respond(res: ServerResponse, code: number, body: unknown): void {
+  // Stringify BEFORE writing headers: pg bigint columns arrive as BigInt and
+  // JSON.stringify throws on it — a monitor GET must never kill the process.
+  const payload = JSON.stringify(body, (_k, v) => (typeof v === "bigint" ? v.toString() : v));
+  if (res.headersSent) {
+    res.end(payload);
+    return;
+  }
   res.writeHead(code, { "content-type": "application/json" });
-  res.end(JSON.stringify(body));
+  res.end(payload);
 }
