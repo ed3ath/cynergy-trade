@@ -445,6 +445,9 @@ async function decisionCycle(): Promise<void> {
           });
         }
 
+        // Walk token SM to CLOSED and queue cooldown-gated watchlist re-entry
+        scanner.markExited(position.tokenAddress, exitSignal.reason);
+
         // Realize PnL into the PnL ledgers. totalValue/drawdown are NOT touched
         // here — the mark-to-market formula in step 1 owns them (unrealized was
         // already reflected; realized just moves it into allTimePnlUsd).

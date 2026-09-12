@@ -38,6 +38,8 @@ export interface ScannerConfig {
   refreshIntervalMs: number;  // how often to refresh watchlist candidates
   maxWatchlistSize: number;
   maxCandidateAgeMs: number;  // archive candidates older than this
+  /** Cooldown before an exited token can re-enter the watchlist (default 30min). */
+  reentryCooldownMs?: number;
 }
 
 /** Persistence sink for time-series snapshots — the backtester's dataset. */
@@ -57,6 +59,7 @@ export class Scanner {
   private refreshTimer?: ReturnType<typeof setInterval>;
   private unsubscribeDiscovery?: () => void;
   private lastPersistedAt = new Map<string, number>(); // token → epoch ms
+  private readonly reentryQueue = new Map<string, number>(); // token → eligible-at epoch ms
 
   constructor(
     private readonly config: ScannerConfig,
@@ -119,6 +122,25 @@ export class Scanner {
   /** Called by execution layer when a position is entered. */
   markEntered(tokenAddress: string): void {
     this.transition(tokenAddress, "ENTERED");
+  }
+
+  /**
+   * Called when a position closes — walks the token SM to CLOSED and queues
+   * it for watchlist re-entry after a cooldown. Security-deterioration exits
+   * park the token at REJECTED (never re-entered).
+   */
+  markExited(tokenAddress: string, reason: string): void {
+    if (reason.startsWith("Security")) {
+      this.transition(tokenAddress, "REJECTED"); // ENTERED → REJECTED (terminal)
+      return;
+    }
+    // Nothing else advances the token SM past ENTERED, so walk the trade tail here.
+    this.transition(tokenAddress, "EXITING");
+    this.transition(tokenAddress, "CLOSED");
+    this.reentryQueue.set(
+      tokenAddress,
+      Date.now() + (this.config.reentryCooldownMs ?? 30 * 60_000),
+    );
   }
 
   // ─── Internal pipeline ──────────────────────────────────────────────────────
@@ -232,6 +254,24 @@ export class Scanner {
 
     // Archive stale candidates
     this.archiveStale();
+
+    // Re-queue exited tokens whose cooldown has elapsed
+    this.drainReentryQueue();
+  }
+
+  /** CLOSED → WATCHLIST for exited tokens past cooldown; re-filters/scores on next refresh. */
+  private drainReentryQueue(): void {
+    const now = Date.now();
+    for (const [addr, eligibleAt] of this.reentryQueue) {
+      if (now < eligibleAt) continue;
+      if (this.getWatchlist().length >= this.config.maxWatchlistSize) break; // full — retry next tick
+      this.reentryQueue.delete(addr);
+      const was = this.candidates.get(addr)?.status;
+      this.transition(addr, "WATCHLIST"); // no-ops unless CLOSED
+      if (this.candidates.get(addr)?.status === "WATCHLIST" && was === "CLOSED") {
+        this.logger.info("Exited token re-entered watchlist", { token: addr });
+      }
+    }
   }
 
   private async fetchAllData(candidate: TokenCandidate): Promise<void> {

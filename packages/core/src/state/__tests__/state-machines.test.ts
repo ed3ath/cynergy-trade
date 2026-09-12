@@ -51,6 +51,22 @@ describe("TokenStateMachine", () => {
     expect(sm.canTransition("DISCOVERED")).toBe(false);
     expect(() => sm.transition("DISCOVERED")).toThrow();
   });
+
+  it("CLOSED can re-enter via WATCHLIST (full trade cycle)", () => {
+    const sm = new TokenStateMachine();
+    for (const to of ["OBSERVING", "SCREENING", "ELIGIBLE", "WATCHLIST",
+      "TRADE_CANDIDATE", "ENTERED", "EXITING", "CLOSED", "WATCHLIST",
+      "TRADE_CANDIDATE", "ENTERED", "EXITING", "CLOSED"] as const) {
+      sm.transition(to);
+    }
+    expect(sm.status).toBe("CLOSED");
+    expect(sm.getHistory().filter((h) => h.to === "WATCHLIST")).toHaveLength(2);
+  });
+
+  it("REJECTED cannot re-enter WATCHLIST", () => {
+    const sm = new TokenStateMachine("REJECTED");
+    expect(sm.canTransition("WATCHLIST")).toBe(false);
+  });
 });
 
 describe("OrderStateMachine", () => {

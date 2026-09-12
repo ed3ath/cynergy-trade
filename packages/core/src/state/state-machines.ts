@@ -15,7 +15,7 @@ const TRANSITIONS: Record<TokenLifecycleStatus, TokenLifecycleStatus[]> = {
   ENTERED:         ["OPEN", "EXITING", "REJECTED"],
   OPEN:            ["EXITING"],
   EXITING:         ["CLOSED"],
-  CLOSED:          ["ARCHIVED"],
+  CLOSED:          ["WATCHLIST", "ARCHIVED"], // WATCHLIST = re-entry after cooldown (scanner-gated)
   REJECTED:        ["ARCHIVED"],
   ARCHIVED:        [],
 };
