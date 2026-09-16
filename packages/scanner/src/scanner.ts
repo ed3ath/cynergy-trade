@@ -125,6 +125,20 @@ export class Scanner {
   }
 
   /**
+   * Manually inject a token into the pipeline (TRADER_SEED_TOKENS) — exercises
+   * the full loop on known liquid tokens when discovery finds only dust.
+   * Same path as a real discovery event.
+   */
+  seedToken(tokenAddress: string, chain: TokenDiscoveredEvent["chain"]): void {
+    void this.handleDiscovery({
+      tokenAddress,
+      chain,
+      firstSeenAt: new Date(),
+      source: "seed",
+    });
+  }
+
+  /**
    * Called when a position closes — walks the token SM to CLOSED and queues
    * it for watchlist re-entry after a cooldown. Security-deterioration exits
    * park the token at REJECTED (never re-entered).

@@ -54,6 +54,11 @@ const config = loadConfig();
 configureLogger({ level: config.log.level, pretty: config.log.pretty ?? true });
 const log = createLogger({ service: "trader", mode: config.trading.mode });
 
+// TON support is paper-only: no verified TON quote/execution/signing path exists yet
+if (config.trading.chain === "ton" && config.trading.mode !== "PAPER") {
+  throw new Error(`TRADING_CHAIN=ton supports PAPER mode only (got ${config.trading.mode})`);
+}
+
 log.info("Autonomous trader starting", {
   mode: config.trading.mode,
   chain: config.trading.chain,
@@ -89,11 +94,13 @@ await emergency.initialize();
 await journal.recordSystemEvent("STARTUP", "Trader starting", { mode: config.trading.mode });
 
 // ─── Providers — real adapters when API keys set, mocks otherwise ───────────
-const registry = createProviderRegistry(config.providers);
+const registry = createProviderRegistry(config.providers, config.trading.chain);
 const { discovery, marketData: market, liquidity, security, holders, quote, execution, monitoring, chain } = registry;
 
-const usingRealData = Boolean(config.providers.helius.apiKey || config.providers.birdeye.apiKey);
+const usingRealData = Boolean(config.providers.helius.apiKey || config.providers.birdeye.apiKey)
+  || config.trading.chain === "ton"; // tonapi/geckoterminal/dexscreener are real, no keys needed
 log.info("Provider registry created", {
+  chain: config.trading.chain,
   helius: Boolean(config.providers.helius.apiKey),
   birdeye: Boolean(config.providers.birdeye.apiKey),
   goplus: config.providers.goplus.enabled,
@@ -251,10 +258,10 @@ if (db) {
       await journal.setSystemState("base_capital_usd", String(baseCapitalUsd));
     }
 
-    const restored = await journal.getOpenPositions(config.trading.mode);
+    const restored = await journal.getOpenPositions(config.trading.mode, config.trading.chain);
     for (const p of restored) positionManager.restorePosition(p);
 
-    const snap = await journal.getLatestPortfolioSnapshot(config.trading.mode);
+    const snap = await journal.getLatestPortfolioSnapshot(config.trading.mode, config.trading.chain);
     if (snap) {
       portfolio = { ...snap, snapshotAt: new Date() };
     }
@@ -287,24 +294,35 @@ if (db) {
 // ─── Market regime (spec §48) ─────────────────────────────────────────────────
 const WSOL = "So11111111111111111111111111111111111111112";
 const USDC = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+/** stTON (bemo) — DexScreener-indexed TON price proxy, live-verified 2026-09-16. */
+const TON_REF = "EQDNhy-nxYFgUqzfUzImBEP67JqsyMIcyk2S5_RwNNEYku0k";
 const solSampler = new SolPriceSampler(60, 60_000);
 let currentRegime: RegimeResult = {
   regime: "UNKNOWN", solTrendPct1h: 0, volatilityPct: 0, confidence: 0, reasons: ["not yet sampled"],
 };
 
-/** Sample SOL/USD from a Jupiter quote (free, no key) and reclassify regime. */
+/**
+ * Sample the chain's flagship asset price and reclassify regime.
+ * Solana: SOL/USD via Jupiter quote (free, no key).
+ * TON: stTON priceUsd via DexScreener (tracks TON; no quote provider exists).
+ */
 async function updateRegime(): Promise<void> {
   try {
-    const q = await quote.getQuote({
-      inputMint: WSOL, outputMint: USDC,
-      amount: 1_000_000_000n, // 1 SOL
-      slippageBps: 100,
-      chain: "solana",
-    });
-    // outputAmount is 6-dec USDC for 1 SOL → price = raw/1e6
-    solSampler.add(Number(q.outputAmount) / 1e6);
+    if (config.trading.chain === "ton") {
+      const snap = await market.getMarketSnapshot(TON_REF, "ton");
+      solSampler.add(snap.priceUsd);
+    } else {
+      const q = await quote.getQuote({
+        inputMint: WSOL, outputMint: USDC,
+        amount: 1_000_000_000n, // 1 SOL
+        slippageBps: 100,
+        chain: "solana",
+      });
+      // outputAmount is 6-dec USDC for 1 SOL → price = raw/1e6
+      solSampler.add(Number(q.outputAmount) / 1e6);
+    }
   } catch {
-    // quote failure — keep last samples; UNKNOWN-ish handling via confidence
+    // price failure — keep last samples; UNKNOWN-ish handling via confidence
   }
 
   currentRegime = classifyRegime({
@@ -540,7 +558,7 @@ async function decisionCycle(): Promise<void> {
       }
 
       // Journal the strategy decision with full feature snapshot for reproducibility
-      await journal.recordStrategyDecision(strategyDecision, candidate.features);
+      await journal.recordStrategyDecision(strategyDecision, candidate.features, candidate.chain);
 
       // Build intent
       const intent: TradeIntent = {
@@ -707,7 +725,7 @@ const httpServerOpts: Parameters<typeof startHttpServer>[0] = {
   ),
   getHistory: () =>
     db
-      ? (journal as JournalRepository).getPortfolioHistory(config.trading.mode, 500)
+      ? (journal as JournalRepository).getPortfolioHistory(config.trading.mode, 500, config.trading.chain)
       : Promise.resolve([]),
   dashboardHtml: loadDashboardHtml(),
 };
@@ -722,13 +740,19 @@ let performanceTrades = 0;
 await scanner.start();
 log.info("Scanner started — beginning decision loop");
 
+// Seed tokens enter the exact same pipeline as discovered ones (TRADER_SEED_TOKENS)
+if (config.trading.seedTokens.length > 0) {
+  for (const t of config.trading.seedTokens) scanner.seedToken(t, config.trading.chain);
+  log.info("Seeded tokens into scanner", { tokens: config.trading.seedTokens, chain: config.trading.chain });
+}
+
 const CYCLE_INTERVAL_MS = 10_000; // 10s decision cycle
 const cycleTimer = setInterval(() => void decisionCycle(), CYCLE_INTERVAL_MS);
 
 // Periodic portfolio snapshot (every 5 min)
 const snapshotTimer = setInterval(() => {
   portfolio.snapshotAt = new Date();
-  void journal.recordPortfolioSnapshot(portfolio, config.trading.mode).catch(() => undefined);
+  void journal.recordPortfolioSnapshot(portfolio, config.trading.mode, config.trading.chain).catch(() => undefined);
 }, 5 * 60_000);
 
 // ─── Graceful shutdown ────────────────────────────────────────────────────────

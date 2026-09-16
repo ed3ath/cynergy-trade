@@ -70,6 +70,8 @@ export const ProvidersConfigSchema = z.object({
   goplus: ProviderConfigSchema.default({}),
   jupiter: ProviderConfigSchema.default({}),
   jito: ProviderConfigSchema.default({}),
+  tonapi: ProviderConfigSchema.default({}),       // free tier ~1 rps, no key
+  geckoterminal: ProviderConfigSchema.default({}), // free, no key, ~30 req/min
 });
 export type ProvidersConfig = z.infer<typeof ProvidersConfigSchema>;
 
@@ -97,8 +99,11 @@ export type AIConfig = z.infer<typeof AIConfigSchema>;
 export const AppConfigSchema = z.object({
   trading: z.object({
     mode: TradingModeSchema.default("PAPER"),
-    chain: z.literal("solana").default("solana"),
+    chain: z.enum(["solana", "ton"]).default("solana"),
     walletPublicKey: z.string().optional(),
+    /** Manually inject tokens into the scanner (TRADER_SEED_TOKENS, comma-sep) —
+     *  for testing the full pipeline on liquid tokens when discovery finds only dust. */
+    seedTokens: z.array(z.string().min(1)).default([]),
   }),
   risk: RiskConfigSchema,
   market: MarketConfigSchema.default({}),
@@ -134,8 +139,10 @@ export function loadConfig(overrides: Partial<Record<string, unknown>> = {}): Ap
   const raw = {
     trading: {
       mode: process.env["TRADING_MODE"] ?? "PAPER",
-      chain: "solana",
+      chain: process.env["TRADING_CHAIN"] ?? "solana",
       walletPublicKey: process.env["WALLET_PUBLIC_KEY"],
+      seedTokens: (process.env["TRADER_SEED_TOKENS"] ?? "")
+        .split(",").map((s) => s.trim()).filter((s) => s.length > 0),
     },
     risk: {
       version: process.env["RISK_VERSION"] ?? "risk-v1",
@@ -163,6 +170,8 @@ export function loadConfig(overrides: Partial<Record<string, unknown>> = {}): Ap
       goplus: { enabled: true, apiKey: process.env["GOPLUS_API_KEY"] },
       jupiter: { enabled: true },
       jito: { enabled: false },
+      tonapi: { enabled: true },
+      geckoterminal: { enabled: true },
     },
     database: {
       url: process.env["DATABASE_URL"] ?? "postgresql://trader:trader@localhost:5432/trader",

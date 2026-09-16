@@ -41,6 +41,7 @@ export class DexScreenerProvider extends AbstractProvider
   constructor(
     private readonly baseUrl = "https://api.dexscreener.com",
     pairCacheMs = 5_000,
+    private readonly chainFilter: Chain = "solana",
   ) {
     super();
     this.pairCacheMs = pairCacheMs;
@@ -150,7 +151,7 @@ export class DexScreenerProvider extends AbstractProvider
     return { slippageBps: priceImpactBps, priceImpactBps, liquidityUsd };
   }
 
-  /** Highest-liquidity solana pair for a mint; throws on no data (→ UNKNOWN, never SAFE). */
+  /** Highest-liquidity pair on the configured chain; throws on no data (→ UNKNOWN, never SAFE). */
   private async bestPair(tokenAddress: string): Promise<DexPair> {
     const cached = this.pairCache.get(tokenAddress);
     if (cached && Date.now() - cached.at < this.pairCacheMs) {
@@ -168,11 +169,11 @@ export class DexScreenerProvider extends AbstractProvider
         throw new ProviderError(`DexScreener HTTP ${res.status}`, this.name);
       }
       const body = (await res.json()) as { pairs?: DexPair[] };
-      const solanaPairs = (body.pairs ?? []).filter((p) => p.chainId === "solana");
-      if (solanaPairs.length === 0) {
+      const chainPairs = (body.pairs ?? []).filter((p) => p.chainId === this.chainFilter);
+      if (chainPairs.length === 0) {
         return null; // unknown token — cache the miss too
       }
-      return solanaPairs.reduce((best, p) =>
+      return chainPairs.reduce((best, p) =>
         (p.liquidity?.usd ?? 0) > (best.liquidity?.usd ?? 0) ? p : best);
     }, { maxRetries: 2 });
 

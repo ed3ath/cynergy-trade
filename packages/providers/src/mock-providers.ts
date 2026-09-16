@@ -83,14 +83,14 @@ export class MockMarketDataProvider extends AbstractProvider implements MarketDa
 
   subscribeToPrice(
     tokenAddress: string,
-    _chain: Chain,
+    chain: Chain,
     handler: (snapshot: MarketSnapshot) => void,
   ): () => void {
     const interval = setInterval(() => {
       // Drift price by ±0.5% each tick
       const current = this.getPrice(tokenAddress);
       this.setPrice(tokenAddress, current * (1 + (Math.random() - 0.5) * 0.01));
-      void this.getMarketSnapshot(tokenAddress, "solana").then(handler);
+      void this.getMarketSnapshot(tokenAddress, chain).then(handler);
     }, 2000);
     return () => clearInterval(interval);
   }
@@ -234,6 +234,10 @@ export class MockDiscoveryProvider extends AbstractProvider implements TokenDisc
   private handlers: Array<(e: TokenDiscoveredEvent) => void> = [];
   private intervalHandle?: ReturnType<typeof setInterval>;
 
+  constructor(private readonly chain: Chain = "solana") {
+    super();
+  }
+
   override async initialize(): Promise<void> {
     await super.initialize();
     // Emit a fake new token every 30s in mock mode
@@ -241,7 +245,7 @@ export class MockDiscoveryProvider extends AbstractProvider implements TokenDisc
       const fakeAddr = "mock" + Math.random().toString(36).slice(2, 12).padEnd(40, "1");
       const event: TokenDiscoveredEvent = {
         tokenAddress: fakeAddr,
-        chain: "solana",
+        chain: this.chain,
         firstSeenAt: new Date(),
         source: "mock-discovery",
         pool: "pool_" + fakeAddr.slice(0, 8),

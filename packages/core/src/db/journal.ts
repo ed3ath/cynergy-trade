@@ -4,6 +4,7 @@
  * with the full context needed to reproduce why the system acted.
  */
 import type {
+  Chain,
   TokenDiscoveredEvent,
   MarketSnapshot,
   LiquiditySnapshot,
@@ -100,14 +101,18 @@ export class JournalRepository {
   }
 
   // ─── Decisions ─────────────────────────────────────────────────────────────
-  async recordStrategyDecision(decision: StrategyDecision, featureSnapshot: unknown): Promise<void> {
+  async recordStrategyDecision(
+    decision: StrategyDecision,
+    featureSnapshot: unknown,
+    chain: Chain = "solana",
+  ): Promise<void> {
     await this.db.query(
       `INSERT INTO strategy_decisions
         (strategy_id, strategy_version, token_address, chain, decision, confidence,
          reasons, risks, invalidation_conds, suggested_entry, suggested_stop,
          suggested_tp1, suggested_tp2, feature_snapshot, evaluated_at)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
-      [decision.strategyId, decision.strategyVersion, decision.tokenAddress, "solana",
+      [decision.strategyId, decision.strategyVersion, decision.tokenAddress, chain,
        decision.decision, decision.confidence, JSON.stringify(decision.reasons),
        JSON.stringify(decision.risks), JSON.stringify(decision.invalidationConditions),
        decision.suggestedEntryPrice ?? null, decision.suggestedStopLoss ?? null,
@@ -214,7 +219,10 @@ export class JournalRepository {
 
   // ─── Restore on restart ────────────────────────────────────────────────────
   /** Open positions for a mode — used to restore the position manager on boot. */
-  async getOpenPositions(mode: "PAPER" | "SHADOW" | "LIVE"): Promise<Position[]> {
+  async getOpenPositions(
+    mode: "PAPER" | "SHADOW" | "LIVE",
+    chain: Chain = "solana",
+  ): Promise<Position[]> {
     const { rows } = await this.db.query<{
       id: string;
       token_address: string;
@@ -245,9 +253,9 @@ export class JournalRepository {
               p.exit_reason, p.opened_at
        FROM positions p
        LEFT JOIN orders o ON o.id = p.entry_order_id
-       WHERE p.status IN ('OPENING','OPEN','PARTIAL_EXIT','CLOSING') AND p.mode = $1
+       WHERE p.status IN ('OPENING','OPEN','PARTIAL_EXIT','CLOSING') AND p.mode = $1 AND p.chain = $2
        ORDER BY p.opened_at`,
-      [mode],
+      [mode, chain],
     );
 
     return rows.map((r) => {
@@ -279,9 +287,10 @@ export class JournalRepository {
     });
   }
 
-  /** Last persisted portfolio snapshot for a mode — total value / peak baseline. */
+  /** Last persisted portfolio snapshot for a mode+chain — total value / peak baseline. */
   async getLatestPortfolioSnapshot(
     mode: "PAPER" | "SHADOW" | "LIVE",
+    chain: Chain = "solana",
   ): Promise<PortfolioSnapshot | null> {
     const { rows } = await this.db.query<{
       total_value_usd: string;
@@ -299,9 +308,9 @@ export class JournalRepository {
       `SELECT total_value_usd, available_usd, allocated_usd, open_positions,
               daily_pnl_usd, weekly_pnl_usd, monthly_pnl_usd, all_time_pnl_usd,
               drawdown_pct, peak_value_usd, snapshot_at
-       FROM portfolio_snapshots WHERE mode = $1
+       FROM portfolio_snapshots WHERE mode = $1 AND chain = $2
        ORDER BY snapshot_at DESC LIMIT 1`,
-      [mode],
+      [mode, chain],
     );
     const r = rows[0];
     if (!r) return null;
@@ -322,10 +331,11 @@ export class JournalRepository {
   }
 
   // ─── Portfolio snapshots ───────────────────────────────────────────────────
-  /** Equity-curve points (oldest first) for a mode — feeds the dashboard. */
+  /** Equity-curve points (oldest first) for a mode+chain — feeds the dashboard. */
   async getPortfolioHistory(
     mode: "PAPER" | "SHADOW" | "LIVE",
     limit = 500,
+    chain: Chain = "solana",
   ): Promise<Array<{ at: string; totalValueUsd: number; drawdownPct: number }>> {
     const { rows } = await this.db.query<{
       total_value_usd: string;
@@ -334,10 +344,10 @@ export class JournalRepository {
     }>(
       `SELECT total_value_usd, drawdown_pct, snapshot_at FROM (
          SELECT total_value_usd, drawdown_pct, snapshot_at
-         FROM portfolio_snapshots WHERE mode = $1
+         FROM portfolio_snapshots WHERE mode = $1 AND chain = $3
          ORDER BY snapshot_at DESC LIMIT $2
        ) recent ORDER BY snapshot_at ASC`,
-      [mode, limit],
+      [mode, limit, chain],
     );
     return rows.map((r) => ({
       at: new Date(r.snapshot_at).toISOString(),
@@ -346,14 +356,18 @@ export class JournalRepository {
     }));
   }
 
-  async recordPortfolioSnapshot(snap: PortfolioSnapshot, mode: "PAPER" | "SHADOW" | "LIVE"): Promise<void> {
+  async recordPortfolioSnapshot(
+    snap: PortfolioSnapshot,
+    mode: "PAPER" | "SHADOW" | "LIVE",
+    chain: Chain = "solana",
+  ): Promise<void> {
     await this.db.query(
       `INSERT INTO portfolio_snapshots
-        (mode, total_value_usd, available_usd, allocated_usd, open_positions,
+        (mode, chain, total_value_usd, available_usd, allocated_usd, open_positions,
          daily_pnl_usd, weekly_pnl_usd, monthly_pnl_usd, all_time_pnl_usd,
          drawdown_pct, peak_value_usd, snapshot_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
-      [mode, snap.totalValueUsd, snap.availableCapitalUsd, snap.allocatedUsd,
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+      [mode, chain, snap.totalValueUsd, snap.availableCapitalUsd, snap.allocatedUsd,
        snap.openPositions, snap.dailyPnlUsd, snap.weeklyPnlUsd, snap.monthlyPnlUsd,
        snap.allTimePnlUsd, snap.currentDrawdownPct, snap.peakValueUsd, snap.snapshotAt],
     );

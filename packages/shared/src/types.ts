@@ -1,5 +1,5 @@
 // ─── Chain ────────────────────────────────────────────────────────────────────
-export type Chain = "solana";
+export type Chain = "solana" | "ton";
 
 // ─── Token lifecycle ──────────────────────────────────────────────────────────
 export type TokenLifecycleStatus =
