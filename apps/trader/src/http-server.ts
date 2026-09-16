@@ -49,10 +49,12 @@ export function startHttpServer(opts: {
   getReport?: () => unknown;
   /** Equity-curve points for GET /history. */
   getHistory?: () => Promise<unknown>;
+  /** Closed-position trade history for GET /trades. */
+  getTrades?: () => Promise<unknown>;
   /** Preloaded dashboard HTML served at GET /. */
   dashboardHtml?: string | undefined;
 }): { close: () => void } {
-  const { port, host, authToken, emergency, logger, getStatus, getMetrics, getReport, getHistory, dashboardHtml } = opts;
+  const { port, host, authToken, emergency, logger, getStatus, getMetrics, getReport, getHistory, getTrades, dashboardHtml } = opts;
   const startedAt = Date.now();
 
   const server = createServer((req, res) => {
@@ -90,6 +92,11 @@ export function startHttpServer(opts: {
         return respond(res, 200, await getHistory());
       }
 
+      if (req.method === "GET" && path === "/trades") {
+        if (!getTrades) return respond(res, 404, { error: "trades not enabled" });
+        return respond(res, 200, (await getTrades()) ?? []);
+      }
+
       if (req.method === "GET" && path === "/health") {
         return respond(res, 200, { status: "ok", uptimeMs: Date.now() - startedAt });
       }
@@ -110,6 +117,10 @@ export function startHttpServer(opts: {
         });
         res.write("retry: 2000\n\n");
         const push = () => {
+          if (res.destroyed) {
+            clearInterval(timer);
+            return;
+          }
           const status = getStatus();
           status.uptimeMs = Date.now() - startedAt;
           const body = JSON.stringify(status, (_k, v) => (typeof v === "bigint" ? v.toString() : v));
@@ -117,7 +128,9 @@ export function startHttpServer(opts: {
         };
         push();
         const timer = setInterval(push, 2000);
-        req.on("close", () => clearInterval(timer));
+        // res, not req: on a bodyless GET the IncomingMessage 'close' fires as soon
+        // as the request is consumed — clearing the interval after the first frame
+        res.on("close", () => clearInterval(timer));
         return;
       }
 

@@ -117,6 +117,11 @@
 </section>
 
 <section>
+  <h2>Trade history</h2>
+  <div id="trades"></div>
+</section>
+
+<section>
   <h2>Watchlist</h2>
   <div id="watchlist"></div>
 </section>
@@ -264,6 +269,32 @@ async function refreshHistory() {
     history = await fetch("/history").then((r) => r.json());
   } catch { /* keep last frame */ }
   drawEquity();
+  try {
+    renderTrades(await fetch("/trades").then((r) => r.json()));
+  } catch { /* keep last frame */ }
+}
+function renderTrades(trades) {
+  const el = $("trades");
+  if (!trades || !trades.length) {
+    el.replaceChildren(h("div", { class: "empty", text: "No closed trades yet" }));
+    return;
+  }
+  const tbl = h("table");
+  tbl.append(h("tr", {},
+    h("th", { text: "Token" }), h("th", { class: "num", text: "Entry" }),
+    h("th", { class: "num", text: "Size" }), h("th", { class: "num", text: "PnL $" }),
+    h("th", { class: "num", text: "PnL %" }), h("th", { text: "Exit" }), h("th", { text: "Closed" })));
+  for (const t of trades) {
+    tbl.append(h("tr", {},
+      h("td", { class: "mono", text: t.tokenAddress.slice(0, 6) + "…" + t.tokenAddress.slice(-4) }),
+      h("td", { class: "num", text: t.entryPrice.toPrecision(4) }),
+      h("td", { class: "num", text: fmtUsd(t.sizeUsd) }),
+      h("td", { class: "num", text: fmtUsd(t.pnlUsd), style: `color: var(--${t.pnlUsd >= 0 ? "good" : "critical"})` }),
+      h("td", { class: "num", text: fmtPct(t.pnlPct), style: `color: var(--${t.pnlPct >= 0 ? "good" : "critical"})` }),
+      h("td", { text: t.exitReason ?? "—" }),
+      h("td", { text: t.closedAt ? relTime(t.closedAt) : "—" })));
+  }
+  el.replaceChildren(tbl);
 }
 function niceTicks(min, max, count) {
   const span = max - min || 1;

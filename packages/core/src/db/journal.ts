@@ -287,6 +287,56 @@ export class JournalRepository {
     });
   }
 
+  /** Closed positions — trade history for a mode+chain, newest first. */
+  async getClosedTrades(
+    mode: "PAPER" | "SHADOW" | "LIVE",
+    chain: Chain = "solana",
+    limit = 50,
+  ): Promise<
+    Array<{
+      id: string;
+      tokenAddress: string;
+      entryPrice: number;
+      sizeUsd: number;
+      pnlUsd: number;
+      pnlPct: number;
+      exitReason: string | null;
+      openedAt: Date;
+      closedAt: Date | null;
+    }>
+  > {
+    const { rows } = await this.db.query<{
+      id: string;
+      token_address: string;
+      entry_price: string;
+      size_usd: string;
+      realized_pnl_usd: string;
+      unrealized_pnl_pct: string | null;
+      exit_reason: string | null;
+      opened_at: Date;
+      closed_at: Date | null;
+    }>(
+      `SELECT id, token_address, entry_price, size_usd, realized_pnl_usd,
+              unrealized_pnl_pct, exit_reason, opened_at, closed_at
+       FROM positions
+       WHERE status = 'CLOSED' AND mode = $1 AND chain = $2
+       ORDER BY closed_at DESC NULLS LAST
+       LIMIT $3`,
+      [mode, chain, limit],
+    );
+    return rows.map((r) => ({
+      id: r.id,
+      tokenAddress: r.token_address,
+      entryPrice: parseFloat(r.entry_price),
+      sizeUsd: parseFloat(r.size_usd),
+      pnlUsd: parseFloat(r.realized_pnl_usd),
+      pnlPct: r.unrealized_pnl_pct !== null ? parseFloat(r.unrealized_pnl_pct) : 0,
+      exitReason: r.exit_reason,
+      openedAt: new Date(r.opened_at),
+      closedAt: r.closed_at !== null ? new Date(r.closed_at) : null,
+    }));
+  }
+
   /** Last persisted portfolio snapshot for a mode+chain — total value / peak baseline. */
   async getLatestPortfolioSnapshot(
     mode: "PAPER" | "SHADOW" | "LIVE",
