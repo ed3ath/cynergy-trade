@@ -159,10 +159,17 @@ const tokenCell = (addr, title) => h("td", {},
     addr.slice(0, 6) + "…" + addr.slice(-4)));
 const cssVar = (name) => getComputedStyle(document.body).getPropertyValue(name).trim();
 
+// SVG children MUST be created in the SVG namespace — document.createElement
+// makes HTML-namespace elements that the SVG renderer silently ignores
+// (blank charts: no line, no axes, no crosshair)
+const SVG_NS = "http://www.w3.org/2000/svg";
+const SVG_TAGS = new Set(["svg", "path", "line", "circle", "rect", "text", "polyline", "polygon", "g"]);
 function h(tag, attrs, ...children) {
-  const el = document.createElement(tag);
+  const el = SVG_TAGS.has(tag)
+    ? document.createElementNS(SVG_NS, tag)
+    : document.createElement(tag);
   for (const [k, v] of Object.entries(attrs || {})) {
-    if (k === "class") el.className = v;
+    if (k === "class" && el.namespaceURI !== SVG_NS) el.className = v;
     else if (k === "text") el.textContent = v;
     else if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
     else el.setAttribute(k, v);
