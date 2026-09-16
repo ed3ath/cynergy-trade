@@ -83,3 +83,87 @@ describe("GeckoTerminalDiscoveryProvider.processPool", () => {
     );
   });
 });
+
+const USDT = "ton_EQCxE6mUtQJKFnGfaROTKOt1lZbDiiX1kCixRv7Nw2Id_sDs";
+const STTON = "ton_EQDNhy-nxYFgUqzfUzImBEP67JqsyMIcyk2S5_RwNNEYku0k";
+
+function hotPool(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id: "ton_HOTPOOL1",
+    attributes: {
+      address: "EQHOTPOOL1",
+      reserve_in_usd: 450_000,
+      volume_usd: { h24: 214_570, h1: 4_991 },
+      price_change_percentage: { h1: 2.5, h24: -16.7 },
+    },
+    relationships: {
+      base_token: { data: { id: "ton_EQHOTJETTON1" } },
+      quote_token: { data: { id: NATIVE } },
+    },
+    ...overrides,
+  };
+}
+
+describe("GeckoTerminalDiscoveryProvider.processHotPool", () => {
+  it("emits top-volume movers with positive 1h momentum", () => {
+    const p = new GeckoTerminalDiscoveryProvider("http://gt.test");
+    const events: unknown[] = [];
+    p.subscribe((e) => events.push(e));
+
+    const ev = p.processHotPool(hotPool() as never);
+
+    expect(ev?.tokenAddress).toBe("EQHOTJETTON1");
+    expect(ev?.source).toBe("geckoterminal:hot");
+    expect(ev?.initialLiquidityUsd).toBe(450_000);
+    expect(events).toHaveLength(1);
+  });
+
+  it("skips USDT, stTON and native-TON bases", () => {
+    const p = new GeckoTerminalDiscoveryProvider("http://gt.test");
+    for (const baseId of [USDT, STTON, NATIVE]) {
+      expect(p.processHotPool(hotPool({
+        id: `ton_POOL_${baseId}`,
+        relationships: { base_token: { data: { id: baseId } }, quote_token: { data: { id: NATIVE } } },
+      }) as never)).toBeNull();
+    }
+  });
+
+  it("skips pools below hotMinReserveUsd and non-positive 1h change", () => {
+    const p = new GeckoTerminalDiscoveryProvider("http://gt.test");
+    expect(p.processHotPool(hotPool({
+      id: "ton_LOWRES", attributes: { ...hotPool().attributes, reserve_in_usd: 50_000 },
+    }) as never)).toBeNull();
+    expect(p.processHotPool(hotPool({
+      id: "ton_DOWN", attributes: { ...hotPool().attributes, price_change_percentage: { h1: -1.2, h24: -9 } },
+    }) as never)).toBeNull();
+    expect(p.processHotPool(hotPool({
+      id: "ton_NULLH1", attributes: { ...hotPool().attributes, price_change_percentage: { h1: null, h24: 3 } },
+    }) as never)).toBeNull();
+  });
+
+  it("dedupes across polls and shares the seen-set with new-pool discovery", () => {
+    const p = new GeckoTerminalDiscoveryProvider("http://gt.test");
+    expect(p.processHotPool(hotPool() as never)).not.toBeNull();
+    expect(p.processHotPool(hotPool() as never)).toBeNull();
+  });
+
+  it("pollHotPools fetches the h24-volume sort endpoint", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ data: [hotPool()] }), {
+        status: 200, headers: { "content-type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const p = new GeckoTerminalDiscoveryProvider("http://gt.test");
+    const events: unknown[] = [];
+    p.subscribe((e) => events.push(e));
+
+    await p.pollHotPools();
+
+    expect(events).toHaveLength(1);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://gt.test/api/v2/networks/ton/pools?sort=h24_volume_usd_desc&page=1",
+      expect.objectContaining({ headers: { accept: "application/json" } }),
+    );
+  });
+});
