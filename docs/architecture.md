@@ -67,11 +67,13 @@ DISCOVERY → SCANNER → STRATEGY ENSEMBLE → RISK ENGINE → EXECUTION → PO
 
 `infra/migrations/*.sql` applied in order by `infra/scripts/migrate.ts` (`npm run db:migrate`).
 
+> pnpm is the package manager (`packageManager` field + `pnpm-workspace.yaml`). Inter-package deps use `"workspace:*"`.
+
 ## Local development
 
 ```bash
 docker compose -f infra/docker/docker-compose.yml up -d   # postgres, redis, grafana, prometheus
 npm run db:migrate
-npx tsx apps/trader/src/index.ts                          # paper mode
-npm test
+pnpm exec tsx apps/trader/src/index.ts                   # paper mode
+pnpm test
 ```

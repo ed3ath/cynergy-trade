@@ -8,7 +8,7 @@ description: Boot the autonomous trader, verify the decision loop is working, an
 ## Boot
 
 ```bash
-npx tsx apps/trader/src/index.ts                    # paper mode, mock providers
+pnpm exec tsx apps/trader/src/index.ts              # paper mode, mock providers
 ```
 
 Env (from `.env` or shell): `TRADING_MODE` (PAPER|SHADOW|LIVE, default PAPER),

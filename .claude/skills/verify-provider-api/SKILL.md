@@ -20,7 +20,7 @@ console.log("status:", res.status);
 const body = await res.json();
 // Print top-level keys, then each nested object's keys — not the whole body
 EOF
-npx tsx /tmp/probe.mts
+pnpm exec tsx /tmp/probe.mts
 ```
 
 Use a major established token (BONK `DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263`,

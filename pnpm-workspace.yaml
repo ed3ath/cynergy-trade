@@ -1,0 +1,7 @@
+packages:
+  - "packages/*"
+  - "apps/*"
+allowBuilds:
+  bufferutil: false # optional ws accelerator — skip
+  esbuild: true     # required by tsx/vitest
+  utf-8-validate: false

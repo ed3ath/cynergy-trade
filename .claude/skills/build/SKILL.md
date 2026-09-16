@@ -10,9 +10,9 @@ Packages have a strict dependency chain. Building out of order fails with
 
 ```bash
 for pkg in shared providers core scanner strategy execution position; do
-  npx tsc -p packages/$pkg/tsconfig.json
+  pnpm exec tsc -p packages/$pkg/tsconfig.json
 done
-npx tsc -p apps/trader/tsconfig.json
+pnpm exec tsc -p apps/trader/tsconfig.json
 ```
 
 If `packages/shared/src/types.ts` (or config) changed, ALL downstream packages must rebuild — their `dist/` is what imports resolve to.
@@ -20,9 +20,9 @@ If `packages/shared/src/types.ts` (or config) changed, ALL downstream packages m
 ## Tests
 
 ```bash
-npx vitest run packages             # unit tests, offline, deterministic
-npx vitest run tests/integration    # LIVE APIs (GoPlus/Jupiter/Solana RPC) — network required
-npx vitest run packages/core       # single package
+pnpm exec vitest run packages             # unit tests, offline, deterministic
+pnpm exec vitest run tests/integration    # LIVE APIs (GoPlus/Jupiter/Solana RPC) — network required
+pnpm exec vitest run packages/core       # single package
 ```
 
 ## Common failures
@@ -30,4 +30,4 @@ npx vitest run packages/core       # single package
 - `TS2375 exactOptionalPropertyTypes` — optional field assigned `undefined` directly. Assign conditionally: `if (v !== undefined) obj.field = v;`
 - `TS1309 top-level await` — package needs `"type": "module"` in its package.json
 - `ERR_PACKAGE_PATH_NOT_EXPORTED` — stale `dist/`; rebuild the dependency, not the importer
-- npm workspaces: use `"*"` NOT `"workspace:*"` for inter-package deps
+- pnpm workspaces: inter-package deps MUST use `"workspace:*"` — bare `"*"` hits the registry and fails (packages are private)

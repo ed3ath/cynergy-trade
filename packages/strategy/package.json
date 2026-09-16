@@ -16,10 +16,10 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@autonomous-trader/shared": "*",
-    "@autonomous-trader/providers": "*",
-    "@autonomous-trader/core": "*",
-    "@autonomous-trader/scanner": "*"
+    "@autonomous-trader/shared": "workspace:*",
+    "@autonomous-trader/providers": "workspace:*",
+    "@autonomous-trader/core": "workspace:*",
+    "@autonomous-trader/scanner": "workspace:*"
   },
   "devDependencies": {
     "typescript": "*",

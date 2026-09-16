@@ -3,7 +3,7 @@ WORKDIR /app
 RUN corepack enable
 
 FROM base AS deps
-COPY package.json package-lock.json ./
+COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
 COPY packages/shared/package.json ./packages/shared/
 COPY packages/providers/package.json ./packages/providers/
 COPY packages/core/package.json ./packages/core/
@@ -12,15 +12,15 @@ COPY packages/strategy/package.json ./packages/strategy/
 COPY packages/execution/package.json ./packages/execution/
 COPY packages/position/package.json ./packages/position/
 COPY apps/trader/package.json ./apps/trader/
-RUN npm ci --ignore-scripts
+RUN pnpm install --frozen-lockfile
 
 FROM base AS builder
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 RUN for pkg in shared providers core scanner strategy execution position; do \
-      npx tsc -p packages/$pkg/tsconfig.json || exit 1; \
+      pnpm exec tsc -p packages/$pkg/tsconfig.json || exit 1; \
     done && \
-    npx tsc -p apps/trader/tsconfig.json
+    pnpm exec tsc -p apps/trader/tsconfig.json
 
 FROM base AS runner
 ENV NODE_ENV=production

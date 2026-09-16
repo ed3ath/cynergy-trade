@@ -1,6 +1,6 @@
 # cynergy-trade
 
-Autonomous Solana trading system. TS npm-workspaces monorepo.
+Autonomous Solana/TON trading system. TS pnpm-workspaces monorepo.
 
 - Architecture + current state: `docs/architecture.md`
 - Build order + test commands: use the `build` skill (`/.claude/skills/build/`)

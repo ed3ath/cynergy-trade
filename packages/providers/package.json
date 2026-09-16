@@ -16,7 +16,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@autonomous-trader/shared": "*"
+    "@autonomous-trader/shared": "workspace:*"
   },
   "devDependencies": {
     "typescript": "*",

@@ -2,10 +2,7 @@
   "name": "autonomous-trader",
   "private": true,
   "version": "0.1.0",
-  "workspaces": [
-    "packages/*",
-    "apps/*"
-  ],
+  "packageManager": "pnpm@11.13.1",
   "scripts": {
     "build": "turbo run build",
     "dev": "turbo run dev --parallel",
@@ -13,7 +10,8 @@
     "lint": "turbo run lint",
     "typecheck": "turbo run typecheck",
     "db:migrate": "tsx infra/scripts/migrate.ts",
-    "db:seed": "tsx infra/scripts/seed.ts"
+    "db:seed": "tsx infra/scripts/seed.ts",
+    "claude": "claude --dangerously-skip-permissions"
   },
   "devDependencies": {
     "@types/node": "^22.7.5",
