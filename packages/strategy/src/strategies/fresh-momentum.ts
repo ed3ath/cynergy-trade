@@ -71,6 +71,7 @@ export class FreshMomentumStrategy implements TradingStrategy {
     // ── Momentum check ────────────────────────────────────────────────────────
     const priceChange5m = features["price_change_5m"]?.value ?? 0;
     const priceChange15m = features["price_change_15m"]?.value ?? 0;
+    const priceChange1h = features["price_change_1h"]?.value ?? 0;
     const buySellRatio = features["buy_sell_ratio"]?.value ?? 1;
     const buyVolumePct = features["volume_buy_pct"]?.value ?? 50;
 
@@ -93,6 +94,16 @@ export class FreshMomentumStrategy implements TradingStrategy {
 
     if (buySellRatio < 1.0) {
       return this.skip("Sellers dominating", ctx);
+    }
+
+    // ponytail: chains without 1m trade granularity (TON via DexScreener) can never
+    // hit the ratio/volume reasons — backfill the signal gate with coarser data that
+    // exists. Replace with native buy/sell counts once a TON provider exposes them.
+    if (features["buy_sell_ratio"] == null) {
+      if (priceChange1h >= 3) reasons.push(`1h momentum +${priceChange1h.toFixed(1)}%`);
+      if (holders.totalHolders >= 1000) {
+        reasons.push(`Broad holder base: ${holders.totalHolders.toLocaleString("en-US")}`);
+      }
     }
 
     // ── Positive signal count ─────────────────────────────────────────────────
