@@ -78,6 +78,8 @@
   td { padding: 5px 8px; border-bottom: 1px solid var(--grid); }
   td.num, th.num { text-align: right; }
   .mono { font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
+  td a { color: var(--series-1); text-decoration: none; }
+  td a:hover { text-decoration: underline; }
   details { margin-top: 8px; }
   summary { color: var(--ink-2); font-size: 12px; cursor: pointer; }
   .refreshing { opacity: .55; transition: opacity .2s; }
@@ -140,6 +142,14 @@ const fmtAge = (iso) => {
   const s = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 1000));
   return s < 60 ? s + "s ago" : relTime(iso);
 };
+// TON addresses are 48-char base64url starting EQ/UQ; anything else is Solana base58
+const isTonAddr = (addr) => /^(EQ|UQ)[A-Za-z0-9_-]{46}$/.test(addr);
+const explorerUrl = (addr) => isTonAddr(addr)
+  ? "https://tonviewer.com/" + addr
+  : "https://solscan.io/token/" + addr;
+const tokenCell = (addr, title) => h("td", {},
+  h("a", { class: "mono", href: explorerUrl(addr), target: "_blank", rel: "noopener", title: title ?? addr },
+    addr.slice(0, 6) + "…" + addr.slice(-4)));
 const cssVar = (name) => getComputedStyle(document.body).getPropertyValue(name).trim();
 
 function h(tag, attrs, ...children) {
@@ -226,7 +236,7 @@ function renderStatus(status) {
         h("th", { class: "num", text: "PnL %" }), h("th", { class: "num", text: "PnL $" }), h("th", { text: "Opened" })));
       for (const x of status.positions) {
         tbl.append(h("tr", {},
-          h("td", { class: "mono", text: x.tokenAddress.slice(0, 6) + "…" + x.tokenAddress.slice(-4) }),
+          tokenCell(x.tokenAddress),
           h("td", { class: "num", text: fmtUsd(x.sizeUsd) }),
           h("td", { class: "num", text: fmtPct(x.unrealizedPnlPct), style: `color: var(--${x.unrealizedPnlPct >= 0 ? "good" : "critical"})` }),
           h("td", { class: "num", text: fmtUsd(x.unrealizedPnlUsd) }),
@@ -284,7 +294,7 @@ function renderTrades(trades) {
     h("th", { class: "num", text: "PnL %" }), h("th", { text: "Exit" }), h("th", { text: "Closed" })));
   for (const t of trades) {
     tbl.append(h("tr", {},
-      h("td", { class: "mono", text: t.tokenAddress.slice(0, 6) + "…" + t.tokenAddress.slice(-4) }),
+      tokenCell(t.tokenAddress),
       h("td", { class: "num", text: t.entryPrice.toPrecision(4) }),
       h("td", { class: "num", text: fmtUsd(t.sizeUsd) }),
       h("td", { class: "num", text: fmtUsd(t.pnlUsd), style: `color: var(--${t.pnlUsd >= 0 ? "good" : "critical"})` }),
@@ -315,7 +325,7 @@ function renderMarket(rows) {
     h("th", { text: "Status" }), h("th", { class: "num", text: "Updated" })));
   for (const r of rows) {
     tbl.append(h("tr", {},
-      h("td", { class: "mono", text: r.token.slice(0, 6) + "…" + r.token.slice(-4), title: r.token + (r.dex ? " · " + r.dex : "") }),
+      tokenCell(r.token, r.token + (r.dex ? " · " + r.dex : "")),
       num(fmtPrice(r.priceUsd)),
       pct(r.priceChange5m), pct(r.priceChange1h), pct(r.priceChange24h),
       num(fmtCompact(r.volume5mUsd)), num(fmtCompact(r.volume1hUsd)), num(fmtCompact(r.volume24hUsd)),
