@@ -33,6 +33,8 @@ export interface TokenCandidate {
 
   // Rejection tracking
   rejectionReasons: string[];
+  /** When the candidate was last rejected — drives the revive cooldown. */
+  rejectedAt?: Date;
 
   // Observation window
   observationStartedAt?: Date;

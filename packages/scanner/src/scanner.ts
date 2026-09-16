@@ -40,6 +40,10 @@ export interface ScannerConfig {
   maxCandidateAgeMs: number;  // archive candidates older than this
   /** Cooldown before an exited token can re-enter the watchlist (default 30min). */
   reentryCooldownMs?: number;
+  /** Cooldown before a never-entered REJECTED token is re-screened (default 5min).
+   *  Bursty venues (TON) drop to zero m5 volume in quiet minutes — without a
+   *  revive path every candidate drains to REJECTED and the watchlist empties. */
+  rejectedReviveCooldownMs?: number;
 }
 
 /** Persistence sink for time-series snapshots — the backtester's dataset. */
@@ -204,6 +208,7 @@ export class Scanner {
 
     if (rejections.length > 0) {
       candidate.rejectionReasons = rejections;
+      candidate.rejectedAt = new Date();
       this.transition(candidate.tokenAddress, "REJECTED");
       this.logger.info("Candidate rejected", {
         token: candidate.tokenAddress,
@@ -242,6 +247,7 @@ export class Scanner {
         const rejections = runFilters(candidate, this.config.market);
         if (rejections.length > 0 && candidate.status === "WATCHLIST") {
           candidate.rejectionReasons = rejections;
+          candidate.rejectedAt = new Date();
           this.transition(candidate.tokenAddress, "REJECTED");
           this.logger.info("Watchlist candidate rejected on refresh", {
             token: candidate.tokenAddress,
@@ -271,6 +277,32 @@ export class Scanner {
 
     // Re-queue exited tokens whose cooldown has elapsed
     this.drainReentryQueue();
+
+    // Re-screen rejected tokens whose cooldown has elapsed
+    this.reviveRejected();
+  }
+
+  /**
+   * REJECTED → OBSERVING for never-entered tokens past the revive cooldown.
+   * Never revives: entered tokens (security exits park at REJECTED by design)
+   * or security-code rejections (scams must not be rescanned).
+   */
+  private reviveRejected(): void {
+    const cooldown = this.config.rejectedReviveCooldownMs ?? 5 * 60_000;
+    const now = Date.now();
+    for (const candidate of this.candidates.values()) {
+      if (candidate.status !== "REJECTED") continue;
+      if (!candidate.rejectedAt || now - candidate.rejectedAt.getTime() < cooldown) continue;
+      if (this.stateMachines.get(candidate.tokenAddress)?.getHistory().some((h) => h.to === "ENTERED")) continue;
+      if (candidate.rejectionReasons.some((r) => r.startsWith("security:"))) continue;
+
+      candidate.rejectionReasons = [];
+      this.transition(candidate.tokenAddress, "OBSERVING");
+      this.logger.debug("Rejected candidate revived for re-screening", {
+        token: candidate.tokenAddress,
+      });
+      void this.runInitialScreening(candidate);
+    }
   }
 
   /** CLOSED → WATCHLIST for exited tokens past cooldown; re-filters/scores on next refresh. */

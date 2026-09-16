@@ -67,6 +67,22 @@ describe("TokenStateMachine", () => {
     const sm = new TokenStateMachine("REJECTED");
     expect(sm.canTransition("WATCHLIST")).toBe(false);
   });
+
+  it("REJECTED can revive to OBSERVING for re-screening (scanner-gated)", () => {
+    const sm = new TokenStateMachine("REJECTED");
+    sm.transition("OBSERVING");
+    expect(sm.status).toBe("OBSERVING");
+    sm.transition("SCREENING");
+    sm.transition("ELIGIBLE");
+    sm.transition("WATCHLIST"); // full path back to the watchlist
+    expect(sm.status).toBe("WATCHLIST");
+  });
+
+  it("ARCHIVED stays terminal even from REJECTED", () => {
+    const sm = new TokenStateMachine("REJECTED");
+    sm.transition("ARCHIVED");
+    expect(sm.canTransition("OBSERVING")).toBe(false);
+  });
 });
 
 describe("OrderStateMachine", () => {
