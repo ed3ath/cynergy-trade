@@ -82,7 +82,9 @@ export const MarketFilter: Filter = {
   check(candidate) {
     const m = candidate.market;
     if (!m) return "MARKET_DATA_MISSING";
-    if (m.volumeUsd5m <= 0) return "ZERO_VOLUME";
+    // DexScreener never populates m5 volume for TON DEXes (STON.fi/DeDust) —
+    // any nonzero volume granularity proves the token trades
+    if (m.volumeUsd5m <= 0 && m.volumeUsd1h <= 0) return "ZERO_VOLUME";
     if (m.confidence < 0.5) return "MARKET_DATA_LOW_CONFIDENCE";
     return null;
   },
