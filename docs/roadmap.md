@@ -1,0 +1,76 @@
+# Roadmap
+
+Where this is going, in dependency order. Dates are triggers ("when X"), not
+calendar promises — the bot runs 24/7 and the data decides the pace.
+State as of 2026-09-16. See `docs/architecture.md` for how it works.
+
+## Now — running
+
+- TON paper trading 24/7 (PAPER-only by boot guard), hot-pool + new-pool
+  discovery, dashboard at `:3000` (live SSE, market table, drill-down, equity)
+- Snapshot dataset accumulating in `token_market_snapshots` since 2026-09-12 —
+  this is backtester fuel, every hour of runtime pays into Phase B
+
+## Phase A — Prove the edge (passive, costs nothing)
+
+Let the paper run answer: **does FreshMomentum have positive expectancy on
+TON at all?**
+
+| # | Item | Done when |
+|---|---|---|
+| A1 | Let hot-pool-fed watchlist produce trades | ≥30 paper trades closed |
+| A2 | ShadowTracker signal quality (win rate, avg return at 15m) | ≥30 shadow signals evaluated, viewable in /metrics |
+| A3 | Snapshot coverage audit (tokens tracked, samples/token) | report answers "is the dataset Phase-B-ready?" |
+
+**Gate to B:** A3 says enough data (rough bar: ≥50 tokens with ≥20 samples each,
+several days spanning different regimes).
+
+**Kill criterion:** if A1+A2 show clearly negative expectancy after a fair
+sample, stop tuning TON and re-evaluate (Solana, different strategy, or both).
+
+## Phase B — Backtester (Phase 4 of the original plan)
+
+Replay recorded snapshots; stop tuning strategy parameters on vibes.
+
+1. Replay engine over `token_market_snapshots` (entry/exit simulation reusing
+   the same feature/filters/scoring code paths)
+2. FreshMomentum parameter sweep on recorded data
+3. Regime conditioning (does the edge exist only in RISK_ON?)
+4. Every strategy change after this point ships with a backtest delta
+
+## Phase C — Execution realism (TON)
+
+Close the gap between paper fills and reality before any LIVE thought.
+
+1. TON SHADOW quotes — real STON.fi/DeDust simulate, no tx (deferred since
+   the TON port)
+2. Slippage/fee calibration: paper fills vs shadow quotes on the same signals
+3. TON wallet + signing (LIVE-gated; boot refuses LIVE without it)
+4. Solana parity check → decide which chain goes LIVE first
+
+## Phase D — Go-live (hard-gated, smallest capital)
+
+Preconditions (unchanged, per CLAUDE.md and `docs/deployment.md`):
+
+1. Redis-backed idempotency (LIVE is forbidden until it exists)
+2. Real wallet signing on the chosen chain
+3. LIVE checklist run through; Telegram alerting verified end-to-end
+4. Git remote + off-machine logs — a single dev PC is not an execution venue
+5. Start at token-sized capital with daily loss limits already enforced
+
+## Hygiene (pick up opportunistically, cheapest first)
+
+| Item | Why it matters |
+|---|---|
+| Git remote + push | whole project lives on one machine |
+| Process watchdog (auto-restart on crash) | Run key only covers logon; a crash = silent dead bot |
+| Dashboard: volume bars in sparkline, auto-refresh open detail panel | polish, data already fetched |
+| Helius webhook discovery (Solana) | replaces polling; only matters if Solana is the LIVE chain |
+| Birdeye holder shape (needs API key) | better holder data on Solana |
+| Delete/fix `npm run db:migrate` (broken on Node 24) | boot self-migrates; script is a trap |
+
+## Decision points ahead (owner's call, not the bot's)
+
+- Which chain goes LIVE first (informed by C4)
+- Capital size + max acceptable daily loss for LIVE
+- Whether TON SHADOW quote work jumps the queue if paper PnL looks good early

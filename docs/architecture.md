@@ -1,5 +1,7 @@
 # Architecture
 
+Roadmap + phase gates: `docs/roadmap.md`.
+
 ## Overview
 
 Autonomous crypto trading system targeting newly-launched Solana tokens.
