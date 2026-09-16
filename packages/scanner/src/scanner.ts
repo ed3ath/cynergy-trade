@@ -20,7 +20,7 @@ import type {
   HolderAnalyticsProvider,
 } from "@autonomous-trader/providers";
 import { TokenStateMachine } from "@autonomous-trader/core";
-import { createCandidate, type TokenCandidate } from "./lifecycle/candidate.js";
+import { createCandidate, type TokenCandidate, type CandidateScores } from "./lifecycle/candidate.js";
 import {
   computeMarketFeatures,
   computeLiquidityFeatures,
@@ -73,6 +73,57 @@ export interface MarketFeedRow {
   holders: number | null;
   rejection: string | null;
   observedAt: string | null;
+}
+
+/** Detail view of one token — the collected fields the feed table doesn't show. */
+export interface MarketFeedDetail extends MarketFeedRow {
+  firstSeenAt: string;
+  lastUpdatedAt: string;
+  rejectionReasons: string[];
+  scores: CandidateScores;
+  market: {
+    priceChange1m: number;
+    priceChange15m: number;
+    volumeUsd15m: number;
+    buyCount1m: number;
+    sellCount1m: number;
+    buyVolumeUsd1m: number;
+    sellVolumeUsd1m: number;
+    uniqueBuyers1m: number;
+    uniqueSellers1m: number;
+    tradeCount24h: number;
+    uniqueTraders24h: number;
+  } | null;
+  liquidity: {
+    poolAddress: string;
+    poolAgeMs: number;
+    baseToken: string;
+    quoteToken: string;
+    slippageBps50: number;
+    slippageBps500: number;
+    liquidityChange5m: number;
+    liquidityChange15m: number;
+  } | null;
+  holderDist: {
+    top1Pct: number;
+    top5Pct: number;
+    top10Pct: number;
+    top20Pct: number;
+    creatorPct: number;
+    insiderPct: number;
+    sniperPct: number;
+    bundlerPct: number;
+    whalePct: number;
+    holderGrowth5m: number;
+    holderGrowth15m: number;
+    holderGrowth1h: number;
+  } | null;
+  security: {
+    status: SecurityAssessment["status"];
+    score: number;
+    reasons: SecurityAssessment["reasons"];
+    checkedAt: string;
+  } | null;
 }
 
 export class Scanner {
@@ -178,27 +229,91 @@ export class Scanner {
     const rows: MarketFeedRow[] = [];
     for (const c of this.candidates.values()) {
       if (c.status === "ARCHIVED") continue;
-      rows.push({
-        token: c.tokenAddress,
-        chain: c.chain,
-        status: c.status,
-        score: Math.round(c.scores.opportunity),
-        priceUsd: c.market?.priceUsd ?? null,
-        priceChange5m: c.market?.priceChange5m ?? null,
-        priceChange1h: c.market?.priceChange1h ?? null,
-        priceChange24h: c.market?.priceChange24h ?? null,
-        volume5mUsd: c.market?.volumeUsd5m ?? null,
-        volume1hUsd: c.market?.volumeUsd1h ?? null,
-        volume24hUsd: c.market?.volumeUsd24h ?? null,
-        marketCapUsd: c.market?.marketCapUsd ?? null,
-        liquidityUsd: c.liquidity?.liquidityUsd ?? null,
-        dex: c.liquidity?.dex ?? null,
-        holders: c.holders?.totalHolders ?? null,
-        rejection: c.rejectionReasons[0] ?? null,
-        observedAt: c.market?.observedAt?.toISOString() ?? null,
-      });
+      rows.push(this.feedRow(c));
     }
     return rows.sort((a, b) => rank(a.status) - rank(b.status) || b.score - a.score);
+  }
+
+  /**
+   * Full detail for one tracked token — feeds GET /market/:token.
+   * Null when the token is unknown or archived. The scanner-side half only;
+   * the caller joins persisted price history from the journal.
+   */
+  getMarketDetail(tokenAddress: string): MarketFeedDetail | null {
+    const c = this.candidates.get(tokenAddress);
+    if (!c || c.status === "ARCHIVED") return null;
+    return {
+      ...this.feedRow(c),
+      firstSeenAt: c.firstSeenAt.toISOString(),
+      lastUpdatedAt: c.lastUpdatedAt.toISOString(),
+      rejectionReasons: [...c.rejectionReasons],
+      scores: { ...c.scores },
+      market: c.market ? {
+        priceChange1m: c.market.priceChange1m,
+        priceChange15m: c.market.priceChange15m,
+        volumeUsd15m: c.market.volumeUsd15m,
+        buyCount1m: c.market.buyCount1m,
+        sellCount1m: c.market.sellCount1m,
+        buyVolumeUsd1m: c.market.buyVolumeUsd1m,
+        sellVolumeUsd1m: c.market.sellVolumeUsd1m,
+        uniqueBuyers1m: c.market.uniqueBuyers1m,
+        uniqueSellers1m: c.market.uniqueSellers1m,
+        tradeCount24h: c.market.tradeCount24h,
+        uniqueTraders24h: c.market.uniqueTraders24h,
+      } : null,
+      liquidity: c.liquidity ? {
+        poolAddress: c.liquidity.poolAddress,
+        poolAgeMs: c.liquidity.poolAgeMs,
+        baseToken: c.liquidity.baseToken,
+        quoteToken: c.liquidity.quoteToken,
+        slippageBps50: c.liquidity.estimatedSlippageBps50,
+        slippageBps500: c.liquidity.estimatedSlippageBps500,
+        liquidityChange5m: c.liquidity.liquidityChange5m,
+        liquidityChange15m: c.liquidity.liquidityChange15m,
+      } : null,
+      holderDist: c.holders ? {
+        top1Pct: c.holders.top1Pct,
+        top5Pct: c.holders.top5Pct,
+        top10Pct: c.holders.top10Pct,
+        top20Pct: c.holders.top20Pct,
+        creatorPct: c.holders.creatorPct,
+        insiderPct: c.holders.insiderPct,
+        sniperPct: c.holders.sniperPct,
+        bundlerPct: c.holders.bundlerPct,
+        whalePct: c.holders.whalePct,
+        holderGrowth5m: c.holders.holderGrowth5m,
+        holderGrowth15m: c.holders.holderGrowth15m,
+        holderGrowth1h: c.holders.holderGrowth1h,
+      } : null,
+      security: c.security ? {
+        status: c.security.status,
+        score: c.security.score,
+        reasons: c.security.reasons,
+        checkedAt: c.security.checkedAt.toISOString(),
+      } : null,
+    };
+  }
+
+  private feedRow(c: TokenCandidate): MarketFeedRow {
+    return {
+      token: c.tokenAddress,
+      chain: c.chain,
+      status: c.status,
+      score: Math.round(c.scores.opportunity),
+      priceUsd: c.market?.priceUsd ?? null,
+      priceChange5m: c.market?.priceChange5m ?? null,
+      priceChange1h: c.market?.priceChange1h ?? null,
+      priceChange24h: c.market?.priceChange24h ?? null,
+      volume5mUsd: c.market?.volumeUsd5m ?? null,
+      volume1hUsd: c.market?.volumeUsd1h ?? null,
+      volume24hUsd: c.market?.volumeUsd24h ?? null,
+      marketCapUsd: c.market?.marketCapUsd ?? null,
+      liquidityUsd: c.liquidity?.liquidityUsd ?? null,
+      dex: c.liquidity?.dex ?? null,
+      holders: c.holders?.totalHolders ?? null,
+      rejection: c.rejectionReasons[0] ?? null,
+      observedAt: c.market?.observedAt?.toISOString() ?? null,
+    };
   }
 
   /** Called by execution layer when a position is entered. */

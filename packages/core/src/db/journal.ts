@@ -406,6 +406,25 @@ export class JournalRepository {
     }));
   }
 
+  /** Persisted price points for one token, oldest first — feeds the dashboard sparkline. */
+  async getMarketSnapshotHistory(
+    tokenAddress: string,
+    limit = 240,
+  ): Promise<Array<{ at: string; priceUsd: number; volumeUsd1h: number }>> {
+    const { rows } = await this.db.query<{ price_usd: string; volume_usd_1h: string; observed_at: Date }>(
+      `SELECT price_usd, volume_usd_1h, observed_at FROM (
+         SELECT price_usd, volume_usd_1h, observed_at FROM token_market_snapshots
+         WHERE token_address = $1 ORDER BY observed_at DESC LIMIT $2
+       ) recent ORDER BY observed_at ASC`,
+      [tokenAddress, limit],
+    );
+    return rows.map((r) => ({
+      at: new Date(r.observed_at).toISOString(),
+      priceUsd: parseFloat(r.price_usd),
+      volumeUsd1h: parseFloat(r.volume_usd_1h),
+    }));
+  }
+
   async recordPortfolioSnapshot(
     snap: PortfolioSnapshot,
     mode: "PAPER" | "SHADOW" | "LIVE",

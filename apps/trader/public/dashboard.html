@@ -86,6 +86,12 @@
   .empty { color: var(--muted); padding: 8px; }
   #market { overflow-x: auto; }
   #market table { min-width: 980px; }
+  #market tr[data-token] { cursor: pointer; }
+  #market tr[data-token]:hover, #market tr[data-token]:focus { background: var(--grid); outline: none; }
+  #token-detail .detail-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; margin-top: 8px; }
+  #token-detail .detail-grid .grp { border: 1px solid var(--ring); border-radius: 8px; padding: 8px 10px; }
+  #token-detail .grp h3 { font-size: 12px; color: var(--ink-2); margin: 0 0 6px; font-weight: 600; }
+  #token-detail td { padding: 3px 6px; }
   @media (max-width: 600px) { body { padding: 12px; } .tile.hero .value { font-size: 34px; } }
 </style>
 </head>
@@ -128,6 +134,7 @@
 <section>
   <h2>Market data — every tracked token, live from the scanner</h2>
   <div id="market"></div>
+  <div id="token-detail" style="margin-top: 12px"></div>
 </section>
 
 <script>
@@ -324,7 +331,11 @@ function renderMarket(rows) {
     h("th", { class: "num", text: "Holders" }), h("th", { class: "num", text: "Score" }),
     h("th", { text: "Status" }), h("th", { class: "num", text: "Updated" })));
   for (const r of rows) {
-    tbl.append(h("tr", {},
+    tbl.append(h("tr", {
+      "data-token": r.token, tabindex: "0",
+      onclick: () => showTokenDetail(r.token),
+      onkeydown: (e) => { if (e.key === "Enter") showTokenDetail(r.token); },
+    },
       tokenCell(r.token, r.token + (r.dex ? " · " + r.dex : "")),
       num(fmtPrice(r.priceUsd)),
       pct(r.priceChange5m), pct(r.priceChange1h), pct(r.priceChange24h),
@@ -336,6 +347,92 @@ function renderMarket(rows) {
       num(fmtAge(r.observedAt))));
   }
   el.replaceChildren(tbl);
+}
+// ── /market/:token → drill-down detail panel ────────────────────────────────
+let detailReqToken = null;
+async function showTokenDetail(token) {
+  detailReqToken = token;
+  $("token-detail").replaceChildren(h("div", { class: "empty", text: "loading detail…" }));
+  let d = null;
+  try { d = await fetch("/market/" + encodeURIComponent(token)).then((r) => r.json()); } catch { /* keep null */ }
+  if (detailReqToken !== token) return; // a newer click superseded this fetch
+  renderTokenDetail(d);
+}
+function kvTable(pairs) {
+  const t = h("table");
+  for (const [k, v] of pairs) {
+    t.append(h("tr", {}, h("td", { text: k, style: "color: var(--ink-2)" }), h("td", { class: "num", text: v })));
+  }
+  return t;
+}
+function grp(title, pairs) {
+  return h("div", { class: "grp" }, h("h3", { text: title }), kvTable(pairs));
+}
+function fmtDur(ms) {
+  if (ms == null) return "—";
+  const h = Math.floor(ms / 3600000);
+  return h >= 24 ? `${Math.floor(h / 24)}d ${h % 24}h`
+    : h >= 1 ? `${h}h ${Math.round((ms % 3600000) / 60000)}m`
+    : `${Math.round(ms / 60000)}m`;
+}
+function renderTokenDetail(d) {
+  const el = $("token-detail");
+  if (!d || !d.token) { el.replaceChildren(h("div", { class: "empty", text: "token not tracked" })); return; }
+  const sec = d.security;
+  const hist = d.history || [];
+  const spark = h("svg", { viewBox: "0 0 300 64", preserveAspectRatio: "none", style: "width: 100%; height: 64px; display: block" });
+  if (hist.length >= 2) {
+    const vals = hist.map((p) => p.priceUsd);
+    let lo = Math.min(...vals), hi = Math.max(...vals);
+    if (hi === lo) { hi = lo * 1.01 || 1; lo = lo * 0.99; }
+    const x = (i) => (i / (hist.length - 1)) * 300;
+    const y = (v) => 4 + (1 - (v - lo) / (hi - lo)) * 52;
+    const line = vals.map((v, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join("");
+    spark.append(h("path", { d: `${line}L300,62L0,62Z`, fill: cssVar("--series-1"), opacity: 0.1 }));
+    spark.append(h("path", { d: line, fill: "none", stroke: cssVar("--series-1"), "stroke-width": 1.5 }));
+  }
+  el.replaceChildren(
+    h("div", { style: "display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap" },
+      h("a", { class: "mono", href: explorerUrl(d.token), target: "_blank", rel: "noopener", text: d.token }),
+      h("span", { text: d.status, style: "font-weight: 600" }),
+      h("span", { text: `score ${d.score} · tracked ${relTime(d.firstSeenAt)} · ${hist.length} price points`, style: "color: var(--ink-2)" })),
+    hist.length >= 2
+      ? h("div", { style: "margin-top: 6px" }, spark,
+          h("div", {
+            text: `${fmtPrice(hist[0].priceUsd)} → ${fmtPrice(hist[hist.length - 1].priceUsd)} · ${new Date(hist[0].at).toLocaleTimeString()} → ${new Date(hist[hist.length - 1].at).toLocaleTimeString()}`,
+            style: "color: var(--ink-2); font-size: 11px" }))
+      : h("div", { class: "empty", text: "no persisted price history yet — the sparkline starts after the first snapshot minute" }),
+    h("div", { class: "detail-grid" },
+      sec ? grp("Security", [
+        ["Verdict", sec.status], ["Score", String(sec.score)], ["Checked", fmtAge(sec.checkedAt)],
+        ...(sec.reasons.length ? [["Flags", sec.reasons.map((r) => `${r.severity}:${r.code}`).join(" · ")]] : []),
+      ]) : null,
+      d.holderDist ? grp("Holders", [
+        ["Top 1 / 10 / 20 %", `${d.holderDist.top1Pct} / ${d.holderDist.top10Pct} / ${d.holderDist.top20Pct}`],
+        ["Insider / sniper", `${d.holderDist.insiderPct}% / ${d.holderDist.sniperPct}%`],
+        ["Bundler / whale", `${d.holderDist.bundlerPct}% / ${d.holderDist.whalePct}%`],
+        ["Growth 15m / 1h", `${fmtPct(d.holderDist.holderGrowth15m)} / ${fmtPct(d.holderDist.holderGrowth1h)}`],
+      ]) : null,
+      d.liquidity ? grp("Pool & execution", [
+        ["DEX", d.dex ?? "—"],
+        ["Pool age", fmtDur(d.liquidity.poolAgeMs)],
+        ["Slippage $50 / $500", `${d.liquidity.slippageBps50} / ${d.liquidity.slippageBps500} bps`],
+        ["Liq Δ 5m / 15m", `${fmtPct(d.liquidity.liquidityChange5m)} / ${fmtPct(d.liquidity.liquidityChange15m)}`],
+      ]) : null,
+      d.market ? grp("Micro-flow (1m)", [
+        ["Buys / sells", `${d.market.buyCount1m} / ${d.market.sellCount1m}`],
+        ["Buy / sell vol", `${fmtCompact(d.market.buyVolumeUsd1m)} / ${fmtCompact(d.market.sellVolumeUsd1m)}`],
+        ["Traders 24h", (d.market.uniqueTraders24h || 0).toLocaleString("en-US")],
+        ["Δ 1m / 15m", `${fmtPct(d.market.priceChange1m)} / ${fmtPct(d.market.priceChange15m)}`],
+      ]) : null,
+      grp("Scores", [
+        ["Opportunity", d.scores.opportunity.toFixed(1)],
+        ["Momentum / security", `${d.scores.momentum} / ${d.scores.security}`],
+        ["Liquidity / holder", `${d.scores.liquidity} / ${d.scores.holder}`],
+        ["Market / exec / risk", `${d.scores.marketQuality} / ${d.scores.execution} / ${d.scores.risk}`],
+      ]),
+    ),
+  );
 }
 function niceTicks(min, max, count) {
   const span = max - min || 1;

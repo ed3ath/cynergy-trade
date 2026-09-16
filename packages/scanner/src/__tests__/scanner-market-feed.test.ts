@@ -138,4 +138,34 @@ describe("Scanner.getMarketFeed", () => {
     // Live tokens sort ahead of rejected ones
     expect(feed.findIndex((r) => r.token === "GOOD")).toBeLessThan(feed.findIndex((r) => r.token === "DEAD"));
   });
+
+  it("getMarketDetail returns full snapshots or null for unknown tokens", async () => {
+    const scanner = makeScanner({
+      GOOD: marketSnap("GOOD", 0.5, 500),
+      NORES: new Error("provider down"),
+    });
+    scanner.seedToken("GOOD", "ton");
+    scanner.seedToken("NORES", "ton");
+    await flush();
+
+    expect(scanner.getMarketDetail("MISSING")).toBeNull();
+
+    const good = scanner.getMarketDetail("GOOD")!;
+    expect(good.priceUsd).toBe(0.5);
+    expect(good.market?.tradeCount24h).toBe(10);
+    expect(good.liquidity?.poolAgeMs).toBe(3_600_000);
+    expect(good.liquidity?.slippageBps500).toBe(0);
+    expect(good.holderDist?.top10Pct).toBe(0);
+    expect(good.security?.status).toBe("SAFE");
+    expect(good.security?.checkedAt).toBeTypeOf("string");
+    expect(typeof good.scores.opportunity).toBe("number");
+    expect(good.rejectionReasons).toEqual([]);
+
+    const nores = scanner.getMarketDetail("NORES")!;
+    expect(nores.market).toBeNull();
+    expect(nores.liquidity).toBeNull();
+    expect(nores.holders).toBeNull();
+    expect(nores.security).toBeNull();
+    expect(nores.rejectionReasons.length).toBeGreaterThan(0);
+  });
 });

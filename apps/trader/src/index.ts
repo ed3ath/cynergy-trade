@@ -748,6 +748,14 @@ const httpServerOpts: Parameters<typeof startHttpServer>[0] = {
       ? (journal as JournalRepository).getClosedTrades(config.trading.mode, config.trading.chain, 50)
       : Promise.resolve([]),
   getMarket: () => scanner.getMarketFeed(),
+  getTokenDetail: async (token: string) => {
+    const detail = scanner.getMarketDetail(token);
+    if (!detail) return null;
+    const history = db
+      ? await (journal as JournalRepository).getMarketSnapshotHistory(token)
+      : [];
+    return { ...detail, history };
+  },
   dashboardHtml: loadDashboardHtml(),
 };
 if (monitorToken) httpServerOpts.authToken = monitorToken;

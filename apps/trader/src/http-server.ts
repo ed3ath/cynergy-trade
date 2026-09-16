@@ -7,6 +7,7 @@
  * GET  /events              same payload as /status, streamed live (SSE, ~2s)
  * GET  /metrics             Prometheus text format
  * GET  /market              live per-token market feed (scanner's latest snapshots)
+ * GET  /market/:token       full detail for one token + persisted price history
  * POST /emergency/kill      activate global kill switch
  * POST /emergency/resume    deactivate kill switch (requires ?confirm=yes)
  * POST /emergency/stop-entries   stop new entries only
@@ -54,10 +55,12 @@ export function startHttpServer(opts: {
   getTrades?: () => Promise<unknown>;
   /** Live per-token market data for GET /market. */
   getMarket?: () => unknown[];
+  /** Full detail + price history for GET /market/:token. Null → 404. */
+  getTokenDetail?: (token: string) => Promise<unknown> | unknown;
   /** Preloaded dashboard HTML served at GET /. */
   dashboardHtml?: string | undefined;
 }): { close: () => void } {
-  const { port, host, authToken, emergency, logger, getStatus, getMetrics, getReport, getHistory, getTrades, getMarket, dashboardHtml } = opts;
+  const { port, host, authToken, emergency, logger, getStatus, getMetrics, getReport, getHistory, getTrades, getMarket, getTokenDetail, dashboardHtml } = opts;
   const startedAt = Date.now();
 
   const server = createServer((req, res) => {
@@ -103,6 +106,16 @@ export function startHttpServer(opts: {
       if (req.method === "GET" && path === "/market") {
         if (!getMarket) return respond(res, 404, { error: "market feed not enabled" });
         return respond(res, 200, getMarket());
+      }
+
+      if (req.method === "GET" && path.startsWith("/market/")) {
+        if (!getTokenDetail) return respond(res, 404, { error: "market feed not enabled" });
+        const token = decodeURIComponent(path.slice("/market/".length));
+        const detail = await getTokenDetail(token);
+        if (detail === null || detail === undefined) {
+          return respond(res, 404, { error: "token not tracked" });
+        }
+        return respond(res, 200, detail);
       }
 
       if (req.method === "GET" && path === "/health") {
