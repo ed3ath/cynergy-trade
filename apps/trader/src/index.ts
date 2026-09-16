@@ -540,7 +540,17 @@ async function decisionCycle(): Promise<void> {
       };
 
       const ensembleResult = strategyEngine.evaluate(strategyCtx);
-      if (!ensembleResult.anyEnter || !ensembleResult.bestDecision) continue;
+      if (!ensembleResult.anyEnter || !ensembleResult.bestDecision) {
+        for (const d of ensembleResult.decisions) {
+          log.info("Strategy did not enter candidate", {
+            token: candidate.tokenAddress,
+            strategy: d.strategyId,
+            decision: d.decision,
+            reason: (d.risks.length ? d.risks : d.reasons).join("; "),
+          });
+        }
+        continue;
+      }
 
       const strategyDecision = ensembleResult.bestDecision;
       const stats = performanceTracker.getStats(strategyDecision.strategyId);

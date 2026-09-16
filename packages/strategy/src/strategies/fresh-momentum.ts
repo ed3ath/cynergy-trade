@@ -75,8 +75,9 @@ export class FreshMomentumStrategy implements TradingStrategy {
     const buySellRatio = features["buy_sell_ratio"]?.value ?? 1;
     const buyVolumePct = features["volume_buy_pct"]?.value ?? 50;
 
-    // Need sustained momentum, not a single candle
-    if (priceChange5m <= 0 && priceChange15m <= 0) {
+    // Need sustained momentum, not a single candle — finest available window wins.
+    // h1 backfills chains whose DEXes report no 5m/15m granularity (TON via DexScreener)
+    if (priceChange5m <= 0 && priceChange15m <= 0 && priceChange1h <= 0) {
       return this.skip("No positive price momentum", ctx);
     }
 
