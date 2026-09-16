@@ -90,8 +90,15 @@
   <h1>Cynergy Trade Monitor</h1>
   <span class="sub" id="mode-chip"></span>
   <span class="sub" id="uptime"></span>
+  <span class="sub chip" id="live-chip"><span class="dot" style="background: var(--good)"></span><span id="live-text">live</span></span>
 </header>
 <div id="banner"><span>⛔</span><span id="banner-text"></span></div>
+
+<section>
+  <h2>Scanner activity</h2>
+  <div class="tiles" id="scan-tiles"></div>
+  <div class="sub" id="scan-foot" style="color: var(--ink-2); font-size: 12px; margin-top: 8px"></div>
+</section>
 
 <div class="tiles" id="tiles"></div>
 
@@ -169,6 +176,8 @@ async function refreshStatus() {
     ]);
     const m = parseMetrics(metricsText);
     const p = status.portfolio;
+    window.__lastStatus = status;
+    window.__statusAt = Date.now();
 
     $("mode-chip").replaceChildren(
       regimeChip(status.regime.current),
@@ -213,6 +222,14 @@ async function refreshStatus() {
       }
       pos.replaceChildren(tbl);
     }
+
+    const sc = status.scanner || { observing: 0, watchlisted: 0, tradeCandidates: 0, rejected: 0, lastScreenAt: null };
+    $("scan-tiles").replaceChildren(
+      tile("Monitored tokens", String(sc.observing + sc.watchlisted + sc.tradeCandidates + sc.rejected)),
+      tile("Observing", String(sc.observing)),
+      tile("Watchlisted", String(sc.watchlisted)),
+      tile("Rejected · re-screening", String(sc.rejected)),
+    );
 
     const wl = $("watchlist");
     if (!status.watchlist.length) wl.replaceChildren(h("div", { class: "empty", text: "Watchlist empty" }));
@@ -337,6 +354,23 @@ function drawEquity() {
 refreshStatus(); refreshHistory();
 setInterval(refreshStatus, 10_000);
 setInterval(refreshHistory, 60_000);
+
+// 1s local ticker — keeps "last scan" visibly alive between polls
+function tick() {
+  const st = window.__lastStatus;
+  if (!st) return;
+  const up = Math.floor(st.uptimeMs / 60000 + (Date.now() - window.__statusAt) / 60000);
+  $("uptime").textContent = up < 60 ? `up ${up}m` : `up ${Math.floor(up / 60)}h ${up % 60}m`;
+  const sc = st.scanner;
+  if (sc) {
+    const ago = sc.lastScreenAt ? Math.max(0, Math.round((Date.now() - new Date(sc.lastScreenAt).getTime()) / 1000)) : null;
+    $("scan-foot").textContent = ago == null
+      ? "no market scan yet"
+      : `last market scan ${ago}s ago · rejected tokens re-screen every 5 min · data refreshes every 10 s`;
+    $("live-text").textContent = `live · ${ago == null ? "—" : ago + "s since scan"}`;
+  }
+}
+setInterval(tick, 1_000);
 </script>
 </body>
 </html>

@@ -701,6 +701,7 @@ const httpServerOpts: Parameters<typeof startHttpServer>[0] = {
       score: Math.round(c.scores.opportunity),
       status: c.status,
     })),
+    scanner: scanner.getActivity(),
     uptimeMs: 0,
     version: "0.1.0",
   }),

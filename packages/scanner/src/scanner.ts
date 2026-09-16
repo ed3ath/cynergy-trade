@@ -64,6 +64,7 @@ export class Scanner {
   private unsubscribeDiscovery?: () => void;
   private lastPersistedAt = new Map<string, number>(); // token → epoch ms
   private readonly reentryQueue = new Map<string, number>(); // token → eligible-at epoch ms
+  private lastScreenAt?: Date;
 
   constructor(
     private readonly config: ScannerConfig,
@@ -121,6 +122,27 @@ export class Scanner {
 
   getCandidate(tokenAddress: string): TokenCandidate | undefined {
     return this.candidates.get(tokenAddress);
+  }
+
+  /** Live pipeline counts + last market scan — feeds the dashboard activity strip. */
+  getActivity(): {
+    observing: number;
+    watchlisted: number;
+    tradeCandidates: number;
+    rejected: number;
+    lastScreenAt: Date | null;
+  } {
+    let observing = 0, watchlisted = 0, tradeCandidates = 0, rejected = 0;
+    for (const c of this.candidates.values()) {
+      if (c.status === "OBSERVING" || c.status === "SCREENING" || c.status === "ELIGIBLE") observing++;
+      else if (c.status === "WATCHLIST") watchlisted++;
+      else if (c.status === "TRADE_CANDIDATE") tradeCandidates++;
+      else if (c.status === "REJECTED") rejected++;
+    }
+    return {
+      observing, watchlisted, tradeCandidates, rejected,
+      lastScreenAt: this.lastScreenAt ?? null,
+    };
   }
 
   /** Called by execution layer when a position is entered. */
@@ -204,6 +226,7 @@ export class Scanner {
   }
 
   private async screen(candidate: TokenCandidate): Promise<void> {
+    this.lastScreenAt = new Date();
     const rejections = runFilters(candidate, this.config.market);
 
     if (rejections.length > 0) {
