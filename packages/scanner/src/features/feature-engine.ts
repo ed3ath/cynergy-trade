@@ -53,11 +53,17 @@ export function computeMarketFeatures(snap: MarketSnapshot): Partial<FeatureSet>
     trade_count_24h:     feature("trade_count_24h",     snap.tradeCount24h,      snap),
     unique_traders_24h:  feature("unique_traders_24h",  snap.uniqueTraders24h,   snap),
     // Derived
-    buy_sell_ratio: feature(
-      "buy_sell_ratio",
-      snap.sellCount1m > 0 ? snap.buyCount1m / snap.sellCount1m : snap.buyCount1m,
-      snap,
-    ),
+    // Absent trade counts (DexScreener: TON always, Solana without Birdeye) are
+    // unknown, not bearish — omit the feature so strategies apply their neutral default
+    ...(snap.buyCount1m === 0 && snap.sellCount1m === 0
+      ? {}
+      : {
+          buy_sell_ratio: feature(
+            "buy_sell_ratio",
+            snap.sellCount1m > 0 ? snap.buyCount1m / snap.sellCount1m : snap.buyCount1m,
+            snap,
+          ),
+        }),
     volume_buy_pct: feature(
       "volume_buy_pct",
       snap.volumeUsd1m > 0 ? (snap.buyVolumeUsd1m / snap.volumeUsd1m) * 100 : 50,

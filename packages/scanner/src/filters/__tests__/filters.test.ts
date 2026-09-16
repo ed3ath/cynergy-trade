@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { MarketConfig, MarketSnapshot } from "@autonomous-trader/shared";
 
+import { computeMarketFeatures } from "../../features/feature-engine.js";
 import type { TokenCandidate } from "../../lifecycle/candidate.js";
 import { MarketFilter } from "../filters.js";
 
@@ -57,5 +58,17 @@ describe("MarketFilter", () => {
     expect(
       MarketFilter.check(candidate(market({ volumeUsd5m: 500, confidence: 0.3 })), config),
     ).toBe("MARKET_DATA_LOW_CONFIDENCE");
+  });
+});
+
+describe("computeMarketFeatures buy_sell_ratio", () => {
+  it("omits the feature when trade counts are absent (DexScreener/TON)", () => {
+    const features = computeMarketFeatures(market({ volumeUsd1h: 100 }));
+    expect(features.buy_sell_ratio).toBeUndefined();
+  });
+
+  it("computes ratio when counts exist", () => {
+    const features = computeMarketFeatures(market({ buyCount1m: 5, sellCount1m: 2 }));
+    expect(features.buy_sell_ratio?.value).toBe(2.5);
   });
 });
