@@ -4,6 +4,7 @@
  *
  * GET  /health              liveness probe
  * GET  /status              portfolio, positions, emergency state (JSON)
+ * GET  /events              same payload as /status, streamed live (SSE, ~2s)
  * GET  /metrics             Prometheus text format
  * POST /emergency/kill      activate global kill switch
  * POST /emergency/resume    deactivate kill switch (requires ?confirm=yes)
@@ -96,6 +97,27 @@ export function startHttpServer(opts: {
         const status = getStatus();
         status.uptimeMs = Date.now() - startedAt;
         return respond(res, 200, status);
+      }
+
+      if (req.method === "GET" && path === "/events") {
+        // Server-Sent Events: push the /status payload every 2s so the dashboard
+        // renders every decision-cycle tick the moment it lands. Auto-reconnects.
+        res.writeHead(200, {
+          "content-type": "text/event-stream",
+          "cache-control": "no-cache",
+          connection: "keep-alive",
+        });
+        res.write("retry: 2000\n\n");
+        const push = () => {
+          const status = getStatus();
+          status.uptimeMs = Date.now() - startedAt;
+          const body = JSON.stringify(status, (_k, v) => (typeof v === "bigint" ? v.toString() : v));
+          res.write(`data: ${body}\n\n`);
+        };
+        push();
+        const timer = setInterval(push, 2000);
+        req.on("close", () => clearInterval(timer));
+        return;
       }
 
       if (req.method === "GET" && path === "/report") {

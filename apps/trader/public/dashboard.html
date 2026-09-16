@@ -167,14 +167,12 @@ function relTime(iso) {
   return mins < 60 ? mins + "m ago" : Math.round(mins / 60) + "h ago";
 }
 
-async function refreshStatus() {
+let metrics = {}; // /metrics values, refreshed on the slow poll
+
+function renderStatus(status) {
   document.body.classList.add("refreshing");
   try {
-    const [status, metricsText] = await Promise.all([
-      fetch("/status").then((r) => r.json()),
-      fetch("/metrics").then((r) => r.text()),
-    ]);
-    const m = parseMetrics(metricsText);
+    const m = metrics;
     const p = status.portfolio;
     window.__lastStatus = status;
     window.__statusAt = Date.now();
@@ -249,6 +247,14 @@ async function refreshStatus() {
   } finally {
     document.body.classList.remove("refreshing");
   }
+}
+
+// /metrics is the only thing still polled — the status payload arrives live
+async function refreshStatus() {
+  try {
+    metrics = parseMetrics(await fetch("/metrics").then((r) => r.text()));
+    if (window.__lastStatus) renderStatus(window.__lastStatus);
+  } catch { /* keep last frame */ }
 }
 
 // ── /history → equity line ────────────────────────────────────────────────────
@@ -351,9 +357,16 @@ function drawEquity() {
   $("equity-table").replaceChildren(tbl);
 }
 
+// Live status stream — every push renders immediately (decision cycle = 10s ticks)
+const es = new EventSource("/events");
+es.onmessage = (e) => {
+  try { renderStatus(JSON.parse(e.data)); } catch { /* skip malformed frame */ }
+};
+es.onerror = () => { $("mode-chip").textContent = "monitor unreachable"; };
+
 refreshStatus(); refreshHistory();
 setInterval(refreshStatus, 10_000);
-setInterval(refreshHistory, 60_000);
+setInterval(refreshHistory, 15_000);
 
 // 1s local ticker — keeps "last scan" visibly alive between polls
 function tick() {
