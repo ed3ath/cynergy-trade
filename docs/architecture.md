@@ -58,7 +58,7 @@ DISCOVERY → SCANNER → STRATEGY ENSEMBLE → RISK ENGINE → EXECUTION → PO
 - ✅ Phase 1: real adapters — GoPlus/Jupiter/Birdeye/SolanaRPC (verified live), Raydium LaunchLab+V4 discovery via public RPC (`ENABLE_PUBLIC_DISCOVERY=true`) or Helius key; Birdeye holder shape unverified (key-gated); Postgres journal with NullJournal fallback
 - ✅ Phase 2: scanner pipeline, features, filters, scoring, snapshot persistence (backtester dataset, 60s/token throttle)
 - ✅ Phase 3: decision loop (10s cycle), paper trading end-to-end, market regime detector, restart recovery (positions restored from journal), Telegram alerting (critical events), daily reports, PnL windows (UTC day/week) + mark-to-market drawdown
-- ✅ Ops: HTTP monitor (`/health /status /metrics /report`, bearer-auth emergency controls), `docker-compose.prod.yml` (self-migrating boot), ShadowTracker (ENTER decisions evaluated at 15min horizon → `shadow_decisions`)
+- ✅ Ops: HTTP monitor (`/health /status /events /metrics /market /history /trades /report`, dashboard at `/`, bearer-auth emergency controls), `docker-compose.prod.yml` (self-migrating boot), ShadowTracker (ENTER decisions evaluated at 15min horizon → `shadow_decisions`)
 - ✅ Durable idempotency (Postgres `executed_intents` + fallback), wallet signing (`WALLET_PRIVATE_KEY` → VersionedTransaction)
 - 🔜 Phase 4: backtester (blocked on accumulated snapshot data — run paper mode 24/7 first)
 - 🔜 Shadow-mode validation at volume, dashboard UI (currently JSON endpoints), token re-entry after exit, Helius webhook discovery

@@ -747,6 +747,7 @@ const httpServerOpts: Parameters<typeof startHttpServer>[0] = {
     db
       ? (journal as JournalRepository).getClosedTrades(config.trading.mode, config.trading.chain, 50)
       : Promise.resolve([]),
+  getMarket: () => scanner.getMarketFeed(),
   dashboardHtml: loadDashboardHtml(),
 };
 if (monitorToken) httpServerOpts.authToken = monitorToken;

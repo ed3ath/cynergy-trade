@@ -6,6 +6,7 @@
  * GET  /status              portfolio, positions, emergency state (JSON)
  * GET  /events              same payload as /status, streamed live (SSE, ~2s)
  * GET  /metrics             Prometheus text format
+ * GET  /market              live per-token market feed (scanner's latest snapshots)
  * POST /emergency/kill      activate global kill switch
  * POST /emergency/resume    deactivate kill switch (requires ?confirm=yes)
  * POST /emergency/stop-entries   stop new entries only
@@ -51,10 +52,12 @@ export function startHttpServer(opts: {
   getHistory?: () => Promise<unknown>;
   /** Closed-position trade history for GET /trades. */
   getTrades?: () => Promise<unknown>;
+  /** Live per-token market data for GET /market. */
+  getMarket?: () => unknown[];
   /** Preloaded dashboard HTML served at GET /. */
   dashboardHtml?: string | undefined;
 }): { close: () => void } {
-  const { port, host, authToken, emergency, logger, getStatus, getMetrics, getReport, getHistory, getTrades, dashboardHtml } = opts;
+  const { port, host, authToken, emergency, logger, getStatus, getMetrics, getReport, getHistory, getTrades, getMarket, dashboardHtml } = opts;
   const startedAt = Date.now();
 
   const server = createServer((req, res) => {
@@ -95,6 +98,11 @@ export function startHttpServer(opts: {
       if (req.method === "GET" && path === "/trades") {
         if (!getTrades) return respond(res, 404, { error: "trades not enabled" });
         return respond(res, 200, (await getTrades()) ?? []);
+      }
+
+      if (req.method === "GET" && path === "/market") {
+        if (!getMarket) return respond(res, 404, { error: "market feed not enabled" });
+        return respond(res, 200, getMarket());
       }
 
       if (req.method === "GET" && path === "/health") {

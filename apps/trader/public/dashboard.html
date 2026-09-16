@@ -82,6 +82,8 @@
   summary { color: var(--ink-2); font-size: 12px; cursor: pointer; }
   .refreshing { opacity: .55; transition: opacity .2s; }
   .empty { color: var(--muted); padding: 8px; }
+  #market { overflow-x: auto; }
+  #market table { min-width: 980px; }
   @media (max-width: 600px) { body { padding: 12px; } .tile.hero .value { font-size: 34px; } }
 </style>
 </head>
@@ -122,8 +124,8 @@
 </section>
 
 <section>
-  <h2>Watchlist</h2>
-  <div id="watchlist"></div>
+  <h2>Market data — every tracked token, live from the scanner</h2>
+  <div id="market"></div>
 </section>
 
 <script>
@@ -131,6 +133,13 @@
 const $ = (id) => document.getElementById(id);
 const fmtUsd = (n) => "$" + n.toLocaleString("en-US", { maximumFractionDigits: 2 });
 const fmtPct = (n) => (n >= 0 ? "+" : "") + n.toFixed(2) + "%";
+const fmtPrice = (n) => (n == null ? "—" : n >= 1000 ? fmtUsd(n) : "$" + n.toPrecision(3));
+const fmtCompact = (n) => n == null ? "—" : n >= 1e9 ? "$" + (n / 1e9).toFixed(2) + "B" : n >= 1e6 ? "$" + (n / 1e6).toFixed(2) + "M" : n >= 1e3 ? "$" + (n / 1e3).toFixed(1) + "k" : "$" + n.toFixed(0);
+const fmtAge = (iso) => {
+  if (!iso) return "—";
+  const s = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 1000));
+  return s < 60 ? s + "s ago" : relTime(iso);
+};
 const cssVar = (name) => getComputedStyle(document.body).getPropertyValue(name).trim();
 
 function h(tag, attrs, ...children) {
@@ -233,20 +242,6 @@ function renderStatus(status) {
       tile("Watchlisted", String(sc.watchlisted)),
       tile("Rejected · re-screening", String(sc.rejected)),
     );
-
-    const wl = $("watchlist");
-    if (!status.watchlist.length) wl.replaceChildren(h("div", { class: "empty", text: "Watchlist empty" }));
-    else {
-      const tbl = h("table");
-      tbl.append(h("tr", {}, h("th", { text: "Token" }), h("th", { class: "num", text: "Score" }), h("th", { text: "Status" })));
-      for (const x of status.watchlist) {
-        tbl.append(h("tr", {},
-          h("td", { class: "mono", text: x.token.slice(0, 6) + "…" + x.token.slice(-4) }),
-          h("td", { class: "num", text: String(x.score) }),
-          h("td", { text: x.status })));
-      }
-      wl.replaceChildren(tbl);
-    }
   } catch (e) {
     $("mode-chip").textContent = "monitor unreachable";
   } finally {
@@ -272,6 +267,9 @@ async function refreshHistory() {
   try {
     renderTrades(await fetch("/trades").then((r) => r.json()));
   } catch { /* keep last frame */ }
+  try {
+    renderMarket(await fetch("/market").then((r) => r.json()));
+  } catch { /* keep last frame */ }
 }
 function renderTrades(trades) {
   const el = $("trades");
@@ -293,6 +291,39 @@ function renderTrades(trades) {
       h("td", { class: "num", text: fmtPct(t.pnlPct), style: `color: var(--${t.pnlPct >= 0 ? "good" : "critical"})` }),
       h("td", { text: t.exitReason ?? "—" }),
       h("td", { text: t.closedAt ? relTime(t.closedAt) : "—" })));
+  }
+  el.replaceChildren(tbl);
+}
+// ── /market → live market data table (all scanner-tracked tokens) ────────────
+function renderMarket(rows) {
+  const el = $("market");
+  if (!rows || !rows.length) {
+    el.replaceChildren(h("div", { class: "empty", text: "No tokens tracked yet — waiting for discovery" }));
+    return;
+  }
+  const pct = (n) => n == null
+    ? h("td", { class: "num", text: "—" })
+    : h("td", { class: "num", text: fmtPct(n), style: `color: var(--${n >= 0 ? "good" : "critical"})` });
+  const num = (v) => h("td", { class: "num", text: v });
+  const tbl = h("table");
+  tbl.append(h("tr", {},
+    h("th", { text: "Token" }), h("th", { class: "num", text: "Price" }),
+    h("th", { class: "num", text: "5m" }), h("th", { class: "num", text: "1h" }), h("th", { class: "num", text: "24h" }),
+    h("th", { class: "num", text: "Vol 5m" }), h("th", { class: "num", text: "Vol 1h" }), h("th", { class: "num", text: "Vol 24h" }),
+    h("th", { class: "num", text: "Liquidity" }), h("th", { class: "num", text: "Mkt cap" }),
+    h("th", { class: "num", text: "Holders" }), h("th", { class: "num", text: "Score" }),
+    h("th", { text: "Status" }), h("th", { class: "num", text: "Updated" })));
+  for (const r of rows) {
+    tbl.append(h("tr", {},
+      h("td", { class: "mono", text: r.token.slice(0, 6) + "…" + r.token.slice(-4), title: r.token + (r.dex ? " · " + r.dex : "") }),
+      num(fmtPrice(r.priceUsd)),
+      pct(r.priceChange5m), pct(r.priceChange1h), pct(r.priceChange24h),
+      num(fmtCompact(r.volume5mUsd)), num(fmtCompact(r.volume1hUsd)), num(fmtCompact(r.volume24hUsd)),
+      num(fmtCompact(r.liquidityUsd)), num(fmtCompact(r.marketCapUsd)),
+      num(r.holders == null ? "—" : r.holders.toLocaleString("en-US")),
+      num(r.score ? String(r.score) : "—"),
+      h("td", { text: r.status, title: r.rejection ?? "" }),
+      num(fmtAge(r.observedAt))));
   }
   el.replaceChildren(tbl);
 }

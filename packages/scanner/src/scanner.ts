@@ -54,6 +54,27 @@ export interface SnapshotStore {
   recordSecurityAssessment(a: SecurityAssessment): Promise<void>;
 }
 
+/** One row of the live market feed (GET /market) — flattened latest snapshots per token. */
+export interface MarketFeedRow {
+  token: string;
+  chain: TokenDiscoveredEvent["chain"];
+  status: string;
+  score: number;
+  priceUsd: number | null;
+  priceChange5m: number | null;
+  priceChange1h: number | null;
+  priceChange24h: number | null;
+  volume5mUsd: number | null;
+  volume1hUsd: number | null;
+  volume24hUsd: number | null;
+  marketCapUsd: number | null;
+  liquidityUsd: number | null;
+  dex: string | null;
+  holders: number | null;
+  rejection: string | null;
+  observedAt: string | null;
+}
+
 export class Scanner {
   // tokenAddress → candidate
   private readonly candidates = new Map<string, TokenCandidate>();
@@ -143,6 +164,41 @@ export class Scanner {
       observing, watchlisted, tradeCandidates, rejected,
       lastScreenAt: this.lastScreenAt ?? null,
     };
+  }
+
+  /**
+   * Latest market data for every tracked token — feeds GET /market.
+   * Nulls mean "no snapshot yet" (candidate still in first data fetch).
+   */
+  getMarketFeed(): MarketFeedRow[] {
+    const rank = (s: string) =>
+      s === "TRADE_CANDIDATE" ? 0 : s === "WATCHLIST" ? 1
+      : s === "ELIGIBLE" || s === "SCREENING" ? 2 : s === "OBSERVING" ? 3
+      : s === "REJECTED" || s === "CLOSED" || s === "EXITING" || s === "ENTERED" ? 4 : 5;
+    const rows: MarketFeedRow[] = [];
+    for (const c of this.candidates.values()) {
+      if (c.status === "ARCHIVED") continue;
+      rows.push({
+        token: c.tokenAddress,
+        chain: c.chain,
+        status: c.status,
+        score: Math.round(c.scores.opportunity),
+        priceUsd: c.market?.priceUsd ?? null,
+        priceChange5m: c.market?.priceChange5m ?? null,
+        priceChange1h: c.market?.priceChange1h ?? null,
+        priceChange24h: c.market?.priceChange24h ?? null,
+        volume5mUsd: c.market?.volumeUsd5m ?? null,
+        volume1hUsd: c.market?.volumeUsd1h ?? null,
+        volume24hUsd: c.market?.volumeUsd24h ?? null,
+        marketCapUsd: c.market?.marketCapUsd ?? null,
+        liquidityUsd: c.liquidity?.liquidityUsd ?? null,
+        dex: c.liquidity?.dex ?? null,
+        holders: c.holders?.totalHolders ?? null,
+        rejection: c.rejectionReasons[0] ?? null,
+        observedAt: c.market?.observedAt?.toISOString() ?? null,
+      });
+    }
+    return rows.sort((a, b) => rank(a.status) - rank(b.status) || b.score - a.score);
   }
 
   /** Called by execution layer when a position is entered. */
