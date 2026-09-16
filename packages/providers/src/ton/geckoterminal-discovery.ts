@@ -59,13 +59,16 @@ export interface GeckoTerminalDiscoveryConfig {
 }
 
 const DEFAULTS: GeckoTerminalDiscoveryConfig = {
-  pollIntervalMs: 15_000,
+  // GT throttles sustained polling harder than the documented 30/min — a 15s
+  // new-pool poll ran all day and got the IP 429'd (verified 2026-09-16).
+  // 2/min + 0.5/min with backoff stays well inside the real limit.
+  pollIntervalMs: 30_000,
   maxSeenPools: 50_000,
   // dust pre-filter only — pools below this never grow into candidates; the
   // scanner still applies its own minLiquidityUsd gate (50k) on live data.
   minReserveUsd: 5_000,
   hotPoolsEnabled: true,
-  hotPoolsIntervalMs: 60_000,
+  hotPoolsIntervalMs: 120_000,
   hotMinReserveUsd: 80_000,
   hotMinH1ChangePct: 0,
 };
@@ -80,6 +83,9 @@ export class GeckoTerminalDiscoveryProvider extends AbstractProvider implements 
   private hotTimer?: ReturnType<typeof setInterval>;
   private polling = false;
   private pollingHot = false;
+  /** Shared 429/timeout backoff — hammering a throttled GT extends the penalty. */
+  private backoffUntil = 0;
+  private consecutiveFails = 0;
   private readonly log: Logger;
   private readonly cfg: GeckoTerminalDiscoveryConfig;
 
@@ -122,7 +128,7 @@ export class GeckoTerminalDiscoveryProvider extends AbstractProvider implements 
 
   /** One poll cycle — public for testing. */
   async pollOnce(): Promise<void> {
-    if (this.polling) return;
+    if (this.polling || Date.now() < this.backoffUntil) return;
     this.polling = true;
     try {
       const res = await fetch(`${this.baseUrl}/api/v2/networks/ton/new_pools`, {
@@ -132,8 +138,9 @@ export class GeckoTerminalDiscoveryProvider extends AbstractProvider implements 
       if (!res.ok) throw new Error(`GeckoTerminal HTTP ${res.status}`);
       const body = (await res.json()) as { data?: GtPool[] };
       for (const pool of body.data ?? []) this.processPool(pool);
+      this.onPollSuccess();
     } catch (err) {
-      this.log.warn("Discovery poll failed", { error: (err as Error).message });
+      this.onPollFailure(err as Error, "Discovery poll failed");
     } finally {
       this.polling = false;
     }
@@ -146,7 +153,7 @@ export class GeckoTerminalDiscoveryProvider extends AbstractProvider implements 
    * Public for testing.
    */
   async pollHotPools(): Promise<void> {
-    if (this.pollingHot) return;
+    if (this.pollingHot || Date.now() < this.backoffUntil) return;
     this.pollingHot = true;
     try {
       const res = await fetch(
@@ -156,11 +163,28 @@ export class GeckoTerminalDiscoveryProvider extends AbstractProvider implements 
       if (!res.ok) throw new Error(`GeckoTerminal HTTP ${res.status}`);
       const body = (await res.json()) as { data?: GtPool[] };
       for (const pool of body.data ?? []) this.processHotPool(pool);
+      this.onPollSuccess();
     } catch (err) {
-      this.log.warn("Hot-pool poll failed", { error: (err as Error).message });
+      this.onPollFailure(err as Error, "Hot-pool poll failed");
     } finally {
       this.pollingHot = false;
     }
+  }
+
+  private onPollSuccess(): void {
+    this.consecutiveFails = 0;
+  }
+
+  /** 30s → 1m → 2m → 4m → 5m cap — both polls share the penalty window. */
+  private onPollFailure(err: Error, what: string): void {
+    this.consecutiveFails++;
+    const backoffMs = Math.min(5 * 60_000, 30_000 * 2 ** (this.consecutiveFails - 1));
+    this.backoffUntil = Date.now() + backoffMs;
+    this.log.warn(`${what} — backing off`, {
+      error: err.message,
+      consecutiveFails: this.consecutiveFails,
+      backoffMs,
+    });
   }
 
   /** Exported for testing. */

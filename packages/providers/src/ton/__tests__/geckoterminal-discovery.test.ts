@@ -166,4 +166,24 @@ describe("GeckoTerminalDiscoveryProvider.processHotPool", () => {
       expect.objectContaining({ headers: { accept: "application/json" } }),
     );
   });
+
+  it("backs off after a 429 instead of hammering, retries after the window", async () => {
+    vi.useFakeTimers();
+    try {
+      const fetchMock = vi.fn(async () => new Response("{}", { status: 429 }));
+      vi.stubGlobal("fetch", fetchMock);
+      const p = new GeckoTerminalDiscoveryProvider("http://gt.test");
+
+      await p.pollOnce();   // 429 → 30s backoff
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      await p.pollOnce();   // skipped — inside backoff
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+
+      vi.setSystemTime(Date.now() + 31_000);
+      await p.pollOnce();   // window elapsed → retries
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
