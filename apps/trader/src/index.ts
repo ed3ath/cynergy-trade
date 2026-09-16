@@ -527,6 +527,11 @@ async function decisionCycle(): Promise<void> {
 
   for (const candidate of candidates.slice(0, 5)) { // cap per cycle
     try {
+      // Never re-enter a token we already hold — re-entry goes through the
+      // scanner's CLOSED→WATCHLIST cooldown path after the position exits.
+      // Without this, a restart re-seed re-promotes held tokens and pyramids.
+      if (positionManager.getTokenExposureUsd(candidate.tokenAddress) > 0) continue;
+
       const strategyCtx: StrategyContext = {
         candidate,
         marketRegime: currentRegime.regime,
