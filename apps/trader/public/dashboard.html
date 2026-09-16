@@ -364,6 +364,13 @@ es.onmessage = (e) => {
 };
 es.onerror = () => { $("mode-chip").textContent = "monitor unreachable"; };
 
+if (location.protocol === "file:") {
+  const d = document.createElement("div");
+  d.textContent = "You opened this file from disk — endpoints unreachable. Open http://localhost:3000 instead.";
+  d.style.cssText = "border:1px solid var(--critical);color:var(--critical);padding:8px 12px;border-radius:8px;margin-bottom:14px";
+  document.body.prepend(d);
+}
+
 refreshStatus(); refreshHistory();
 setInterval(refreshStatus, 10_000);
 setInterval(refreshHistory, 15_000);

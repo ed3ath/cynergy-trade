@@ -79,7 +79,8 @@ export function startHttpServer(opts: {
       // ── Routes ──────────────────────────────────────────────────────────────
       if (req.method === "GET" && (path === "/" || path === "/index.html")) {
         if (!dashboardHtml) return respond(res, 404, { error: "dashboard not bundled" });
-        res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+        // no-store: a stale cached page means a frozen dashboard with dead endpoints
+        res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
         res.end(dashboardHtml);
         return;
       }
