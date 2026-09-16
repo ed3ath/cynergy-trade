@@ -205,7 +205,7 @@ export class Scanner {
     if (rejections.length > 0) {
       candidate.rejectionReasons = rejections;
       this.transition(candidate.tokenAddress, "REJECTED");
-      this.logger.debug("Candidate rejected", {
+      this.logger.info("Candidate rejected", {
         token: candidate.tokenAddress,
         reasons: rejections,
       });
