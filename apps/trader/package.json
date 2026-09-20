@@ -18,7 +18,12 @@
     "@autonomous-trader/scanner": "workspace:*",
     "@autonomous-trader/strategy": "workspace:*",
     "@autonomous-trader/execution": "workspace:*",
-    "@autonomous-trader/position": "workspace:*"
+    "@autonomous-trader/position": "workspace:*",
+    "ioredis": "^5"
   },
-  "devDependencies": { "typescript": "*", "vitest": "*", "tsx": "*" }
+  "devDependencies": {
+    "typescript": "*",
+    "vitest": "*",
+    "tsx": "*"
+  }
 }

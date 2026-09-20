@@ -60,8 +60,11 @@ Close the gap between paper fills and reality before any LIVE thought.
 
 Preconditions (unchanged, per CLAUDE.md and `docs/deployment.md`):
 
-1. Redis-backed idempotency (LIVE is forbidden until it exists)
-2. Real wallet signing on the chosen chain
+1. ✅ Redis-backed idempotency — `RedisIdempotencyGuard` (SET NX PX, 30d
+   TTL, head of the fallback chain: Redis → Pg → memory). Boots when
+   `REDIS_URL` is set; **LIVE refuses to start without a healthy Redis**
+   (paper/shadow degrade gracefully to Pg)
+2. Real wallet signing on the chosen chain (Solana exists; TON = C3)
 3. LIVE checklist run through; Telegram alerting verified end-to-end
 4. Git remote + off-machine logs — a single dev PC is not an execution venue
 5. Start at token-sized capital with daily loss limits already enforced

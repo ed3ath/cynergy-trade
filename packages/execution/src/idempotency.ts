@@ -64,3 +64,35 @@ export async function assertNotDuplicate(guard: IdempotencyGuard, intentId: stri
     throw new ExecutionError(`Duplicate execution prevented for intent ${intentId}`, { intentId });
   }
 }
+
+/**
+ * Redis-backed guard (Phase D gate: LIVE is forbidden until this exists).
+ * SET NX PX is atomic — the claim and the uniqueness check are one operation,
+ * safe across processes and crashes. Claims expire after ttlMs (Pg's
+ * executed_intents remains the forever-record; Redis is the fast lock).
+ */
+export class RedisIdempotencyGuard implements IdempotencyGuard {
+  constructor(
+    /** Minimal surface of ioredis we use — structural, easy to fake in tests. */
+    private readonly redis: {
+      set(key: string, value: string, mode: "PX", ms: number, nx: "NX"): Promise<"OK" | null>;
+      ping(): Promise<string>;
+      disconnect(): void;
+    },
+    private readonly ttlMs = 30 * 24 * 3_600_000, // 30d — outlives any retry storm
+  ) {}
+
+  async claim(intentId: string): Promise<boolean> {
+    const res = await this.redis.set(`executed_intent:${intentId}`, "1", "PX", this.ttlMs, "NX");
+    return res === "OK";
+  }
+
+  /** Boot-time health probe — LIVE must refuse to start when Redis is down. */
+  async healthy(): Promise<boolean> {
+    try {
+      return (await this.redis.ping()) === "PONG";
+    } catch {
+      return false;
+    }
+  }
+}

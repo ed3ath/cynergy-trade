@@ -20,7 +20,8 @@
     "@autonomous-trader/providers": "workspace:*",
     "@autonomous-trader/core": "workspace:*",
     "@solana/web3.js": "^1.95.0",
-    "bs58": "^6.0.0"
+    "bs58": "^6.0.0",
+    "ioredis": "^5"
   },
   "devDependencies": {
     "typescript": "*",

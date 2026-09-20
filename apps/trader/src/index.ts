@@ -44,6 +44,7 @@ import {
   PgIdempotencyGuard,
   InMemoryIdempotencyGuard,
   FallbackIdempotencyGuard,
+  RedisIdempotencyGuard,
 } from "@autonomous-trader/execution";
 import { PositionManager } from "@autonomous-trader/position";
 
@@ -146,10 +147,35 @@ const riskEngine = new RiskEngine(
 );
 
 // ─── Execution router ─────────────────────────────────────────────────────────
-// Durable idempotency when DB up; memory-only guard otherwise (paper/dev)
-const idempotencyGuard = db
+// Idempotency chain: Redis (when REDIS_URL) → Postgres → memory.
+// LIVE refuses to boot without a healthy Redis guard (Phase D gate);
+// paper/shadow run fine on Pg/memory alone.
+let redisClient: import("ioredis").Redis | null = null;
+if (process.env["REDIS_URL"]) {
+  const { Redis: RedisCtor } = await import("ioredis");
+  redisClient = new RedisCtor(process.env["REDIS_URL"], { lazyConnect: false, maxRetriesPerRequest: 1 });
+  const client = redisClient;
+  client.on("error", (e: Error) => log.warn("Redis error (idempotency falls back to Pg)", { error: e.message }));
+}
+let redisGuard: RedisIdempotencyGuard | null = null;
+if (redisClient) {
+  redisGuard = new RedisIdempotencyGuard(redisClient as unknown as ConstructorParameters<typeof RedisIdempotencyGuard>[0]);
+  if (await redisGuard.healthy()) {
+    log.info("Redis idempotency guard connected");
+  } else {
+    if (config.trading.mode === "LIVE") {
+      throw new Error("LIVE mode requires a healthy Redis (REDIS_URL) — refusing to start");
+    }
+    log.warn("Redis unreachable — idempotency falls back to Postgres");
+    redisGuard = null;
+  }
+}
+const pgOrMemoryGuard = db
   ? new FallbackIdempotencyGuard(new PgIdempotencyGuard(db), new InMemoryIdempotencyGuard())
   : new InMemoryIdempotencyGuard();
+const idempotencyGuard = redisGuard
+  ? new FallbackIdempotencyGuard(redisGuard, pgOrMemoryGuard)
+  : pgOrMemoryGuard;
 
 // Wallet: required for LIVE, optional otherwise
 const { loadWalletFromEnv } = await import("@autonomous-trader/execution");
@@ -832,6 +858,7 @@ async function shutdown(signal: string): Promise<void> {
     dailyPnlUsd: portfolio.dailyPnlUsd,
   });
   if (db) await db.close();
+  redisClient?.disconnect();
   log.info("Shutdown complete");
   process.exit(0);
 }
