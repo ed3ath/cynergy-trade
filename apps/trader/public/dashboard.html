@@ -136,7 +136,7 @@
 <section>
   <h2>Equity — total value over time (paper)</h2>
   <div id="equity-wrap">
-    <svg id="equity-svg" viewBox="0 0 800 240" preserveAspectRatio="none" role="img" aria-label="Equity curve"></svg>
+    <svg id="equity-svg" viewBox="0 0 800 240" role="img" aria-label="Equity curve"></svg>
     <div id="tooltip"></div>
   </div>
   <details><summary>Table view</summary><div id="equity-table"></div></details>
@@ -612,7 +612,10 @@ function niceTicks(min, max, count) {
 }
 function drawEquity() {
   const svg = $("equity-svg");
-  const W = 800, H = 240, L = 56, R = 14, T = 14, B = 26;
+  // 1 SVG unit = 1 CSS px: a fixed 800-wide viewBox stretched to container
+  // width distorted text, dots and stroke widths
+  const W = Math.max(320, Math.round($("equity-wrap").clientWidth) || 800), H = 240, L = 56, R = 14, T = 14, B = 26;
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
   svg.replaceChildren();
   if (history.length < 2) {
     const t = h("text", { x: W / 2, y: H / 2, "text-anchor": "middle" });
@@ -650,7 +653,7 @@ function drawEquity() {
   const last = history[history.length - 1];
   svg.append(h("circle", { cx: x(history.length - 1), cy: y(last.totalValueUsd), r: 6, fill: cssVar("--surface") }));
   svg.append(h("circle", { cx: x(history.length - 1), cy: y(last.totalValueUsd), r: 4, fill: cssVar("--series-1") }));
-  const el = h("text", { x: x(history.length - 1) - 6, y: y(last.totalValueUsd) - 10, "text-anchor": "end" });
+  const el = h("text", { x: x(history.length - 1) - 6, y: Math.max(T + 8, y(last.totalValueUsd) - 10), "text-anchor": "end" });
   el.textContent = fmtUsd(last.totalValueUsd);
   svg.append(el);
 
@@ -713,6 +716,7 @@ if (location.protocol === "file:") {
 refreshStatus(); refreshHistory();
 setInterval(refreshStatus, 10_000);
 setInterval(refreshHistory, 15_000);
+addEventListener("resize", () => drawEquity()); // re-fit viewBox 1:1 to the new width
 
 // 1s local ticker — keeps "last scan" visibly alive between polls
 function tick() {
