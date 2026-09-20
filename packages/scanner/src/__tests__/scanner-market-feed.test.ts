@@ -139,6 +139,27 @@ describe("Scanner.getMarketFeed", () => {
     expect(feed.findIndex((r) => r.token === "GOOD")).toBeLessThan(feed.findIndex((r) => r.token === "DEAD"));
   });
 
+  it("refreshes TRADE_CANDIDATE tokens (regression: promoted tokens froze on stale data)", async () => {
+    let price = 0.5;
+    const markets: Record<string, MarketSnapshot | Error> = { GOOD: marketSnap("GOOD", price, 500) };
+    const scanner = makeScanner(markets);
+    scanner.seedToken("GOOD", "ton");
+    await flush();
+    expect(scanner.getCandidate("GOOD")?.status).toBe("WATCHLIST");
+
+    // Promote (permissive gates → score from healthy fixtures is high), then
+    // change the price and refresh: the candidate must pick up the new data.
+    const cand = scanner.getCandidate("GOOD")!;
+    scanner["transition"]("GOOD", "TRADE_CANDIDATE");
+    expect(scanner.getCandidate("GOOD")?.status).toBe("TRADE_CANDIDATE");
+
+    price = 0.9;
+    markets["GOOD"] = marketSnap("GOOD", price, 500);
+    await (scanner as unknown as { refreshCandidates(): Promise<void> }).refreshCandidates();
+
+    expect(scanner.getMarketFeed()[0]?.priceUsd).toBe(0.9);
+  });
+
   it("getMarketDetail returns full snapshots or null for unknown tokens", async () => {
     const scanner = makeScanner({
       GOOD: marketSnap("GOOD", 0.5, 500),

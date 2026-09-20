@@ -426,8 +426,11 @@ export class Scanner {
   }
 
   private async refreshCandidates(): Promise<void> {
+    // TRADE_CANDIDATE must refresh too — it is the status the strategy
+    // actually evaluates; excluding it froze promoted tokens on stale data
+    // (every decision after promotion read minutes-old prices).
     const toRefresh = [...this.candidates.values()].filter(
-      (c) => c.status === "WATCHLIST" || c.status === "OBSERVING",
+      (c) => c.status === "WATCHLIST" || c.status === "TRADE_CANDIDATE" || c.status === "OBSERVING",
     );
 
     for (const candidate of toRefresh) {
@@ -439,7 +442,8 @@ export class Scanner {
 
         // Re-run filters — conditions can deteriorate
         const rejections = runFilters(candidate, this.config.market);
-        if (rejections.length > 0 && candidate.status === "WATCHLIST") {
+        if (rejections.length > 0 &&
+            (candidate.status === "WATCHLIST" || candidate.status === "TRADE_CANDIDATE")) {
           candidate.rejectionReasons = rejections;
           candidate.rejectedAt = new Date();
           this.transition(candidate.tokenAddress, "REJECTED");
@@ -454,6 +458,16 @@ export class Scanner {
         if (candidate.status === "WATCHLIST" && candidate.scores.opportunity >= 65) {
           this.transition(candidate.tokenAddress, "TRADE_CANDIDATE");
           this.logger.info("Promoted to trade candidate", {
+            token: candidate.tokenAddress,
+            score: candidate.scores.opportunity.toFixed(1),
+          });
+        }
+
+        // Demote when the score falls back under the bar — a stale promotion
+        // would keep feeding the strategy a deteriorated candidate
+        if (candidate.status === "TRADE_CANDIDATE" && candidate.scores.opportunity < 65) {
+          this.transition(candidate.tokenAddress, "WATCHLIST");
+          this.logger.info("Demoted from trade candidate", {
             token: candidate.tokenAddress,
             score: candidate.scores.opportunity.toFixed(1),
           });
@@ -528,6 +542,17 @@ export class Scanner {
     if (liquidity.status === "fulfilled") candidate.liquidity = liquidity.value;
     if (security.status === "fulfilled")  candidate.security  = security.value;
     if (holders.status === "fulfilled")   candidate.holders   = holders.value;
+
+    // allSettled swallows failures silently — a dead provider would freeze the
+    // candidate on stale snapshots with no trace. Log every rejection.
+    const failed = [market, liquidity, security, holders]
+      .filter((r) => r.status === "rejected") as PromiseRejectedResult[];
+    for (const r of failed) {
+      this.logger.warn("Provider fetch failed — keeping last snapshot", {
+        token: tokenAddress,
+        error: (r.reason as Error)?.message ?? String(r.reason),
+      });
+    }
 
     this.persistSnapshots(candidate);
 
