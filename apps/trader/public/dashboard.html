@@ -4,68 +4,111 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Cynergy Trade Monitor</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
-  /* Reference palette (dataviz skill) — roles only, light+dark via both scopes */
+  /* Design system: ui-ux-pro-max "Minimalism & Swiss / Trust" — navy + gold terminal.
+     Chart colors are the dataviz reference palette, re-validated against these
+     surfaces (series-1 passes all checks on #222735 dark / #ffffff light;
+     status hexes carry icon+label, never color alone). */
   :root { color-scheme: light; }
   :root[data-theme="dark"] { color-scheme: dark; }
   body {
-    --page:        #f9f9f7;  --surface:   #fcfcfb;
-    --ink:         #0b0b0b;  --ink-2:     #52514e;  --muted: #898781;
-    --grid:        #e1e0d9;  --baseline:  #c3c2b7;
+    --page:        #f6f7f9;  --surface:   #ffffff;
+    --ink:         #0f172a;  --ink-2:     #475069;  --muted: #64748b;
+    --grid:        #e2e8f0;  --baseline:  #cbd5e1;
     --series-1:    #2a78d6;
-    --good:        #006300;  --warning:   #fab219;  --critical: #d03b3b;
-    --ring:        rgba(11,11,11,0.10);
+    --good:        #006300;  --warning:   #b45309;  --critical: #d03b3b;
+    --accent:      #b45309;  --on-accent: #ffffff;
+    --ring:        rgba(15,23,42,0.12);
+    --wash:        rgba(15,23,42,0.04);
   }
   @media (prefers-color-scheme: dark) {
     body:not([data-theme="light"]) {
-      --page:      #0d0d0d;  --surface:   #1a1a19;
-      --ink:       #ffffff;  --ink-2:     #c3c2b7;  --muted: #898781;
-      --grid:      #2c2c2a;  --baseline:  #383835;
+      --page:      #0f172a;  --surface:   #222735;
+      --ink:       #f8fafc;  --ink-2:     #94a3b8;  --muted: #7c8aa5;
+      --grid:      #2a3653;  --baseline:  #3d4c6e;
       --series-1:  #3987e5;
-      --good:      #0ca30c;  --critical:  #d03b3b;
-      --ring:      rgba(255,255,255,0.10);
+      --good:      #0ca30c;  --warning:   #fab219;  --critical: #e66767;
+      --accent:    #f59e0b;  --on-accent: #0f172a;
+      --ring:      rgba(248,250,252,0.12);
+      --wash:      rgba(248,250,252,0.05);
     }
   }
   body[data-theme="dark"] {
-    --page:      #0d0d0d;  --surface:   #1a1a19;
-    --ink:       #ffffff;  --ink-2:     #c3c2b7;  --muted: #898781;
-    --grid:      #2c2c2a;  --baseline:  #383835;
+    --page:      #0f172a;  --surface:   #222735;
+    --ink:       #f8fafc;  --ink-2:     #94a3b8;  --muted: #7c8aa5;
+    --grid:      #2a3653;  --baseline:  #3d4c6e;
     --series-1:  #3987e5;
-    --good:      #0ca30c;  --critical:  #d03b3b;
-    --ring:      rgba(255,255,255,0.10);
+    --good:      #0ca30c;  --warning:   #fab219;  --critical: #e66767;
+    --accent:    #f59e0b;  --on-accent: #0f172a;
+    --ring:      rgba(248,250,252,0.12);
+    --wash:      rgba(248,250,252,0.05);
   }
   * { box-sizing: border-box; }
   body {
-    margin: 0; padding: 20px; background: var(--page); color: var(--ink);
-    font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+    margin: 0; padding: 0 20px 20px; background: var(--page); color: var(--ink);
+    font: 14px/1.5 Inter, system-ui, -apple-system, "Segoe UI", sans-serif;
+    font-feature-settings: "tnum" 0;
   }
-  header { display: flex; align-items: baseline; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; }
-  header h1 { font-size: 16px; margin: 0; }
-  header .sub { color: var(--ink-2); }
+  /* ── app bar ─────────────────────────────────────────────────────────── */
+  .appbar {
+    position: sticky; top: 0; z-index: 40;
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+    margin: 0 -20px; padding: 10px 20px;
+    background: var(--page); border-bottom: 1px solid var(--ring);
+  }
+  .brand { display: flex; align-items: center; gap: 10px; }
+  .brand .mark { width: 26px; height: 26px; flex: none; color: var(--accent); }
+  .brand h1 { font-size: 15px; margin: 0; font-weight: 600; letter-spacing: -0.01em; }
+  header .sub { color: var(--ink-2); font-size: 13px; }
+  .appbar .spacer { flex: 1; }
+  .chip { display: inline-flex; align-items: center; gap: 6px; }
+  .chip .dot { width: 8px; height: 8px; border-radius: 50%; }
+  #theme-toggle {
+    display: inline-flex; align-items: center; gap: 6px; cursor: pointer;
+    font: 12px/1 Inter, system-ui, sans-serif; font-weight: 500;
+    padding: 6px 12px; border-radius: 8px;
+    border: 1px solid var(--ring); background: var(--surface); color: var(--ink-2);
+    transition: border-color 0.15s, color 0.15s;
+  }
+  #theme-toggle:hover { border-color: var(--accent); color: var(--ink); }
+  #theme-toggle svg { width: 14px; height: 14px; }
+  #theme-toggle:focus-visible, .logbar button:focus-visible {
+    outline: 2px solid var(--accent); outline-offset: 1px;
+  }
   #banner {
-    display: none; align-items: center; gap: 8px; padding: 8px 12px; margin-bottom: 14px;
-    border: 1px solid var(--critical); border-radius: 8px; color: var(--critical); font-weight: 600;
+    display: none; align-items: center; gap: 10px; padding: 10px 14px; margin: 14px 0;
+    border: 1px solid var(--critical); border-radius: 10px;
+    background: color-mix(in srgb, var(--critical) 10%, transparent);
+    color: var(--critical); font-weight: 600;
   }
+  #banner svg { width: 18px; height: 18px; flex: none; }
+  /* ── cards & tiles ───────────────────────────────────────────────────── */
   .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 14px; }
   .tile {
     background: var(--surface); border: 1px solid var(--ring); border-radius: 10px; padding: 12px 14px;
+    transition: border-color 0.15s;
   }
-  .tile .label { color: var(--ink-2); font-size: 12px; }
-  .tile .value { font-size: 22px; font-weight: 600; margin-top: 2px; }
-  .tile.hero .value { font-size: 44px; }
-  .tile .delta { font-size: 12px; margin-top: 2px; }
+  .tile .label { color: var(--ink-2); font-size: 11px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.06em; }
+  .tile .value { font-size: 26px; font-weight: 600; margin-top: 4px; letter-spacing: -0.01em; }
+  .tile.hero .value { font-size: 42px; }
+  .tile .delta { font-size: 12px; margin-top: 2px; font-weight: 500; }
   .delta.up   { color: var(--good); }
   .delta.down { color: var(--critical); }
-  .chip { display: inline-flex; align-items: center; gap: 6px; }
-  .chip .dot { width: 8px; height: 8px; border-radius: 50%; }
   section {
     background: var(--surface); border: 1px solid var(--ring); border-radius: 10px;
     padding: 14px; margin-bottom: 14px;
   }
-  section h2 { font-size: 13px; color: var(--ink-2); margin: 0 0 10px; font-weight: 600; }
+  section h2 {
+    font-size: 11px; color: var(--ink-2); margin: 0 0 12px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.08em;
+  }
+  /* ── equity chart ────────────────────────────────────────────────────── */
   #equity-wrap { position: relative; }
   #equity-svg { width: 100%; height: 240px; display: block; }
-  #equity-svg text { font: 11px system-ui, sans-serif; fill: var(--muted); }
+  #equity-svg text { font: 11px Inter, system-ui, sans-serif; fill: var(--muted); }
   #tooltip {
     position: absolute; display: none; pointer-events: none; background: var(--surface);
     border: 1px solid var(--ring); border-radius: 8px; padding: 6px 10px; box-shadow: 0 2px 8px rgba(0,0,0,.15);
@@ -73,9 +116,11 @@
   }
   #tooltip .v { font-weight: 600; }
   #tooltip .t { color: var(--ink-2); font-size: 11px; }
+  /* ── tables ──────────────────────────────────────────────────────────── */
   table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
-  th { text-align: left; color: var(--muted); font-weight: 500; font-size: 11px; padding: 4px 8px; border-bottom: 1px solid var(--baseline); }
-  td { padding: 5px 8px; border-bottom: 1px solid var(--grid); }
+  th { text-align: left; color: var(--muted); font-weight: 500; font-size: 11px; padding: 6px 8px; border-bottom: 1px solid var(--baseline); text-transform: uppercase; letter-spacing: 0.05em; }
+  td { padding: 6px 8px; border-bottom: 1px solid var(--grid); }
+  tbody tr:last-child td, table > tr:last-child td { border-bottom: none; }
   td.num, th.num { text-align: right; }
   .mono { font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
   td a { color: var(--series-1); text-decoration: none; }
@@ -84,46 +129,90 @@
   summary { color: var(--ink-2); font-size: 12px; cursor: pointer; }
   .refreshing { opacity: .55; transition: opacity .2s; }
   .empty { color: var(--muted); padding: 8px; }
+  .pill {
+    display: inline-block; padding: 1px 9px; border-radius: 999px;
+    font-size: 11px; font-weight: 500; line-height: 1.7;
+    border: 1px solid var(--ring); color: var(--ink-2); background: var(--wash);
+  }
+  .pill-good { color: var(--good); border-color: color-mix(in srgb, var(--good) 35%, transparent); }
+  .pill-warn { color: var(--warning); border-color: color-mix(in srgb, var(--warning) 35%, transparent); }
+  .pill-bad  { color: var(--critical); border-color: color-mix(in srgb, var(--critical) 35%, transparent); }
+  .pill-info { color: var(--series-1); border-color: color-mix(in srgb, var(--series-1) 35%, transparent); }
+  /* ── market table ────────────────────────────────────────────────────── */
   #market { overflow-x: auto; }
   #market table { min-width: 980px; }
   #market tr[data-token] { cursor: pointer; }
-  #market tr[data-token]:hover, #market tr[data-token]:focus { background: var(--grid); outline: none; }
+  #market tr[data-token]:hover, #market tr[data-token]:focus { background: var(--wash); outline: none; }
   #token-detail .detail-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; margin-top: 8px; }
   #token-detail .detail-grid .grp { border: 1px solid var(--ring); border-radius: 8px; padding: 8px 10px; }
   #token-detail .grp h3 { font-size: 12px; color: var(--ink-2); margin: 0 0 6px; font-weight: 600; }
   #token-detail td { padding: 3px 6px; }
+  /* ── activity / console ──────────────────────────────────────────────── */
   .logbar { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; flex-wrap: wrap; }
   .logbar button {
-    font: 12px system-ui, sans-serif; padding: 2px 12px; border-radius: 999px; cursor: pointer;
+    font: 12px/1 Inter, system-ui, sans-serif; font-weight: 500; padding: 5px 14px; border-radius: 999px; cursor: pointer;
     border: 1px solid var(--ring); background: var(--surface); color: var(--ink-2);
+    transition: border-color 0.15s, color 0.15s, background 0.15s;
   }
-  .logbar button.on { background: var(--series-1); border-color: var(--series-1); color: #fff; font-weight: 600; }
-  .logbar button:focus-visible { outline: 2px solid var(--series-1); outline-offset: 1px; }
-  #console {
+  .logbar button:hover { color: var(--ink); }
+  .logbar button.on {
+    background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 600;
+  }
+  .logbar .count { color: var(--muted); font-size: 12px; }
+  #activity, #console {
     background: var(--page); border: 1px solid var(--ring); border-radius: 8px;
-    font: 12px/1.6 ui-monospace, Consolas, monospace; padding: 8px 10px;
+    font: 12px/1.65 ui-monospace, Consolas, monospace; padding: 8px 10px;
     height: 280px; overflow-y: auto; overscroll-behavior: contain;
   }
-  #console .row { display: flex; gap: 8px; }
-  #console .row.dim { opacity: .65; }
-  #console .t { color: var(--muted); flex: none; }
-  #console .lv { flex: none; font-weight: 700; width: 52px; }
-  #console .lv-signal { color: var(--series-1); }
-  #console .lv-error, #console .lv-fatal { color: var(--critical); }
-  #console .lv-warn { color: var(--warning); }
-  #console .lv-skip, #console .lv-reject { color: var(--muted); }
-  #console .m { word-break: break-all; }
-  @media (max-width: 600px) { body { padding: 12px; } .tile.hero .value { font-size: 34px; } }
+  #activity .row, #console .row { display: flex; gap: 8px; }
+  #activity .row.dim, #console .row.dim { opacity: .65; }
+  #activity .t, #console .t { color: var(--muted); flex: none; }
+  #activity .lv, #console .lv { flex: none; font-weight: 700; width: 56px; }
+  #activity .lv-signal, #console .lv-signal { color: var(--series-1); }
+  #activity .lv-error, #console .lv-error, #activity .lv-fatal, #console .lv-fatal { color: var(--critical); }
+  #activity .lv-warn, #console .lv-warn { color: var(--warning); }
+  #activity .lv-skip, #console .lv-skip, #activity .lv-reject, #console .lv-reject { color: var(--muted); }
+  #activity .m, #console .m { word-break: break-all; }
+  @media (max-width: 600px) {
+    body { padding: 0 12px 12px; }
+    .appbar { margin: 0 -12px; padding: 10px 12px; }
+    .tile.hero .value { font-size: 32px; }
+    .tile .value { font-size: 22px; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { transition: none !important; animation: none !important; }
+  }
 </style>
 </head>
 <body>
-<header>
-  <h1>Cynergy Trade Monitor</h1>
+<header class="appbar">
+  <div class="brand">
+    <svg class="mark" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path d="M3 17l4.5-5 3.5 3L21 6" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M15 6h6v6" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>
+    <h1>Cynergy Trade</h1>
+  </div>
   <span class="sub" id="mode-chip"></span>
   <span class="sub" id="uptime"></span>
-  <span class="sub chip" id="live-chip"><span class="dot" style="background: var(--good)"></span><span id="live-text">live</span></span>
+  <span class="chip sub" id="live-chip"><span class="dot" style="background: var(--good)"></span><span id="live-text">live</span></span>
+  <span class="spacer"></span>
+  <button id="theme-toggle" aria-label="Color theme">
+    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <circle cx="12" cy="12" r="4.2" stroke="currentColor" stroke-width="2"/>
+      <path id="theme-icon-rays" d="M12 2.5v2.8M12 18.7v2.8M2.5 12h2.8M18.7 12h2.8M5.3 5.3l2 2M16.7 16.7l2 2M18.7 5.3l-2 2M7.3 16.7l-2 2" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+    </svg>
+    <span id="theme-label">auto</span>
+  </button>
 </header>
-<div id="banner"><span>⛔</span><span id="banner-text"></span></div>
+<div id="banner">
+  <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+    <path d="M12 3L22 20H2L12 3z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>
+    <path d="M12 10v4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+    <circle cx="12" cy="17.4" r="1.15" fill="currentColor"/>
+  </svg>
+  <span id="banner-text"></span>
+</div>
 
 <section>
   <h2>Scanner activity</h2>
@@ -136,7 +225,7 @@
 <section>
   <h2>Equity — total value over time (paper)</h2>
   <div id="equity-wrap">
-    <svg id="equity-svg" viewBox="0 0 800 240" preserveAspectRatio="none" role="img" aria-label="Equity curve"></svg>
+    <svg id="equity-svg" viewBox="0 0 800 240" role="img" aria-label="Equity curve"></svg>
     <div id="tooltip"></div>
   </div>
   <details><summary>Table view</summary><div id="equity-table"></div></details>
@@ -157,7 +246,7 @@
   <div class="logbar">
     <button id="actf-all" class="on" data-a="all">All</button>
     <button id="actf-actions" data-a="actions">Actions only</button>
-    <span class="sub" id="act-count" style="color: var(--muted)"></span>
+    <span class="count" id="act-count"></span>
   </div>
   <div id="activity"></div>
 </section>
@@ -168,7 +257,7 @@
     <button id="logf-signals" class="on" data-f="signals">Signals</button>
     <button id="logf-all" data-f="all">All</button>
     <button id="logf-errors" data-f="errors">Errors</button>
-    <span class="sub" id="log-count" style="color: var(--muted)"></span>
+    <span class="count" id="log-count"></span>
   </div>
   <div id="console"></div>
 </section>
@@ -226,6 +315,21 @@ function tile(label, value, delta) {
   if (delta) t.append(h("div", { class: "delta " + delta.cls, text: delta.text }));
   return t;
 }
+
+// ── theme toggle (auto → light → dark; chart colors re-snapshot on switch) ──
+const THEMES = ["", "light", "dark"];
+let themeIx = 0;
+try { themeIx = Math.max(0, THEMES.indexOf(localStorage.getItem("theme"))); } catch { /* storage unavailable */ }
+function applyTheme() {
+  const t = THEMES[themeIx];
+  for (const el of [document.documentElement, document.body]) {
+    if (t) el.dataset.theme = t; else delete el.dataset.theme; // auto: follow prefers-color-scheme
+  }
+  $("theme-label").textContent = t || "auto";
+  try { localStorage.setItem("theme", t); } catch { /* storage unavailable */ }
+  drawEquity(); // axis/grid/series colors are read from CSS vars at draw time
+}
+$("theme-toggle").addEventListener("click", () => { themeIx = (themeIx + 1) % THEMES.length; applyTheme(); });
 
 // ── /status + /metrics ────────────────────────────────────────────────────────
 function parseMetrics(text) {
@@ -472,16 +576,21 @@ function pushLog(line) {
   }
   $("log-count").textContent = `${logBuf.length} lines`;
 }
-document.querySelectorAll(".logbar button").forEach((b) =>
+document.querySelectorAll(".logbar button[data-f]").forEach((b) =>
   b.addEventListener("click", () => {
     logFilter = b.dataset.f;
-    document.querySelectorAll(".logbar button").forEach((x) => x.classList.toggle("on", x === b));
+    document.querySelectorAll(".logbar button[data-f]").forEach((x) => x.classList.toggle("on", x === b));
     renderLogs();
   }));
 const logEs = new EventSource("/logs");
 logEs.onmessage = (e) => pushLog(e.data);
 
 // ── /market → live market data table (all scanner-tracked tokens) ────────────
+const statusPill = (s) => {
+  const cls = /candidat/i.test(s) ? "pill-good" : /watch/i.test(s) ? "pill-info"
+    : /reject/i.test(s) ? "pill-bad" : /observ/i.test(s) ? "" : "";
+  return h("span", { class: "pill " + cls, text: s });
+};
 function renderMarket(rows) {
   const el = $("market");
   if (!rows || !rows.length) {
@@ -513,7 +622,7 @@ function renderMarket(rows) {
       num(fmtCompact(r.liquidityUsd)), num(fmtCompact(r.marketCapUsd)),
       num(r.holders == null ? "—" : r.holders.toLocaleString("en-US")),
       num(r.score ? String(r.score) : "—"),
-      h("td", { text: r.status, title: r.rejection ?? "" }),
+      r.status ? h("td", { title: r.rejection ?? "" }, statusPill(r.status)) : h("td", { text: "—" }),
       num(fmtAge(r.observedAt))));
   }
   el.replaceChildren(tbl);
@@ -612,7 +721,10 @@ function niceTicks(min, max, count) {
 }
 function drawEquity() {
   const svg = $("equity-svg");
-  const W = 800, H = 240, L = 56, R = 14, T = 14, B = 26;
+  // 1 SVG unit = 1 CSS px: a fixed 800-wide viewBox stretched to container
+  // width distorted text, dots and stroke widths
+  const W = Math.max(320, Math.round($("equity-wrap").clientWidth) || 800), H = 240, L = 56, R = 14, T = 14, B = 26;
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
   svg.replaceChildren();
   if (history.length < 2) {
     const t = h("text", { x: W / 2, y: H / 2, "text-anchor": "middle" });
@@ -650,7 +762,7 @@ function drawEquity() {
   const last = history[history.length - 1];
   svg.append(h("circle", { cx: x(history.length - 1), cy: y(last.totalValueUsd), r: 6, fill: cssVar("--surface") }));
   svg.append(h("circle", { cx: x(history.length - 1), cy: y(last.totalValueUsd), r: 4, fill: cssVar("--series-1") }));
-  const el = h("text", { x: x(history.length - 1) - 6, y: y(last.totalValueUsd) - 10, "text-anchor": "end" });
+  const el = h("text", { x: x(history.length - 1) - 6, y: Math.max(T + 8, y(last.totalValueUsd) - 10), "text-anchor": "end" });
   el.textContent = fmtUsd(last.totalValueUsd);
   svg.append(el);
 
@@ -706,13 +818,15 @@ es.onerror = () => { $("mode-chip").textContent = "monitor unreachable"; };
 if (location.protocol === "file:") {
   const d = document.createElement("div");
   d.textContent = "You opened this file from disk — endpoints unreachable. Open http://localhost:3000 instead.";
-  d.style.cssText = "border:1px solid var(--critical);color:var(--critical);padding:8px 12px;border-radius:8px;margin-bottom:14px";
+  d.style.cssText = "border:1px solid var(--critical);color:var(--critical);padding:8px 12px;border-radius:8px;margin:14px 0";
   document.body.prepend(d);
 }
 
+applyTheme();
 refreshStatus(); refreshHistory();
 setInterval(refreshStatus, 10_000);
 setInterval(refreshHistory, 15_000);
+addEventListener("resize", () => drawEquity()); // re-fit viewBox 1:1 to the new width
 
 // 1s local ticker — keeps "last scan" visibly alive between polls
 function tick() {
