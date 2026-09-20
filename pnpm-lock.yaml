@@ -86,6 +86,34 @@ importers:
         specifier: '*'
         version: 2.1.9(@types/node@22.20.2)
 
+  packages/backtest:
+    dependencies:
+      '@autonomous-trader/core':
+        specifier: workspace:*
+        version: link:../core
+      '@autonomous-trader/execution':
+        specifier: workspace:*
+        version: link:../execution
+      '@autonomous-trader/position':
+        specifier: workspace:*
+        version: link:../position
+      '@autonomous-trader/scanner':
+        specifier: workspace:*
+        version: link:../scanner
+      '@autonomous-trader/shared':
+        specifier: workspace:*
+        version: link:../shared
+      '@autonomous-trader/strategy':
+        specifier: workspace:*
+        version: link:../strategy
+    devDependencies:
+      typescript:
+        specifier: '*'
+        version: 5.9.3
+      vitest:
+        specifier: '*'
+        version: 2.1.9(@types/node@22.20.2)
+
   packages/core:
     dependencies:
       '@autonomous-trader/providers':

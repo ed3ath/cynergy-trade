@@ -1,0 +1,31 @@
+{
+  "name": "@autonomous-trader/backtest",
+  "version": "0.1.0",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "require": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@autonomous-trader/shared": "workspace:*",
+    "@autonomous-trader/core": "workspace:*",
+    "@autonomous-trader/scanner": "workspace:*",
+    "@autonomous-trader/strategy": "workspace:*",
+    "@autonomous-trader/position": "workspace:*",
+    "@autonomous-trader/execution": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "*",
+    "vitest": "*"
+  },
+  "type": "module"
+}
