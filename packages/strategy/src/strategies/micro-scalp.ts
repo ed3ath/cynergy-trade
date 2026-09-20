@@ -88,17 +88,20 @@ export class MicroScalpStrategy implements TradingStrategy {
         `${market.uniqueBuyers1m} unique buyers in 1m`,
       );
     } else {
-      // Coarse path: no 1m trade granularity (DexScreener/Birdeye zero-fill it)
-      if (priceChange5m < 2 || priceChange1h <= 0) {
+      // Coarse path: no 1m trade granularity (DexScreener/Birdeye zero-fill it).
+      // DexScreener also zero-fills 5m for TON — fall back to 1h when 5m is 0.
+      // ponytail: replace with native 5m once DexScreener TON exposes it.
+      const coarse5m = priceChange5m !== 0 ? priceChange5m : priceChange1h;
+      if (coarse5m < 1.5 || priceChange1h <= 0) {
         return this.skip("No coarse momentum burst", ctx);
       }
       const buySellRatio = candidate.features["buy_sell_ratio"]?.value;
       const holderGrowth = holders?.holderGrowth5m ?? 0;
       if (buySellRatio !== undefined) {
         if (buySellRatio < 1.3) return this.skip("Buy/sell ratio below 1.3", ctx);
-        reasons.push(`5m move +${priceChange5m.toFixed(1)}%`, `Buy/sell ratio ${buySellRatio.toFixed(2)}`);
+        reasons.push(`1h move +${coarse5m.toFixed(1)}%`, `Buy/sell ratio ${buySellRatio.toFixed(2)}`);
       } else if (holderGrowth > 0.5) {
-        reasons.push(`5m move +${priceChange5m.toFixed(1)}%`, `Holder growth +${holderGrowth.toFixed(1)}%/5m`);
+        reasons.push(`1h move +${coarse5m.toFixed(1)}%`, `Holder growth +${holderGrowth.toFixed(1)}%/5m`);
       } else {
         return this.skip("No volume/holder confirmation available", ctx);
       }
