@@ -99,7 +99,8 @@ export class ShadowExecutionRouter implements ExecutionRouter {
   constructor(
     private readonly quoteProvider: SwapQuoteProvider,
     private readonly logger: Logger,
-    private readonly solMint = "So11111111111111111111111111111111111111112",
+    /** Base (quote) asset of the chain — WSOL on Solana, USDT on TON. */
+    private readonly baseMint = "So11111111111111111111111111111111111111112",
     private readonly guard: IdempotencyGuard = defaultGuard,
   ) {}
 
@@ -110,19 +111,36 @@ export class ShadowExecutionRouter implements ExecutionRouter {
     const sm = new OrderStateMachine();
     sm.transition("VALIDATING");
 
-    // Get real quote
-    const quoteReq: SwapQuoteRequest = {
-      inputMint: intent.side === "BUY" ? this.solMint : intent.tokenAddress,
-      outputMint: intent.side === "BUY" ? intent.tokenAddress : this.solMint,
-      amount: BigInt(Math.round(intent.positionSizeUsd * 1e6)),
-      slippageBps: intent.maxSlippageBps,
-      chain: intent.chain,
-    };
-
     sm.transition("SIMULATING");
     let quote: QuoteResult;
     try {
-      quote = await this.quoteProvider.getQuote(quoteReq);
+      if (intent.side === "BUY") {
+        quote = await this.quoteProvider.getQuote({
+          inputMint: this.baseMint,
+          outputMint: intent.tokenAddress,
+          amount: BigInt(Math.round(intent.positionSizeUsd * 1e6)), // base asset, 6 decimals
+          slippageBps: intent.maxSlippageBps,
+          chain: intent.chain,
+        });
+      } else {
+        // SELL input is the token itself — its smallest-unit count for
+        // $positionSizeUsd is unknown to the router, so ask the quote
+        // provider: buy the notional first, then quote selling those units.
+        const notional = await this.quoteProvider.getQuote({
+          inputMint: this.baseMint,
+          outputMint: intent.tokenAddress,
+          amount: BigInt(Math.round(intent.positionSizeUsd * 1e6)),
+          slippageBps: intent.maxSlippageBps,
+          chain: intent.chain,
+        });
+        quote = await this.quoteProvider.getQuote({
+          inputMint: intent.tokenAddress,
+          outputMint: this.baseMint,
+          amount: notional.outputAmount,
+          slippageBps: intent.maxSlippageBps,
+          chain: intent.chain,
+        });
+      }
     } catch (err) {
       sm.transition("FAILED");
       throw new ExecutionError(`Shadow quote failed: ${(err as Error).message}`, { intentId: intent.id });
@@ -288,6 +306,7 @@ export function createExecutionRouter(
   mode: "PAPER" | "SHADOW" | "LIVE",
   deps: {
     quote?: SwapQuoteProvider;
+    baseMint?: string | undefined;
     execution?: TradeExecutionProvider;
     monitoring?: TransactionMonitoringProvider;
     chain?: ChainDataProvider;
@@ -303,7 +322,7 @@ export function createExecutionRouter(
 
     case "SHADOW":
       if (!deps.quote) throw new Error("Shadow mode requires quoteProvider");
-      return new ShadowExecutionRouter(deps.quote, deps.logger, undefined, deps.guard ?? defaultGuard);
+      return new ShadowExecutionRouter(deps.quote, deps.logger, deps.baseMint, deps.guard ?? defaultGuard);
 
     case "LIVE":
       if (!deps.quote || !deps.execution || !deps.monitoring || !deps.chain ||

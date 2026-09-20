@@ -29,6 +29,7 @@ import { TonApiClient } from "./ton/tonapi-client.js";
 import { TonApiSecurityProvider } from "./ton/tonapi-security.js";
 import { TonApiHoldersProvider } from "./ton/tonapi-holders.js";
 import { GeckoTerminalDiscoveryProvider } from "./ton/geckoterminal-discovery.js";
+import { StonQuoteProvider } from "./ton/ston-quote.js";
 
 export function createProviderRegistry(config: ProvidersConfig, activeChain: Chain = "solana"): ProviderRegistry {
   if (activeChain === "ton") return createTonRegistry(config);
@@ -109,11 +110,12 @@ export function createProviderRegistry(config: ProvidersConfig, activeChain: Cha
 }
 
 /**
- * TON registry — PAPER mode only. All free, no-key APIs:
+ * TON registry — PAPER + SHADOW modes (LIVE boot-guarded: no wallet/signing).
+ * All free, no-key APIs:
  *   discovery: GeckoTerminal new pools · market/liquidity: DexScreener ton pairs
  *   security: tonapi (GoPlus has no TON) · holders: tonapi
- * Quote/execution stay mock — paper router is fully synthetic, TON SHADOW
- * quote providers (STON.fi/DeDust simulate) are deferred until paper shows edge.
+ *   quotes: STON.fi v1 swap/simulate (SHADOW mode)
+ * Execution/monitoring stay mock — no TON tx path exists.
  */
 function createTonRegistry(config: ProvidersConfig): ProviderRegistry {
   const tonapi = new TonApiClient(
@@ -134,7 +136,9 @@ function createTonRegistry(config: ProvidersConfig): ProviderRegistry {
       ? new TonApiHoldersProvider(tonapi)
       : new MockHolderAnalyticsProvider(),
     chain: new MockChainDataProvider(),
-    quote: new MockSwapQuoteProvider(),
+    quote: config.tonapi.enabled
+      ? new StonQuoteProvider(tonapi)
+      : new MockSwapQuoteProvider(),
     execution: new MockTradeExecutionProvider(),
     monitoring: new MockTransactionMonitoringProvider(),
   };

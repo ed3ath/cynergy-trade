@@ -55,9 +55,10 @@ const config = loadConfig();
 configureLogger({ level: config.log.level, pretty: config.log.pretty ?? true });
 const log = createLogger({ service: "trader", mode: config.trading.mode });
 
-// TON support is paper-only: no verified TON quote/execution/signing path exists yet
-if (config.trading.chain === "ton" && config.trading.mode !== "PAPER") {
-  throw new Error(`TRADING_CHAIN=ton supports PAPER mode only (got ${config.trading.mode})`);
+// TON: PAPER + SHADOW (STON.fi quotes verified); LIVE still refused — no TON
+// wallet/signing path exists
+if (config.trading.chain === "ton" && config.trading.mode === "LIVE") {
+  throw new Error(`TRADING_CHAIN=ton does not support LIVE mode yet (got ${config.trading.mode})`);
 }
 
 log.info("Autonomous trader starting", {
@@ -164,7 +165,12 @@ if (config.trading.mode === "LIVE" && !wallet) {
 }
 
 const executionRouter = createExecutionRouter(config.trading.mode, {
-  quote, execution, monitoring, chain,
+  quote,
+  // base (quote) asset for shadow fills: WSOL on Solana, USDT on TON
+  baseMint: config.trading.chain === "ton"
+    ? "EQCxE6mUtQJKFnGfaROTKOt1lZbDiiX1kCixRv7Nw2Id_sDs"
+    : undefined,
+  execution, monitoring, chain,
   walletPublicKey: wallet?.publicKey ?? config.trading.walletPublicKey ?? "mock_wallet",
   signTransaction: wallet
     ? (tx) => wallet.signTransaction(tx)

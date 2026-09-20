@@ -42,8 +42,10 @@ Replay recorded snapshots; stop tuning strategy parameters on vibes.
 
 Close the gap between paper fills and reality before any LIVE thought.
 
-1. TON SHADOW quotes — real STON.fi/DeDust simulate, no tx (deferred since
-   the TON port)
+1. ✅ TON SHADOW quotes — STON.fi v1 `swap/simulate` (live-verified
+   2026-09-20), `StonQuoteProvider`; SHADOW mode boots on TON
+   (`TRADING_MODE=SHADOW`). DeDust quote source = ponytail. Shadow SELL
+   amounts fixed chain-agnostically (notional quote → unit quote).
 2. Slippage/fee calibration: paper fills vs shadow quotes on the same signals
 3. TON wallet + signing (LIVE-gated; boot refuses LIVE without it)
 4. Solana parity check → decide which chain goes LIVE first

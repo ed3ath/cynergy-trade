@@ -21,6 +21,9 @@ importers:
         specifier: ^8.23.0
         version: 8.23.0
     devDependencies:
+      '@autonomous-trader/providers':
+        specifier: workspace:*
+        version: link:packages/providers
       '@types/node':
         specifier: ^22.7.5
         version: 22.20.2

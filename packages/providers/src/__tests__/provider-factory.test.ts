@@ -10,7 +10,7 @@ import { CompositeSecurityProvider } from "../solana/composite-security.js";
 const cfg = ProvidersConfigSchema.parse({});
 
 describe("createProviderRegistry chain selection", () => {
-  it("chain=ton → free no-key TON providers, mock quote/execution (paper-only)", () => {
+  it("chain=ton → free no-key TON providers, STON quotes, mock execution", () => {
     const r = createProviderRegistry(cfg, "ton");
 
     expect(r.discovery.name).toBe("geckoterminal-discovery");
@@ -18,15 +18,16 @@ describe("createProviderRegistry chain selection", () => {
     expect(r.liquidity.name).toBe("dexscreener");
     expect(r.security.name).toBe("tonapi-security");
     expect(r.holders.name).toBe("tonapi-holders");
-    expect(r.quote.name).toMatch(/^mock/);
+    expect(r.quote.name).toBe("stonfi-quote");
     expect(r.execution.name).toMatch(/^mock/);
     expect(r.monitoring.name).toMatch(/^mock/);
   });
 
-  it("chain=ton with tonapi disabled → mock security/holders (UNKNOWN-safe)", () => {
+  it("chain=ton with tonapi disabled → mock security/holders/quote (UNKNOWN-safe)", () => {
     const r = createProviderRegistry(ProvidersConfigSchema.parse({ tonapi: { enabled: false } }), "ton");
     expect(r.security.name).toMatch(/^mock/);
     expect(r.holders.name).toMatch(/^mock/);
+    expect(r.quote.name).toMatch(/^mock/); // STON quotes need tonapi decimals
   });
 
   it("default chain=solana → registry unchanged", () => {
