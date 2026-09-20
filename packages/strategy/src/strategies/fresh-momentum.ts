@@ -99,9 +99,11 @@ export class FreshMomentumStrategy implements TradingStrategy {
 
     // ponytail: chains without 1m trade granularity (TON via DexScreener) can never
     // hit the ratio/volume reasons — backfill the signal gate with coarser data that
-    // exists. Replace with native buy/sell counts once a TON provider exposes them.
+    // exists. DexScreener also zero-fills 5m for TON, so 1h is the finest reliable
+    // window; threshold lowered to 1% accordingly. Replace with native 5m/buy counts
+    // once a TON provider exposes them.
     if (features["buy_sell_ratio"] == null) {
-      if (priceChange1h >= 3) reasons.push(`1h momentum +${priceChange1h.toFixed(1)}%`);
+      if (priceChange1h >= 1) reasons.push(`1h momentum +${priceChange1h.toFixed(1)}%`);
       if (holders.totalHolders >= 1000) {
         reasons.push(`Broad holder base: ${holders.totalHolders.toLocaleString("en-US")}`);
       }

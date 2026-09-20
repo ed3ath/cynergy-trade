@@ -896,6 +896,17 @@ async function shutdown(signal: string): Promise<void> {
 process.on("SIGINT",  () => void shutdown("SIGINT"));
 process.on("SIGTERM", () => void shutdown("SIGTERM"));
 
+// Crash visibility: unhandled rejections/exceptions must land in trader.log,
+// not vanish silently (tsx watch exits without a trace otherwise).
+process.on("unhandledRejection", (reason) => {
+  log.error("Unhandled rejection — trader will exit", { error: String(reason) });
+  process.exit(1);
+});
+process.on("uncaughtException", (err) => {
+  log.error("Uncaught exception — trader will exit", { error: err.message, stack: err.stack });
+  process.exit(1);
+});
+
 // Run one cycle immediately on startup
 await decisionCycle();
 scheduleDailyReport();
