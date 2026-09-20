@@ -174,6 +174,8 @@ export interface StrategyDecision {
   suggestedStopLoss?: number;
   suggestedTakeProfit1?: number;
   suggestedTakeProfit2?: number;
+  /** Trailing stop % from high-water mark (scalping uses tighter trails). */
+  suggestedTrailingStopPct?: number;
   evaluatedAt: Date;
 }
 

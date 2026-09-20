@@ -38,7 +38,7 @@ import {
   createProviderRegistry,
 } from "@autonomous-trader/providers";
 import { Scanner, type ScannerConfig } from "@autonomous-trader/scanner";
-import { StrategyEngine, FreshMomentumStrategy, type StrategyContext } from "@autonomous-trader/strategy";
+import { StrategyEngine, FreshMomentumStrategy, MicroScalpStrategy, type StrategyContext } from "@autonomous-trader/strategy";
 import {
   createExecutionRouter,
   PgIdempotencyGuard,
@@ -141,6 +141,7 @@ const scanner = new Scanner(
 // ─── Strategy engine ──────────────────────────────────────────────────────────
 const strategyEngine = new StrategyEngine(log.child({ component: "strategy" }));
 strategyEngine.register(new FreshMomentumStrategy());
+strategyEngine.register(new MicroScalpStrategy());
 
 // ─── Risk engine ──────────────────────────────────────────────────────────────
 const performanceTracker = new StrategyPerformanceTracker();
@@ -707,7 +708,7 @@ async function decisionCycle(): Promise<void> {
         strategyDecision.suggestedStopLoss ?? currentPrice * 0.85,
         strategyDecision.suggestedTakeProfit1,
         strategyDecision.suggestedTakeProfit2,
-        15, // 15% trailing stop
+        strategyDecision.suggestedTrailingStopPct ?? 15, // scalps trail tighter
       );
 
       portfolio.allocatedUsd += riskResult.approvedSizeUsd;
@@ -824,7 +825,7 @@ const httpServerOpts: Parameters<typeof startHttpServer>[0] = {
   ),
   getHistory: () =>
     db
-      ? (journal as JournalRepository).getPortfolioHistory(config.trading.mode, 500, config.trading.chain)
+      ? (journal as JournalRepository).getPortfolioHistory(config.trading.mode, 1440, config.trading.chain) // 4h at 10s ticks
       : Promise.resolve([]),
   getTrades: () =>
     db
@@ -863,11 +864,12 @@ if (config.trading.seedTokens.length > 0) {
 const CYCLE_INTERVAL_MS = 10_000; // 10s decision cycle
 const cycleTimer = setInterval(() => void decisionCycle(), CYCLE_INTERVAL_MS);
 
-// Periodic portfolio snapshot (every 5 min)
+// Per-tick equity snapshot — every decision cycle, like a trading platform's
+// equity curve. ~8.6k rows/day; add a retention job if the table ever matters.
 const snapshotTimer = setInterval(() => {
   portfolio.snapshotAt = new Date();
   void journal.recordPortfolioSnapshot(portfolio, config.trading.mode, config.trading.chain).catch(() => undefined);
-}, 5 * 60_000);
+}, CYCLE_INTERVAL_MS);
 
 // ─── Graceful shutdown ────────────────────────────────────────────────────────
 async function shutdown(signal: string): Promise<void> {

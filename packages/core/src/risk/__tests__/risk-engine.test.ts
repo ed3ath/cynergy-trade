@@ -188,9 +188,27 @@ describe("RiskEngine", () => {
     expect(result.rejectionReasons.some((r) => r.includes("INTENT_EXPIRED"))).toBe(true);
   });
 
-  it("rejects insufficient capital", () => {
+  it("rejects when remaining balance is below the dust floor", () => {
     const result = engine.evaluate(makeInput({
-      portfolio: { ...GOOD_PORTFOLIO, availableCapitalUsd: 10 },
+      portfolio: { ...GOOD_PORTFOLIO, availableCapitalUsd: 5 },
+    }));
+    expect(result.decision).toBe("REJECTED");
+    expect(result.rejectionReasons.some((r) => r.includes("INSUFFICIENT_CAPITAL"))).toBe(true);
+  });
+
+  it("reduces to remaining balance instead of rejecting when intent exceeds it", () => {
+    // Balance $30, intent $200 → trade the remainder (95% of balance), not zero
+    const result = engine.evaluate(makeInput({
+      portfolio: { ...GOOD_PORTFOLIO, availableCapitalUsd: 30 },
+    }));
+    expect(result.decision).toBe("REDUCED");
+    expect(result.approvedSizeUsd).toBeCloseTo(30 * 0.95, 2);
+    expect(result.rejectionReasons).toHaveLength(0);
+  });
+
+  it("rejects when available capital is negative (mark-to-market hole)", () => {
+    const result = engine.evaluate(makeInput({
+      portfolio: { ...GOOD_PORTFOLIO, availableCapitalUsd: -50 },
     }));
     expect(result.decision).toBe("REJECTED");
     expect(result.rejectionReasons.some((r) => r.includes("INSUFFICIENT_CAPITAL"))).toBe(true);

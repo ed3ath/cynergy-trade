@@ -118,9 +118,12 @@ export class RiskEngine {
     }
 
     // ── Hard gate 10: wallet balance sufficiency ──────────────────────────────
-    if (input.intent.positionSizeUsd > input.portfolio.availableCapitalUsd) {
+    // Remaining balance is traded down to a dust floor — a trade larger than
+    // the balance is REDUCED to it by sizing (see availableCapital clamp), not
+    // rejected. Keeps the bot taking opportunities until capital is exhausted.
+    if (input.portfolio.availableCapitalUsd < MIN_POSITION_USD) {
       rejections.push(
-        `INSUFFICIENT_CAPITAL: need ${input.intent.positionSizeUsd.toFixed(2)}, have ${input.portfolio.availableCapitalUsd.toFixed(2)}`,
+        `INSUFFICIENT_CAPITAL: ${input.portfolio.availableCapitalUsd.toFixed(2)} < ${MIN_POSITION_USD} dust floor`,
       );
     }
 
@@ -249,6 +252,10 @@ export class RiskEngine {
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+// ponytail: hardcoded dust floor — below this, fees/slippage eat the trade.
+// Promote to a MIN_POSITION_VALUE_USD config knob if operators need it tuned.
+const MIN_POSITION_USD = 10;
+
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
 }
