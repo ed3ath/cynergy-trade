@@ -32,9 +32,13 @@ sample, stop tuning TON and re-evaluate (Solana, different strategy, or both).
 
 Replay recorded snapshots; stop tuning strategy parameters on vibes.
 
-1. Replay engine over `token_market_snapshots` (entry/exit simulation reusing
-   the same feature/filters/scoring code paths)
-2. FreshMomentum parameter sweep on recorded data
+1. ✅ Replay engine — `packages/backtest`
+   (`pnpm exec tsx packages/backtest/src/cli.ts --chain ton`); reuses the
+   live feature/filter/scoring/strategy/exit code paths. First run on real
+   data 2026-09-20: 2 trades / 8 tokens, +9.79%/trade. Holders/security are
+   neutral placeholders (ponytail) until those gates need to bite.
+2. FreshMomentum parameter sweep on recorded data — **gated on A3 data bar**
+   (≥50 tokens × ≥20 samples; ~9 now)
 3. Regime conditioning (does the edge exist only in RISK_ON?)
 4. Every strategy change after this point ships with a backtest delta
 
