@@ -46,7 +46,9 @@ Close the gap between paper fills and reality before any LIVE thought.
    2026-09-20), `StonQuoteProvider`; SHADOW mode boots on TON
    (`TRADING_MODE=SHADOW`). DeDust quote source = ponytail. Shadow SELL
    amounts fixed chain-agnostically (notional quote → unit quote).
-2. Slippage/fee calibration: paper fills vs shadow quotes on the same signals
+2. Slippage/fee calibration: instrumented 2026-09-20 — every PAPER fill also
+   fetches a real STON quote and journals both to `fill_calibration`
+   (migration 006); the delta accumulates from normal paper trading
 3. TON wallet + signing (LIVE-gated; boot refuses LIVE without it)
 4. Solana parity check → decide which chain goes LIVE first
 

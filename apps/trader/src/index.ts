@@ -179,6 +179,18 @@ const executionRouter = createExecutionRouter(config.trading.mode, {
   guard: idempotencyGuard,
 });
 
+// ─── Fill calibration (roadmap C2) ───────────────────────────────────────────
+// Real quotes vs paper fills — only when a real quote provider exists (STON).
+const { FillCalibrator } = await import("./fill-calibrator.js");
+const fillCalibrator = quote.name === "stonfi-quote" && db
+  ? new FillCalibrator(
+      quote,
+      "EQCxE6mUtQJKFnGfaROTKOt1lZbDiiX1kCixRv7Nw2Id_sDs",
+      journal as JournalRepository,
+      log.child({ component: "fill-calibrator" }),
+    )
+  : null;
+
 // ─── Position manager ─────────────────────────────────────────────────────────
 const positionManager = new PositionManager(
   executionRouter,
@@ -464,6 +476,7 @@ async function decisionCycle(): Promise<void> {
         // Record exit in journal
         await journal.recordTradeIntent(exitIntent);
         await journal.recordExecutionResult(exitResult, exitIntent);
+        fillCalibrator?.record(exitIntent, exitResult); // C2: real quote vs paper fill
         const closedPosition = positionManager.getPosition(position.id);
         if (closedPosition) {
           await journal.updatePosition(closedPosition);
@@ -642,6 +655,7 @@ async function decisionCycle(): Promise<void> {
       const currentPrice = candidate.market?.priceUsd ?? 0.000001;
       const execResult = await executionRouter.execute(intent, currentPrice);
       await journal.recordExecutionResult(execResult, intent);
+      fillCalibrator?.record(intent, execResult); // C2: real quote vs paper fill
 
       // Open position
       const position = positionManager.openPosition(

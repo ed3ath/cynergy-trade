@@ -506,6 +506,30 @@ export class JournalRepository {
     };
   }
 
+  // ─── Fill calibration (roadmap C2) ──────────────────────────────────────────
+  async recordFillCalibration(row: {
+    tokenAddress: string;
+    chain: string;
+    side: string;
+    sizeUsd: number;
+    paperPrice: number;
+    paperSlippageBps: number;
+    quotePrice?: number | null;
+    quotePriceImpactBps?: number | null;
+    quoteSlippageBps?: number | null;
+    quoteError?: string | null;
+  }): Promise<void> {
+    await this.db.query(
+      `INSERT INTO fill_calibration
+        (token_address, chain, side, size_usd, paper_price, paper_slippage_bps,
+         quote_price, quote_price_impact_bps, quote_slippage_bps, quote_error)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+      [row.tokenAddress, row.chain, row.side, row.sizeUsd, row.paperPrice, row.paperSlippageBps,
+       row.quotePrice ?? null, row.quotePriceImpactBps ?? null, row.quoteSlippageBps ?? null,
+       row.quoteError ?? null],
+    );
+  }
+
   // ─── System events ─────────────────────────────────────────────────────────
   async recordSystemEvent(
     type: string,

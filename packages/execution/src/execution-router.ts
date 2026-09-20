@@ -95,6 +95,43 @@ export class PaperExecutionRouter implements ExecutionRouter {
 }
 
 // ─── Shadow execution (real quotes, no on-chain tx) ───────────────────────────
+
+/**
+ * Real quote(s) for an intent's size and side. BUY → one quote. SELL → the
+ * token's smallest-unit count for $positionSizeUsd is unknown here, so buy the
+ * notional first, then quote selling those exact units (two quotes).
+ */
+export async function quotesForIntent(
+  provider: SwapQuoteProvider,
+  intent: TradeIntent,
+  baseMint: string,
+): Promise<QuoteResult> {
+  const baseAmount = BigInt(Math.round(intent.positionSizeUsd * 1e6)); // base asset, 6 decimals
+  if (intent.side === "BUY") {
+    return provider.getQuote({
+      inputMint: baseMint,
+      outputMint: intent.tokenAddress,
+      amount: baseAmount,
+      slippageBps: intent.maxSlippageBps,
+      chain: intent.chain,
+    });
+  }
+  const notional = await provider.getQuote({
+    inputMint: baseMint,
+    outputMint: intent.tokenAddress,
+    amount: baseAmount,
+    slippageBps: intent.maxSlippageBps,
+    chain: intent.chain,
+  });
+  return provider.getQuote({
+    inputMint: intent.tokenAddress,
+    outputMint: baseMint,
+    amount: notional.outputAmount,
+    slippageBps: intent.maxSlippageBps,
+    chain: intent.chain,
+  });
+}
+
 export class ShadowExecutionRouter implements ExecutionRouter {
   constructor(
     private readonly quoteProvider: SwapQuoteProvider,
@@ -114,33 +151,7 @@ export class ShadowExecutionRouter implements ExecutionRouter {
     sm.transition("SIMULATING");
     let quote: QuoteResult;
     try {
-      if (intent.side === "BUY") {
-        quote = await this.quoteProvider.getQuote({
-          inputMint: this.baseMint,
-          outputMint: intent.tokenAddress,
-          amount: BigInt(Math.round(intent.positionSizeUsd * 1e6)), // base asset, 6 decimals
-          slippageBps: intent.maxSlippageBps,
-          chain: intent.chain,
-        });
-      } else {
-        // SELL input is the token itself — its smallest-unit count for
-        // $positionSizeUsd is unknown to the router, so ask the quote
-        // provider: buy the notional first, then quote selling those units.
-        const notional = await this.quoteProvider.getQuote({
-          inputMint: this.baseMint,
-          outputMint: intent.tokenAddress,
-          amount: BigInt(Math.round(intent.positionSizeUsd * 1e6)),
-          slippageBps: intent.maxSlippageBps,
-          chain: intent.chain,
-        });
-        quote = await this.quoteProvider.getQuote({
-          inputMint: intent.tokenAddress,
-          outputMint: this.baseMint,
-          amount: notional.outputAmount,
-          slippageBps: intent.maxSlippageBps,
-          chain: intent.chain,
-        });
-      }
+      quote = await quotesForIntent(this.quoteProvider, intent, this.baseMint);
     } catch (err) {
       sm.transition("FAILED");
       throw new ExecutionError(`Shadow quote failed: ${(err as Error).message}`, { intentId: intent.id });
