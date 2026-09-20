@@ -63,7 +63,6 @@ Preconditions (unchanged, per CLAUDE.md and `docs/deployment.md`):
 | Item | Why it matters |
 |---|---|
 | Git remote + push | whole project lives on one machine |
-| Process watchdog (auto-restart on crash) | Run key only covers logon; a crash = silent dead bot |
 | Dashboard: volume bars in sparkline, auto-refresh open detail panel | polish, data already fetched |
 | Helius webhook discovery (Solana) | replaces polling; only matters if Solana is the LIVE chain |
 | Birdeye holder shape (needs API key) | better holder data on Solana |

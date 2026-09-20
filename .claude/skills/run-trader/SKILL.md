@@ -17,6 +17,21 @@ for emergency POSTs), `SERVER_PORT` (default 3000).
 
 No postgres running → journal falls back to NullJournal with a warning. Expected, not a failure.
 
+## Production boot (24/7, this machine)
+
+Scheduled task `CynergyTraderWatchdog` launches `node scripts/trader-daemon.mjs`
+(via `scripts/run-hidden.vbs` — node cannot hide its own console window) at
+logon and every 2 min as a backstop. The daemon loads `.env`, starts the trader
+when port 3000 is down, restarts it on exit; logs append to `logs/trader.log`.
+
+```powershell
+Start-ScheduledTask CynergyTraderWatchdog    # boot now
+Get-ScheduledTaskInfo CynergyTraderWatchdog  # check last result
+```
+
+Kill the trader by port, not by name (other node processes may be unrelated):
+`Get-NetTCPConnection -LocalPort 3000 -State Listen | % { Stop-Process $_.OwningProcess -Force }`.
+
 ## Verify healthy boot
 
 ```bash
