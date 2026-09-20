@@ -198,6 +198,8 @@ const shadowTracker = new ShadowTracker(
   market,
   db ? (journal as JournalRepository) : null,
   log.child({ component: "shadow" }),
+  15,
+  config.trading.chain,
 );
 
 // ─── Reporting ────────────────────────────────────────────────────────────────

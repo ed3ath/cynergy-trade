@@ -7,7 +7,7 @@
  *
  * DB-backed when journal present; in-memory otherwise (paper dev).
  */
-import type { Logger } from "@autonomous-trader/shared";
+import type { Chain, Logger } from "@autonomous-trader/shared";
 import type { JournalRepository } from "@autonomous-trader/core";
 import type { MarketDataProvider } from "@autonomous-trader/providers";
 
@@ -41,6 +41,8 @@ export class ShadowTracker {
     private readonly journal: JournalRepository | null,
     private readonly logger: Logger,
     private readonly defaultHorizonMin = 15,
+    /** Chain of the tokens being tracked — price fetches must use it. */
+    private readonly chain: Chain = "solana",
   ) {}
 
   async record(decision: ShadowDecision, horizonMinutes = this.defaultHorizonMin): Promise<void> {
@@ -59,9 +61,8 @@ export class ShadowTracker {
 
   /** Evaluate decisions whose horizon has elapsed. Call each cycle. */
   async evaluateDue(): Promise<void> {
-    const now = Date.now();
-
-    // DB path
+    // DB path: evaluate due rows, then refresh stats from the table — stats
+    // survive restarts and /metrics reflects all history, not just this boot.
     if (this.journal) {
       try {
         const due = await this.journal.getDueShadowDecisions(this.defaultHorizonMin, 10);
@@ -71,12 +72,21 @@ export class ShadowTracker {
           const returnPct = ((outcome - d.decisionPrice) / d.decisionPrice) * 100;
           await this.journal.updateShadowOutcome(d.id, outcome, returnPct);
         }
+        const s = await this.journal.getShadowStats();
+        this.stats = {
+          signals: s.total,
+          evaluated: s.evaluated,
+          avgReturnPct: s.avgReturnPct,
+          winRate: s.winRate,
+        };
       } catch (err) {
         this.logger.warn("Shadow evaluation (db) failed", { error: (err as Error).message });
       }
+      return;
     }
 
-    // Memory path (always maintained — works without DB, feeds live stats)
+    // Memory path (no DB): evaluate in-memory entries and aggregate
+    const now = Date.now();
     let sum = 0, wins = 0, n = 0;
     for (const e of this.entries) {
       if (!e.outcome && now - e.decision.decidedAt.getTime() >= e.horizonMinutes * 60_000) {
@@ -100,7 +110,7 @@ export class ShadowTracker {
 
   private async fetchPrice(tokenAddress: string): Promise<number | null> {
     try {
-      const snap = await this.market.getMarketSnapshot(tokenAddress, "solana");
+      const snap = await this.market.getMarketSnapshot(tokenAddress, this.chain);
       return snap.priceUsd > 0 ? snap.priceUsd : null;
     } catch {
       return null;

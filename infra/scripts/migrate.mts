@@ -2,7 +2,9 @@
 /** CLI migration runner — same implementation the trader uses at boot. */
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { Database, runMigrations } from "@autonomous-trader/core";
+// ESM from infra/ can't resolve workspace packages (no node_modules here) —
+// import the built core directly. Rebuild packages/core after touching its exports.
+import { Database, runMigrations } from "../../packages/core/dist/index.js";
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 const MIGRATIONS_DIR = join(__dir, "../migrations");
