@@ -49,6 +49,7 @@ import { PositionManager } from "@autonomous-trader/position";
 
 // ─── Bootstrap ────────────────────────────────────────────────────────────────
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const config = loadConfig();
 configureLogger({ level: config.log.level, pretty: config.log.pretty ?? true });
@@ -680,6 +681,13 @@ async function decisionCycle(): Promise<void> {
 
 // ─── HTTP monitoring + emergency control ──────────────────────────────────────
 const { startHttpServer } = await import("./http-server.js");
+const { LogTailer } = await import("./log-tailer.js");
+// resolve from module path, not cwd — boots correctly from any directory
+const logTailer = new LogTailer(
+  // src → trader → apps → repo root
+  join(fileURLToPath(new URL(".", import.meta.url)), "../../../logs/trader.log"),
+);
+logTailer.start();
 function loadDashboardHtml(): string | undefined {
   try {
     return readFileSync(new URL("../public/dashboard.html", import.meta.url), "utf8");
@@ -757,6 +765,7 @@ const httpServerOpts: Parameters<typeof startHttpServer>[0] = {
     return { ...detail, history };
   },
   dashboardHtml: loadDashboardHtml(),
+  logTailer,
 };
 if (monitorToken) httpServerOpts.authToken = monitorToken;
 const httpServer = startHttpServer(httpServerOpts);

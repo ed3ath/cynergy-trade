@@ -6,3 +6,4 @@ dist/
 *.key
 *.pem
 logs/
+.claude/worktrees/

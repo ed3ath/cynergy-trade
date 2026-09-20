@@ -5,6 +5,7 @@
  * GET  /health              liveness probe
  * GET  /status              portfolio, positions, emergency state (JSON)
  * GET  /events              same payload as /status, streamed live (SSE, ~2s)
+ * GET  /logs                tailed trader log lines, streamed live (SSE, ~1s)
  * GET  /metrics             Prometheus text format
  * GET  /market              live per-token market feed (scanner's latest snapshots)
  * GET  /market/:token       full detail for one token + persisted price history
@@ -17,6 +18,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { PortfolioSnapshot, Position, Logger } from "@autonomous-trader/shared";
 import type { EmergencyController } from "@autonomous-trader/core";
+import type { LogTailerLike } from "./log-tailer.js";
 
 export interface StatusPayload {
   portfolio: PortfolioSnapshot;
@@ -59,8 +61,10 @@ export function startHttpServer(opts: {
   getTokenDetail?: (token: string) => Promise<unknown> | unknown;
   /** Preloaded dashboard HTML served at GET /. */
   dashboardHtml?: string | undefined;
+  /** Live log stream for GET /logs. */
+  logTailer?: LogTailerLike | undefined;
 }): { close: () => void } {
-  const { port, host, authToken, emergency, logger, getStatus, getMetrics, getReport, getHistory, getTrades, getMarket, getTokenDetail, dashboardHtml } = opts;
+  const { port, host, authToken, emergency, logger, getStatus, getMetrics, getReport, getHistory, getTrades, getMarket, getTokenDetail, dashboardHtml, logTailer } = opts;
   const startedAt = Date.now();
 
   const server = createServer((req, res) => {
@@ -152,6 +156,27 @@ export function startHttpServer(opts: {
         // res, not req: on a bodyless GET the IncomingMessage 'close' fires as soon
         // as the request is consumed — clearing the interval after the first frame
         res.on("close", () => clearInterval(timer));
+        return;
+      }
+
+      if (req.method === "GET" && path === "/logs") {
+        if (!logTailer) return respond(res, 404, { error: "log streaming not enabled" });
+        res.writeHead(200, {
+          "content-type": "text/event-stream",
+          "cache-control": "no-cache",
+          connection: "keep-alive",
+        });
+        res.write("retry: 2000\n\n");
+        // backlog first (recent history), then live tail
+        for (const line of logTailer.backlog()) res.write(`data: ${line}\n\n`);
+        const unsub = logTailer.subscribe((line) => {
+          if (res.destroyed) {
+            unsub();
+            return;
+          }
+          res.write(`data: ${line.replace(/\n/g, " ")}\n\n`);
+        });
+        res.on("close", unsub);
         return;
       }
 

@@ -92,6 +92,27 @@
   #token-detail .detail-grid .grp { border: 1px solid var(--ring); border-radius: 8px; padding: 8px 10px; }
   #token-detail .grp h3 { font-size: 12px; color: var(--ink-2); margin: 0 0 6px; font-weight: 600; }
   #token-detail td { padding: 3px 6px; }
+  .logbar { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; flex-wrap: wrap; }
+  .logbar button {
+    font: 12px system-ui, sans-serif; padding: 2px 12px; border-radius: 999px; cursor: pointer;
+    border: 1px solid var(--ring); background: var(--surface); color: var(--ink-2);
+  }
+  .logbar button.on { background: var(--series-1); border-color: var(--series-1); color: #fff; font-weight: 600; }
+  .logbar button:focus-visible { outline: 2px solid var(--series-1); outline-offset: 1px; }
+  #console {
+    background: var(--page); border: 1px solid var(--ring); border-radius: 8px;
+    font: 12px/1.6 ui-monospace, Consolas, monospace; padding: 8px 10px;
+    height: 280px; overflow-y: auto; overscroll-behavior: contain;
+  }
+  #console .row { display: flex; gap: 8px; }
+  #console .row.dim { opacity: .65; }
+  #console .t { color: var(--muted); flex: none; }
+  #console .lv { flex: none; font-weight: 700; width: 52px; }
+  #console .lv-signal { color: var(--series-1); }
+  #console .lv-error, #console .lv-fatal { color: var(--critical); }
+  #console .lv-warn { color: var(--warning); }
+  #console .lv-skip, #console .lv-reject { color: var(--muted); }
+  #console .m { word-break: break-all; }
   @media (max-width: 600px) { body { padding: 12px; } .tile.hero .value { font-size: 34px; } }
 </style>
 </head>
@@ -129,6 +150,17 @@
 <section>
   <h2>Trade history</h2>
   <div id="trades"></div>
+</section>
+
+<section>
+  <h2>Console — live decision log</h2>
+  <div class="logbar">
+    <button id="logf-signals" class="on" data-f="signals">Signals</button>
+    <button id="logf-all" data-f="all">All</button>
+    <button id="logf-errors" data-f="errors">Errors</button>
+    <span class="sub" id="log-count" style="color: var(--muted)"></span>
+  </div>
+  <div id="console"></div>
 </section>
 
 <section>
@@ -318,6 +350,72 @@ function renderTrades(trades) {
   }
   el.replaceChildren(tbl);
 }
+// ── /logs → live console (tail of trader.log via SSE) ────────────────────────
+const LOG_CAP = 400;
+const logBuf = [];
+let logFilter = "signals"; // signals | all | errors
+
+function logClass(e) {
+  const lv = (e.level || "").toLowerCase();
+  if (lv === "error" || lv === "fatal") return "error";
+  if (lv === "warn") return "warn";
+  if (e.decision === "ENTER") return "signal";
+  const m = e.msg || "";
+  if (/watchdog|position (opened|closed|exited)|exit|kill switch|shadow|order|fill/i.test(m)) return "signal";
+  if (e.decision === "SKIP" || /did not enter/.test(m)) return "skip";
+  if (/reject/i.test(m)) return "reject";
+  return "info";
+}
+function logPass(cls) {
+  if (logFilter === "all") return true;
+  if (logFilter === "errors") return cls === "error" || cls === "warn";
+  return cls !== "skip" && cls !== "reject"; // signals: everything actionable
+}
+function parseLogLine(line) {
+  try { return JSON.parse(line); }
+  catch { return { time: new Date().toISOString(), level: "info", msg: line, raw: true }; }
+}
+function logRow(e) {
+  const cls = logClass(e);
+  let m = e.msg || String(e);
+  if (e.token) m += " " + e.token.slice(0, 6) + "…" + e.token.slice(-4);
+  if (e.reason) m += " — " + e.reason;
+  else if (e.decision) m += " — " + e.decision;
+  return h("div", { class: "row" + (cls === "skip" || cls === "reject" ? " dim" : "") },
+    h("span", { class: "t", text: e.time ? new Date(e.time).toLocaleTimeString() : "" }),
+    h("span", { class: "lv lv-" + cls, text: cls.toUpperCase() }),
+    h("span", { class: "m", text: m }));
+}
+function renderLogs() {
+  const box = $("console");
+  const frag = document.createDocumentFragment();
+  for (const e of logBuf) if (logPass(logClass(e))) frag.append(logRow(e));
+  box.replaceChildren(frag);
+  box.scrollTop = box.scrollHeight;
+}
+function pushLog(line) {
+  logBuf.push(parseLogLine(line));
+  if (logBuf.length > LOG_CAP) logBuf.shift();
+  const box = $("console");
+  // pin to bottom only while the user is already at the bottom
+  const pinned = box.scrollHeight - box.scrollTop - box.clientHeight < 30;
+  const e = logBuf[logBuf.length - 1];
+  if (logPass(logClass(e))) {
+    box.append(logRow(e));
+    while (box.childElementCount > LOG_CAP) box.firstElementChild.remove();
+    if (pinned) box.scrollTop = box.scrollHeight;
+  }
+  $("log-count").textContent = `${logBuf.length} lines`;
+}
+document.querySelectorAll(".logbar button").forEach((b) =>
+  b.addEventListener("click", () => {
+    logFilter = b.dataset.f;
+    document.querySelectorAll(".logbar button").forEach((x) => x.classList.toggle("on", x === b));
+    renderLogs();
+  }));
+const logEs = new EventSource("/logs");
+logEs.onmessage = (e) => pushLog(e.data);
+
 // ── /market → live market data table (all scanner-tracked tokens) ────────────
 function renderMarket(rows) {
   const el = $("market");
