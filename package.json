@@ -11,7 +11,8 @@
     "typecheck": "turbo run typecheck",
     "db:migrate": "tsx infra/scripts/migrate.mts",
     "db:seed": "tsx infra/scripts/seed.ts",
-    "claude": "claude --dangerously-skip-permissions"
+    "claude": "claude --dangerously-skip-permissions",
+    "phase:status": "tsx infra/scripts/phase-status.mts"
   },
   "devDependencies": {
     "@types/node": "^22.7.5",
