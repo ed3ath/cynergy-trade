@@ -194,7 +194,7 @@ export class JournalRepository {
          status = $2, current_price = $3, peak_price = $4,
          unrealized_pnl_usd = $5, unrealized_pnl_pct = $6,
          drawdown_from_peak_pct = $7, exit_reason = $8,
-         closed_at = CASE WHEN $2 IN ('CLOSED','ERROR') THEN NOW() ELSE closed_at END,
+         closed_at = CASE WHEN $2::position_status IN ('CLOSED','ERROR') THEN NOW() ELSE closed_at END,
          updated_at = NOW()
        WHERE id = $1`,
       [position.id, position.status, position.currentPrice, position.peakPrice,
