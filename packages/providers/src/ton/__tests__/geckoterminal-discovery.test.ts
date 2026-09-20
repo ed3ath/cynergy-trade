@@ -131,7 +131,7 @@ describe("GeckoTerminalDiscoveryProvider.processHotPool", () => {
   it("skips pools below hotMinReserveUsd and non-positive 1h change", () => {
     const p = new GeckoTerminalDiscoveryProvider("http://gt.test");
     expect(p.processHotPool(hotPool({
-      id: "ton_LOWRES", attributes: { ...hotPool().attributes, reserve_in_usd: 50_000 },
+      id: "ton_LOWRES", attributes: { ...hotPool().attributes, reserve_in_usd: 49_999 },
     }) as never)).toBeNull();
     expect(p.processHotPool(hotPool({
       id: "ton_DOWN", attributes: { ...hotPool().attributes, price_change_percentage: { h1: -1.2, h24: -9 } },

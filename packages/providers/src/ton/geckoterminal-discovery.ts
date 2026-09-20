@@ -52,7 +52,7 @@ export interface GeckoTerminalDiscoveryConfig {
   /** Hot-pool poll (top h24-volume movers, not just new pools). */
   hotPoolsEnabled: boolean;
   hotPoolsIntervalMs: number;  // default 60s
-  /** Minimum pool reserve for a hot pool (default 80k — recipe 2026-09-16). */
+  /** Minimum pool reserve for a hot pool (50k = scanner's own liquidity gate). */
   hotMinReserveUsd: number;
   /** Minimum 1h price change % for a hot pool — momentum must be positive. */
   hotMinH1ChangePct: number;   // default 0
@@ -69,7 +69,7 @@ const DEFAULTS: GeckoTerminalDiscoveryConfig = {
   minReserveUsd: 5_000,
   hotPoolsEnabled: true,
   hotPoolsIntervalMs: 120_000,
-  hotMinReserveUsd: 80_000,
+  hotMinReserveUsd: 50_000,
   hotMinH1ChangePct: 0,
 };
 
