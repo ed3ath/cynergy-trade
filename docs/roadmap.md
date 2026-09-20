@@ -66,7 +66,6 @@ Preconditions (unchanged, per CLAUDE.md and `docs/deployment.md`):
 | Dashboard: volume bars in sparkline, auto-refresh open detail panel | polish, data already fetched |
 | Helius webhook discovery (Solana) | replaces polling; only matters if Solana is the LIVE chain |
 | Birdeye holder shape (needs API key) | better holder data on Solana |
-| Delete/fix `npm run db:migrate` (broken on Node 24) | boot self-migrates; script is a trap |
 
 ## Decision points ahead (owner's call, not the bot's)
 
