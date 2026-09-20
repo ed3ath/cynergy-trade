@@ -63,8 +63,10 @@ export function startHttpServer(opts: {
   dashboardHtml?: string | undefined;
   /** Live log stream for GET /logs. */
   logTailer?: LogTailerLike | undefined;
+  /** Structured decision events for GET /activity (live Activity feed). */
+  activityBus?: { subscribe(fn: (e: unknown) => void): () => void; backlog(): unknown[] } | undefined;
 }): { close: () => void } {
-  const { port, host, authToken, emergency, logger, getStatus, getMetrics, getReport, getHistory, getTrades, getMarket, getTokenDetail, dashboardHtml, logTailer } = opts;
+  const { port, host, authToken, emergency, logger, getStatus, getMetrics, getReport, getHistory, getTrades, getMarket, getTokenDetail, dashboardHtml, logTailer, activityBus } = opts;
   const startedAt = Date.now();
 
   const server = createServer((req, res) => {
@@ -156,6 +158,27 @@ export function startHttpServer(opts: {
         // res, not req: on a bodyless GET the IncomingMessage 'close' fires as soon
         // as the request is consumed — clearing the interval after the first frame
         res.on("close", () => clearInterval(timer));
+        return;
+      }
+
+      if (req.method === "GET" && path === "/activity") {
+        // SSE: structured decision events (every tick, skip/enter/reject/exit).
+        if (!activityBus) return respond(res, 404, { error: "activity not enabled" });
+        res.writeHead(200, {
+          "content-type": "text/event-stream",
+          "cache-control": "no-cache",
+          connection: "keep-alive",
+        });
+        res.write("retry: 2000\n\n");
+        for (const e of activityBus.backlog()) res.write(`data: ${JSON.stringify(e)}\n\n`);
+        const unsub = activityBus.subscribe((e) => {
+          if (res.destroyed) {
+            unsub();
+            return;
+          }
+          res.write(`data: ${JSON.stringify(e)}\n\n`);
+        });
+        res.on("close", unsub);
         return;
       }
 

@@ -56,6 +56,10 @@ const config = loadConfig();
 configureLogger({ level: config.log.level, pretty: config.log.pretty ?? true });
 const log = createLogger({ service: "trader", mode: config.trading.mode });
 
+// Structured decision events → dashboard Activity feed (GET /activity SSE)
+const { ActivityBus } = await import("./activity-bus.js");
+const activity = new ActivityBus();
+
 // TON: PAPER + SHADOW (STON.fi quotes verified); LIVE still refused — no TON
 // wallet/signing path exists
 if (config.trading.chain === "ton" && config.trading.mode === "LIVE") {
@@ -474,6 +478,8 @@ async function decisionCycle(): Promise<void> {
           reason: exitSignal.reason,
           urgency: exitSignal.urgency,
         });
+        activity.publish("exit", `exit signal · ${exitSignal.reason} (${exitSignal.urgency})`,
+          { token: position.tokenAddress, data: { pnlPct: position.unrealizedPnlPct } });
         if (exitSignal.urgency === "EMERGENCY") {
           alerter.alert("WARNING", `emergency-exit:${position.tokenAddress}`,
             `EMERGENCY EXIT ${position.tokenAddress}: ${exitSignal.reason} ` +
@@ -558,6 +564,9 @@ async function decisionCycle(): Promise<void> {
           pnlPct: position.unrealizedPnlPct.toFixed(2),
           totalValue: portfolio.totalValueUsd.toFixed(2),
         });
+        activity.publish("exit",
+          `closed · ${realizedPnl >= 0 ? "+" : ""}$${realizedPnl.toFixed(2)} (${position.unrealizedPnlPct.toFixed(1)}%)`,
+          { token: position.tokenAddress, data: { realizedPnlUsd: realizedPnl, reason: exitSignal.reason } });
       }
     } catch (err) {
       log.error("Position monitoring error", { positionId: position.id, error: (err as Error).message });
@@ -572,6 +581,9 @@ async function decisionCycle(): Promise<void> {
 
   const candidates = scanner.getTradeCandidates();
   log.debug("Evaluating trade candidates", { count: candidates.length });
+  activity.publish("cycle",
+    `tick · ${candidates.length} candidate(s) · ${openPositions.length} open · ${currentRegime.regime}`,
+    { data: { candidates: candidates.length, open: openPositions.length, regime: currentRegime.regime } });
 
   for (const candidate of candidates.slice(0, 5)) { // cap per cycle
     try {
@@ -595,12 +607,15 @@ async function decisionCycle(): Promise<void> {
       const ensembleResult = strategyEngine.evaluate(strategyCtx);
       if (!ensembleResult.anyEnter || !ensembleResult.bestDecision) {
         for (const d of ensembleResult.decisions) {
+          const reason = (d.risks.length ? d.risks : d.reasons).join("; ");
           log.info("Strategy did not enter candidate", {
             token: candidate.tokenAddress,
             strategy: d.strategyId,
             decision: d.decision,
-            reason: (d.risks.length ? d.risks : d.reasons).join("; "),
+            reason,
           });
+          activity.publish("skip", `${d.decision} · ${reason}`,
+            { token: candidate.tokenAddress, data: { score: candidate.scores.opportunity } });
         }
         continue;
       }
@@ -670,6 +685,8 @@ async function decisionCycle(): Promise<void> {
           token: candidate.tokenAddress,
           reasons: riskResult.rejectionReasons,
         });
+        activity.publish("reject", `risk engine · ${riskResult.rejectionReasons.join("; ")}`,
+          { token: candidate.tokenAddress });
         continue;
       }
 
@@ -713,6 +730,16 @@ async function decisionCycle(): Promise<void> {
         sizeUsd: intent.positionSizeUsd,
         mode: config.trading.mode,
       });
+      activity.publish("enter",
+        `BUY $${intent.positionSizeUsd.toFixed(2)} @ ${position.entryPrice.toPrecision(4)}`,
+        {
+          token: candidate.tokenAddress,
+          data: {
+            sizeUsd: intent.positionSizeUsd, entryPrice: position.entryPrice,
+            stopLoss: position.stopLoss, takeProfit1: position.takeProfit1 ?? null,
+            reasons: strategyDecision.reasons,
+          },
+        });
 
       // Mark candidate as entered in scanner
       scanner.markEntered(candidate.tokenAddress);
@@ -814,6 +841,7 @@ const httpServerOpts: Parameters<typeof startHttpServer>[0] = {
   },
   dashboardHtml: loadDashboardHtml(),
   logTailer,
+  activityBus: activity,
 };
 if (monitorToken) httpServerOpts.authToken = monitorToken;
 const httpServer = startHttpServer(httpServerOpts);

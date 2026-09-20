@@ -153,6 +153,16 @@
 </section>
 
 <section>
+  <h2>Activity — every tick, every decision</h2>
+  <div class="logbar">
+    <button id="actf-all" class="on" data-a="all">All</button>
+    <button id="actf-actions" data-a="actions">Actions only</button>
+    <span class="sub" id="act-count" style="color: var(--muted)"></span>
+  </div>
+  <div id="activity"></div>
+</section>
+
+<section>
   <h2>Console — live decision log</h2>
   <div class="logbar">
     <button id="logf-signals" class="on" data-f="signals">Signals</button>
@@ -350,6 +360,61 @@ function renderTrades(trades) {
   }
   el.replaceChildren(tbl);
 }
+// ── /activity → structured decision events (SSE, instant per event) ─────────
+const ACT_CAP = 200;
+const actBuf = [];
+let actFilter = "all"; // all | actions (hide heartbeat ticks)
+
+const ACT_KIND = {
+  cycle:  { label: "TICK",  cls: "info"   },
+  skip:   { label: "SKIP",  cls: "skip"   },
+  reject: { label: "REJECT", cls: "reject" },
+  enter:  { label: "ENTER", cls: "signal" },
+  exit:   { label: "EXIT",  cls: "signal" },
+  info:   { label: "INFO",  cls: "info"   },
+};
+function actRow(e) {
+  const k = ACT_KIND[e.kind] ?? ACT_KIND.info;
+  const tok = e.token
+    ? h("a", { class: "mono", href: explorerUrl(e.token), target: "_blank", rel: "noopener" },
+        e.token.slice(0, 6) + "…" + e.token.slice(-4))
+    : null;
+  const score = e.data && e.data.score != null ? " · score " + Number(e.data.score).toFixed(0) : "";
+  return h("div", { class: "row" + (e.kind === "skip" || e.kind === "cycle" ? " dim" : "") },
+    h("span", { class: "t", text: new Date(e.at).toLocaleTimeString() }),
+    h("span", { class: "lv lv-" + k.cls, text: k.label }),
+    tok,
+    h("span", { class: "m", text: (tok ? " " : "") + (e.detail ?? "") + score }));
+}
+function renderActivity() {
+  const box = $("activity");
+  const frag = document.createDocumentFragment();
+  for (const e of actBuf) if (actFilter === "all" || e.kind !== "cycle") frag.append(actRow(e));
+  box.replaceChildren(frag);
+  box.scrollTop = box.scrollHeight;
+}
+function pushActivity(e) {
+  try { e = JSON.parse(e); } catch { return; }
+  actBuf.push(e);
+  if (actBuf.length > ACT_CAP) actBuf.shift();
+  const box = $("activity");
+  const pinned = box.scrollHeight - box.scrollTop - box.clientHeight < 30;
+  if (actFilter === "all" || e.kind !== "cycle") {
+    box.append(actRow(e));
+    while (box.childElementCount > ACT_CAP) box.firstElementChild.remove();
+    if (pinned) box.scrollTop = box.scrollHeight;
+  }
+  $("act-count").textContent = `${actBuf.length} events`;
+}
+document.querySelectorAll("#actf-all, #actf-actions").forEach((b) =>
+  b.addEventListener("click", () => {
+    actFilter = b.dataset.a;
+    document.querySelectorAll("#actf-all, #actf-actions").forEach((x) => x.classList.toggle("on", x === b));
+    renderActivity();
+  }));
+const actEs = new EventSource("/activity");
+actEs.onmessage = (e) => pushActivity(e.data);
+
 // ── /logs → live console (tail of trader.log via SSE) ────────────────────────
 const LOG_CAP = 400;
 const logBuf = [];
