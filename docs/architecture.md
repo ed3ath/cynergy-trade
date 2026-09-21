@@ -4,7 +4,7 @@ Roadmap + phase gates: `docs/roadmap.md`.
 
 ## Overview
 
-Autonomous crypto trading system targeting newly-launched Solana tokens.
+Autonomous crypto trading system targeting newly-launched tokens. Chain is selected by `TRADING_CHAIN` (`solana` default, or `ton`).
 TypeScript monorepo, modular packages, deterministic risk firewall around all capital deployment.
 
 ```
@@ -16,12 +16,13 @@ DISCOVERY → SCANNER → STRATEGY ENSEMBLE → RISK ENGINE → EXECUTION → PO
 | Package | Purpose |
 |---|---|
 | `@autonomous-trader/shared` | Domain types, config (zod-validated), structured logger, ID generators |
-| `@autonomous-trader/providers` | Provider interfaces + mock and live implementations (GoPlus, Jupiter, Birdeye, SolanaRPC, Raydium discovery), health tracking |
+| `@autonomous-trader/providers` | Provider interfaces + mock and live implementations (GoPlus, Jupiter, Birdeye, SolanaRPC, Raydium discovery, TON: TonAPI + GeckoTerminal), health tracking |
 | `@autonomous-trader/core` | State machines, risk engine, emergency controller, performance tracker, regime detector, Postgres journal |
 | `@autonomous-trader/scanner` | Token lifecycle, feature engine, hard-gate filters, scoring |
-| `@autonomous-trader/strategy` | Strategy interface, ensemble engine, Fresh Momentum strategy |
+| `@autonomous-trader/strategy` | Strategy interface, ensemble engine (Fresh Momentum, Micro Scalp) |
 | `@autonomous-trader/execution` | Paper/Shadow/Live execution routers, durable idempotency guard, wallet signing |
 | `@autonomous-trader/position` | Position manager, exit engine (stop/trailing/TP/time/deterioration) |
+| `@autonomous-trader/backtest` | Snapshot dataset loading + decision-loop replay |
 | `apps/trader` | Decision loop (10s cycle), HTTP monitor + emergency controls, ShadowTracker, alerter, daily reports |
 
 ## Data flow
@@ -62,8 +63,9 @@ DISCOVERY → SCANNER → STRATEGY ENSEMBLE → RISK ENGINE → EXECUTION → PO
 - ✅ Phase 3: decision loop (10s cycle), paper trading end-to-end, market regime detector, restart recovery (positions restored from journal), Telegram alerting (critical events), daily reports, PnL windows (UTC day/week) + mark-to-market drawdown
 - ✅ Ops: HTTP monitor (`/health /status /events /metrics /market /history /trades /report`, dashboard at `/`, bearer-auth emergency controls), `docker-compose.prod.yml` (self-migrating boot), ShadowTracker (ENTER decisions evaluated at 15min horizon → `shadow_decisions`)
 - ✅ Durable idempotency (Postgres `executed_intents` + fallback), wallet signing (`WALLET_PRIVATE_KEY` → VersionedTransaction)
-- 🔜 Phase 4: backtester (blocked on accumulated snapshot data — run paper mode 24/7 first)
-- 🔜 Shadow-mode validation at volume, dashboard UI (currently JSON endpoints), token re-entry after exit, Helius webhook discovery
+- ✅ TON chain (`TRADING_CHAIN=ton`, TonAPI/GeckoTerminal providers, coarse-path strategy), multi-opportunity trading (remaining balance, per-tick equity), dashboard UI at `/`
+- 🔜 Phase 4: backtester at volume (needs accumulated snapshot data — run paper mode 24/7 first)
+- 🔜 Shadow-mode validation at volume, token re-entry after exit, Helius webhook discovery
 
 ## Migrations
 
@@ -75,7 +77,7 @@ DISCOVERY → SCANNER → STRATEGY ENSEMBLE → RISK ENGINE → EXECUTION → PO
 
 ```bash
 docker compose -f infra/docker/docker-compose.yml up -d   # postgres, redis, grafana, prometheus
-npm run db:migrate
+pnpm db:migrate
 pnpm exec tsx apps/trader/src/index.ts                   # paper mode
 pnpm test
 ```

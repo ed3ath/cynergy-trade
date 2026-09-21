@@ -7,3 +7,5 @@ dist/
 *.pem
 logs/
 .claude/worktrees/
+.turbo/
+.env.dev
