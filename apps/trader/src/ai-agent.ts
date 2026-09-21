@@ -20,6 +20,7 @@
  *   (ai.timeoutMs), so tool loops can't stall the decision cycle.
  */
 import type { AIConfig, Chain, Logger } from "@autonomous-trader/shared";
+import { AiBudget } from "./ai-budget.js";
 
 export type AiVerdictType = "APPROVE" | "REJECT" | "UNKNOWN";
 
@@ -68,25 +69,25 @@ const SYSTEM_PROMPT =
   "Respond with STRICT JSON only, no markdown fences: " +
   '{"verdict":"APPROVE"|"REJECT","confidence":<number 0-1>,"reason":"<one short sentence>"}';
 
-// ─── OpenAI-compatible wire types ─────────────────────────────────────────────
-interface ChatMessage {
+// ─── OpenAI-compatible wire types (shared with ai-trader-agent) ───────────────
+export interface ChatMessage {
   role: "system" | "user" | "assistant" | "tool";
   content: string | null;
   tool_calls?: { id: string; type: "function"; function: { name: string; arguments: string } }[];
   tool_call_id?: string;
 }
 
-interface ChatResponse {
+export interface ChatResponse {
   choices?: { message?: ChatMessage }[];
   usage?: { prompt_tokens?: number; completion_tokens?: number };
 }
 
-interface ToolDef {
+export interface ToolDef {
   type: "function";
   function: { name: keyof AiToolContext; description: string; parameters: Record<string, unknown> };
 }
 
-const TOOL_DEFS: ToolDef[] = [
+export const TOOL_DEFS: ToolDef[] = [
   {
     type: "function",
     function: {
@@ -123,15 +124,16 @@ const TOOL_DEFS: ToolDef[] = [
 
 export class AiVetoAgent {
   private readonly cache = new Map<string, { verdict: AiVerdict; expiresAt: number }>();
-  private spendDayKey = "";
-  private spentTodayUsd = 0;
-  private capLoggedDay = "";
+  private readonly budget: AiBudget;
 
   constructor(
     private readonly cfg: AIConfig,
     private readonly log: Logger,
     private readonly tools: AiToolContext = {},
-  ) {}
+    budget?: AiBudget,
+  ) {
+    this.budget = budget ?? new AiBudget(cfg, log);
+  }
 
   get enabled(): boolean {
     return this.cfg.enabled;
@@ -159,7 +161,7 @@ export class AiVetoAgent {
     const unknown = (reason: string): AiVerdict =>
       ({ tokenAddress: c.tokenAddress, verdict: "UNKNOWN", confidence: 0, reason });
 
-    if (this.overCostCap()) return unknown("daily AI cost cap reached — no veto");
+    if (this.budget.overCostCap()) return unknown("daily AI cost cap reached — no veto");
 
     const messages: ChatMessage[] = [
       { role: "system", content: SYSTEM_PROMPT },
@@ -173,7 +175,7 @@ export class AiVetoAgent {
         if (remaining <= 0) return unknown("deadline exceeded");
 
         const body = await this.request(c.tokenAddress, messages, remaining);
-        this.trackCost(body.usage);
+        this.budget.trackCost(body.usage);
 
         const msg = body.choices?.[0]?.message;
         const calls = msg?.tool_calls ?? [];
@@ -291,24 +293,5 @@ export class AiVetoAgent {
       security: s ? { status: s.status, score: s.score, reasons: s.reasons.map((r) => r.message) } : undefined,
       strategyScores: { opportunity: c.scores.opportunity, security: c.scores.security, momentum: c.scores.momentum, risk: c.scores.risk },
     };
-  }
-
-  private trackCost(usage: { prompt_tokens?: number; completion_tokens?: number } | undefined): void {
-    if (!usage || this.cfg.costPer1kTokensUsd <= 0) return;
-    const day = new Date().toISOString().slice(0, 10);
-    if (day !== this.spendDayKey) { this.spendDayKey = day; this.spentTodayUsd = 0; }
-    this.spentTodayUsd += ((usage.prompt_tokens ?? 0) + (usage.completion_tokens ?? 0)) / 1000 * this.cfg.costPer1kTokensUsd;
-  }
-
-  private overCostCap(): boolean {
-    if (this.cfg.costPer1kTokensUsd <= 0) {
-      const day = new Date().toISOString().slice(0, 10);
-      if (day !== this.capLoggedDay) {
-        this.capLoggedDay = day;
-        this.log.warn("AI cost cap NOT enforced — AI_COST_PER_1K_TOKENS_USD unset", { maxCostPerDayUsd: this.cfg.maxCostPerDayUsd });
-      }
-      return false;
-    }
-    return this.spentTodayUsd >= this.cfg.maxCostPerDayUsd;
   }
 }

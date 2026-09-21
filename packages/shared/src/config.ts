@@ -87,10 +87,14 @@ export const ExecutionConfigSchema = z.object({
 export type ExecutionConfig = z.infer<typeof ExecutionConfigSchema>;
 
 // ─── AI config ────────────────────────────────────────────────────────────────
-/** Veto-only LLM second opinion. Any OpenAI-compatible chat-completions
+/** Optional LLM agent. `veto` = second opinion on strategy candidates;
+ *  `auto` = autonomous trader (enter/exit/tighten through the same risk
+ *  engine — never a bypass). Any OpenAI-compatible chat-completions
  *  endpoint works: OpenAI, OpenRouter, Ollama/vLLM, gateways, proxies. */
 export const AIConfigSchema = z.object({
   enabled: z.boolean().default(false),
+  /** off = agent dead, veto = today's behavior, auto = full autonomy. */
+  autonomy: z.enum(["off", "veto", "auto"]).default("veto"),
   provider: z.enum(["openai", "mock"]).default("mock"),
   baseUrl: z.string().url().default("https://api.openai.com/v1"),
   apiKey: z.string().optional(),
@@ -105,6 +109,16 @@ export const AIConfigSchema = z.object({
   /** Offer the agent read-only data tools (function calling). Disable for
    *  endpoints that reject the `tools` field. */
   toolsEnabled: z.boolean().default(true),
+  /** Autonomous mode: cadence of the AI review cycle (seconds). */
+  cycleSec: z.number().int().positive().default(60),
+  /** Autonomous mode: max ENTER+EXIT+TIGHTEN actions per AI cycle. */
+  maxActionsPerCycle: z.number().int().positive().default(3),
+  /** Autonomous mode: max concurrent AI-opened positions across all chains. */
+  maxOpenPositions: z.number().int().positive().default(3),
+  /** Autonomous mode: per-token re-entry cooldown (seconds). */
+  tokenCooldownSec: z.number().int().positive().default(600),
+  /** Cheap opt-out: AI agent stays silent in LIVE mode when false. */
+  liveEnabled: z.boolean().default(true),
 });
 export type AIConfig = z.infer<typeof AIConfigSchema>;
 
@@ -193,6 +207,7 @@ export function loadConfig(overrides: Partial<Record<string, unknown>> = {}): Ap
     },
     ai: {
       enabled: process.env["AI_ENABLED"] === "true",
+      autonomy: process.env["AI_AUTONOMY"] ?? "veto",
       provider: process.env["AI_PROVIDER"] ?? "mock",
       baseUrl: process.env["AI_BASE_URL"],
       apiKey: process.env["AI_API_KEY"] ?? process.env["OPENAI_API_KEY"],
@@ -202,6 +217,11 @@ export function loadConfig(overrides: Partial<Record<string, unknown>> = {}): Ap
       costPer1kTokensUsd: parseFloat(process.env["AI_COST_PER_1K_TOKENS_USD"] ?? "0"),
       timeoutMs: parseInt(process.env["AI_TIMEOUT_MS"] ?? "8000", 10),
       toolsEnabled: process.env["AI_TOOLS"] !== "false",
+      cycleSec: parseInt(process.env["AI_CYCLE_SEC"] ?? "60", 10),
+      maxActionsPerCycle: parseInt(process.env["AI_MAX_ACTIONS_PER_CYCLE"] ?? "3", 10),
+      maxOpenPositions: parseInt(process.env["AI_MAX_OPEN_POSITIONS"] ?? "3", 10),
+      tokenCooldownSec: parseInt(process.env["AI_TOKEN_COOLDOWN_SEC"] ?? "600", 10),
+      liveEnabled: process.env["AI_LIVE_ENABLED"] !== "false",
     },
     database: {
       url: process.env["DATABASE_URL"] ?? "postgresql://trader:trader@localhost:5432/trader",

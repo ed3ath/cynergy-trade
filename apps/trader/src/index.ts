@@ -26,6 +26,12 @@ import {
   type Chain,
   type PortfolioSnapshot,
   type TradeIntent,
+  type Position,
+  type FeatureSet,
+  type StrategyDecision,
+  type MarketSnapshot,
+  type LiquiditySnapshot,
+  type SecurityAssessment,
 } from "@autonomous-trader/shared";
 import {
   RiskEngine,
@@ -57,7 +63,7 @@ import {
   RedisIdempotencyGuard,
   type ExecutionRouter,
 } from "@autonomous-trader/execution";
-import { PositionManager } from "@autonomous-trader/position";
+import { PositionManager, type ExitSignal } from "@autonomous-trader/position";
 
 // ─── Bootstrap ────────────────────────────────────────────────────────────────
 import { join } from "node:path";
@@ -416,34 +422,52 @@ const riskEngine = new RiskEngine(
   () => emergency.isStopNewEntries(),
 );
 
-// ─── AI veto agent (optional, veto-only LLM second opinion) ──────────────────
-// OpenAI-compatible /chat/completions endpoint. Can only REJECT candidates;
-// APPROVE = no objection, risk engine still gates everything after it.
+// ─── AI agents (optional LLM: veto second opinion + autonomous trader) ───────
+import type { AiCandidate } from "./ai-agent.js";
+import type { AiAction, AiTraderSnapshot } from "./ai-trader-agent.js";
+// OpenAI-compatible /chat/completions endpoint. The veto agent can only REJECT
+// strategy candidates. The autonomous trader (AI_AUTONOMY=auto) proposes
+// ENTER/EXIT/TIGHTEN actions — every entry still passes the full risk engine,
+// every tighten is clamp-only (PositionManager.tightenExits ratchet).
 // Tools = read-only data pulls (fresh snapshots + history) — no trade actions.
 // Providers dispatch by chain param to the matching runtime.
+// One shared AiBudget: both agents draw a single AI_MAX_COST_PER_DAY_USD cap.
 const { AiVetoAgent } = await import("./ai-agent.js");
-const aiAgent = config.ai.enabled
-  ? new AiVetoAgent(
-      config.ai,
-      log.child({ component: "ai" }),
-      {
-        getMarketSnapshot: (t, chain) => runtimeFor(chain).providers.marketData.getMarketSnapshot(t, chain),
-        getSecurityAnalysis: (t, chain) => runtimeFor(chain).providers.security.analyzeToken(t, chain),
-        getLiquiditySnapshot: (t, chain) => runtimeFor(chain).providers.liquidity.getLiquiditySnapshot(t, chain),
-        getMarketHistory: async (t, _chain) => {
-          if (!db) return [];
-          // last 30 snapshots, compact — bounded token spend per tool call
-          return ((journal as JournalRepository).getMarketSnapshotHistory(t) as Promise<unknown[]>)
-            .then((rows) => rows.slice(-30));
-        },
-      },
-    )
+const { AiBudget } = await import("./ai-budget.js");
+const { AiTraderAgent } = await import("./ai-trader-agent.js");
+const aiTools = {
+  getMarketSnapshot: (t: string, chain: Chain) => runtimeFor(chain).providers.marketData.getMarketSnapshot(t, chain),
+  getSecurityAnalysis: (t: string, chain: Chain) => runtimeFor(chain).providers.security.analyzeToken(t, chain),
+  getLiquiditySnapshot: (t: string, chain: Chain) => runtimeFor(chain).providers.liquidity.getLiquiditySnapshot(t, chain),
+  getMarketHistory: async (t: string, _chain: Chain) => {
+    if (!db) return [];
+    // last 30 snapshots, compact — bounded token spend per tool call
+    return ((journal as JournalRepository).getMarketSnapshotHistory(t) as Promise<unknown[]>)
+      .then((rows) => rows.slice(-30));
+  },
+};
+const aiBudget = new AiBudget(config.ai, log.child({ component: "ai" }));
+const aiAgent = config.ai.enabled && config.ai.autonomy !== "off"
+  ? new AiVetoAgent(config.ai, log.child({ component: "ai" }), aiTools, aiBudget)
   : null;
 if (aiAgent) {
   log.info("AI veto agent enabled", {
     provider: config.ai.provider,
     model: config.ai.model,
     baseUrl: config.ai.baseUrl,
+  });
+}
+const aiTrader = config.ai.enabled && config.ai.autonomy === "auto"
+  ? new AiTraderAgent(config.ai, log.child({ component: "ai-trader" }), aiBudget, aiTools)
+  : null;
+if (aiTrader) {
+  log.info("AI autonomy enabled", {
+    model: config.ai.model,
+    baseUrl: config.ai.baseUrl,
+    cycleSec: config.ai.cycleSec,
+    maxActionsPerCycle: config.ai.maxActionsPerCycle,
+    maxOpenPositions: config.ai.maxOpenPositions,
+    liveEnabled: config.ai.liveEnabled,
   });
 }
 
@@ -591,90 +615,7 @@ async function decisionCycle(rt: ChainRuntime): Promise<void> {
             `(pnl ${position.unrealizedPnlPct.toFixed(1)}%)`);
         }
 
-        const exitIntent: TradeIntent = {
-          id: generateTradeIntentId(),
-          tokenAddress: position.tokenAddress,
-          chain: position.chain,
-          side: "SELL",
-          mode: config.trading.mode,
-          strategyId: position.strategyId,
-          strategyVersion: "1.0.0",
-          riskVersion: config.risk.version,
-          positionSizeUsd: position.sizeUsd,
-          maxSlippageBps: config.risk.maxSlippageBps,
-          maxPriceImpactBps: config.risk.maxPriceImpactBps,
-          reason: exitSignal.reason,
-          createdAt: new Date(),
-          expiresAt: new Date(Date.now() + 30_000),
-        };
-
-        const exitResult = await rt.positions.exitPosition(position.id, exitSignal, marketSnap.priceUsd, exitIntent);
-
-        // Record exit in journal
-        await journal.recordTradeIntent(exitIntent);
-        await journal.recordExecutionResult(exitResult, exitIntent);
-        rt.fillCalibrator?.record(exitIntent, exitResult); // C2: real quote vs paper fill
-        const closedPosition = rt.positions.getPosition(position.id);
-        if (closedPosition) {
-          await journal.updatePosition(closedPosition);
-          await journal.recordPositionEvent(position.id, "EXIT", marketSnap.priceUsd, exitResult.executedPrice * Number(exitResult.outputAmount) / 1e6 - position.sizeUsd, {
-            reason: exitSignal.reason,
-            urgency: exitSignal.urgency,
-          });
-        }
-
-        // Walk token SM to CLOSED and queue cooldown-gated watchlist re-entry
-        rt.scanner.markExited(position.tokenAddress, exitSignal.reason);
-
-        // Realize PnL into the PnL ledgers. totalValue/drawdown are NOT touched
-        // here — the mark-to-market formula in step 1 owns them (unrealized was
-        // already reflected; realized just moves it into allTimePnlUsd).
-        const realizedPnl = position.unrealizedPnlUsd;
-        rt.portfolio.dailyPnlUsd += realizedPnl;
-        rt.portfolio.weeklyPnlUsd += realizedPnl;
-        rt.portfolio.monthlyPnlUsd += realizedPnl;
-        rt.portfolio.allTimePnlUsd += realizedPnl;
-
-        // Feed the performance tracker (drives sizing multipliers with shrinkage)
-        performanceTracker.record({
-          strategyId: position.strategyId,
-          pnlUsd: realizedPnl,
-          feesUsd: exitResult.feeUsd,
-          slippageUsd: position.sizeUsd * (exitResult.actualSlippageBps / 10_000),
-          durationMs: Date.now() - position.openedAt.getTime(),
-          timestamp: new Date(),
-        });
-        reportTracker.recordClose({
-          strategyId: position.strategyId,
-          pnlUsd: realizedPnl,
-          feesUsd: exitResult.feeUsd,
-          closedAt: new Date(),
-        });
-
-        // Daily loss limit → stop new entries. Deliberately global: one chain
-        // blowing its book halts entries everywhere (fail-safe over throughput).
-        if (rt.portfolio.dailyPnlUsd <= -config.risk.maxDailyLossUsd && !emergency.isStopNewEntries()) {
-          await emergency.setStopNewEntries(true);
-          await journal.recordSystemEvent("DAILY_LOSS_LIMIT_HIT",
-            `[${rt.chain}] Daily loss ${rt.portfolio.dailyPnlUsd.toFixed(2)} reached limit ${-config.risk.maxDailyLossUsd}`);
-          log.error("DAILY LOSS LIMIT REACHED — new entries stopped", {
-            chain: rt.chain,
-            dailyPnl: rt.portfolio.dailyPnlUsd,
-          });
-          alerter.alert("CRITICAL", "daily-loss-limit",
-            `[${rt.chain}] Daily loss limit hit: ${rt.portfolio.dailyPnlUsd.toFixed(2)} USD. New entries stopped automatically.`);
-        }
-
-        log.info("Position closed", {
-          chain: rt.chain,
-          positionId: position.id,
-          realizedPnlUsd: realizedPnl.toFixed(2),
-          pnlPct: position.unrealizedPnlPct.toFixed(2),
-          totalValue: rt.portfolio.totalValueUsd.toFixed(2),
-        });
-        activity.publish("exit",
-          `closed · ${realizedPnl >= 0 ? "+" : ""}$${realizedPnl.toFixed(2)} (${position.unrealizedPnlPct.toFixed(1)}%)`,
-          { token: position.tokenAddress, data: { realizedPnlUsd: realizedPnl, reason: exitSignal.reason } });
+        await executeExit(rt, position, exitSignal, marketSnap);
       }
     } catch (err) {
       log.error("Position monitoring error", { chain: rt.chain, positionId: position.id, error: (err as Error).message });
@@ -730,7 +671,6 @@ async function decisionCycle(rt: ChainRuntime): Promise<void> {
       }
 
       const strategyDecision = ensembleResult.bestDecision;
-      const stats = performanceTracker.getStats(strategyDecision.strategyId);
 
       // AI veto — cached per token, UNKNOWN on any failure (never blocks trading)
       if (aiAgent) {
@@ -763,115 +703,15 @@ async function decisionCycle(rt: ChainRuntime): Promise<void> {
       // Journal the strategy decision with full feature snapshot for reproducibility
       await journal.recordStrategyDecision(strategyDecision, candidate.features, candidate.chain);
 
-      // Build intent
-      const intent: TradeIntent = {
-        id: generateTradeIntentId(),
+      const entered = await executeEntry(rt, {
         tokenAddress: candidate.tokenAddress,
         chain: candidate.chain,
-        side: "BUY",
-        mode: config.trading.mode,
-        strategyId: strategyDecision.strategyId,
-        strategyVersion: strategyDecision.strategyVersion,
-        riskVersion: config.risk.version,
-        positionSizeUsd: rt.portfolio.totalValueUsd * (config.risk.baseRiskPct / 100),
-        maxSlippageBps: config.risk.maxSlippageBps,
-        maxPriceImpactBps: config.risk.maxPriceImpactBps,
-        reason: strategyDecision.reasons.join("; "),
-        createdAt: new Date(),
-        expiresAt: new Date(Date.now() + 60_000),
-      };
-
-      // Risk gate
-      const liqSnap = candidate.liquidity ?? await rt.providers.liquidity.getLiquiditySnapshot(candidate.tokenAddress, candidate.chain);
-      const secAssess = candidate.security ?? await rt.providers.security.analyzeToken(candidate.tokenAddress, candidate.chain);
-
-      const riskResult = riskEngine.evaluate({
-        intent,
-        portfolio: rt.portfolio,
-        liquidity: liqSnap,
-        security: secAssess,
-        marketRegime: rt.regime.regime,
-        strategyConfidence: strategyDecision.confidence,
-        strategyPerformanceMultiplier: stats.performanceMultiplier,
-        openPositionCount: rt.portfolio.openPositions,
-        dailyLossUsd: Math.max(0, -rt.portfolio.dailyPnlUsd),
-        weeklyLossUsd: Math.max(0, -rt.portfolio.weeklyPnlUsd),
-        currentDrawdownPct: rt.portfolio.currentDrawdownPct,
-        existingTokenExposureUsd: rt.positions.getTokenExposureUsd(candidate.tokenAddress),
-        existingStrategyExposureUsd: 0,
+        features: candidate.features,
+        decision: strategyDecision,
+        currentPrice: candidate.market?.priceUsd ?? 0.000001,
+        markEntered: true,
       });
-
-      // Journal intent + risk decision BEFORE execution (crash-safe audit trail)
-      await journal.recordTradeIntent(intent);
-      await journal.recordRiskDecision(riskResult.riskDecision);
-
-      if (riskResult.decision === "REJECTED") {
-        log.debug("Trade rejected by risk engine", {
-          chain: rt.chain,
-          token: candidate.tokenAddress,
-          reasons: riskResult.rejectionReasons,
-        });
-        activity.publish("reject", `risk engine · ${riskResult.rejectionReasons.join("; ")}`,
-          { token: candidate.tokenAddress });
-        continue;
-      }
-
-      // Adjust intent size to risk-approved amount
-      intent.positionSizeUsd = riskResult.approvedSizeUsd;
-      intent.maxSlippageBps = riskResult.maxSlippageBps;
-
-      // Execute
-      const currentPrice = candidate.market?.priceUsd ?? 0.000001;
-      const execResult = await rt.router.execute(intent, currentPrice);
-      await journal.recordExecutionResult(execResult, intent);
-      rt.fillCalibrator?.record(intent, execResult); // C2: real quote vs paper fill
-
-      // Open position
-      const position = rt.positions.openPosition(
-        execResult,
-        intent,
-        strategyDecision.suggestedStopLoss ?? currentPrice * 0.90,
-        strategyDecision.suggestedTakeProfit1,
-        strategyDecision.suggestedTakeProfit2,
-        strategyDecision.suggestedTrailingStopPct ?? 15, // scalps trail tighter
-      );
-
-      rt.portfolio.allocatedUsd += riskResult.approvedSizeUsd;
-      rt.portfolio.availableCapitalUsd -= riskResult.approvedSizeUsd;
-      rt.portfolio.openPositions++;
-
-      // Journal the position
-      await journal.insertPosition(position);
-      await journal.recordPositionEvent(position.id, "ENTRY", position.entryPrice, 0, {
-        strategy: strategyDecision.strategyId,
-        stopLoss: position.stopLoss,
-        takeProfit1: position.takeProfit1 ?? null,
-        sizeUsd: position.sizeUsd,
-      });
-
-      log.info("Trade entered", {
-        chain: rt.chain,
-        positionId: position.id,
-        token: candidate.tokenAddress,
-        strategy: strategyDecision.strategyId,
-        sizeUsd: intent.positionSizeUsd,
-        mode: config.trading.mode,
-      });
-      activity.publish("enter",
-        `BUY [${rt.chain}] $${intent.positionSizeUsd.toFixed(2)} @ ${position.entryPrice.toPrecision(4)}`,
-        {
-          token: candidate.tokenAddress,
-          data: {
-            chain: rt.chain,
-            sizeUsd: intent.positionSizeUsd, entryPrice: position.entryPrice,
-            stopLoss: position.stopLoss, takeProfit1: position.takeProfit1 ?? null,
-            reasons: strategyDecision.reasons,
-          },
-        });
-
-      // Mark candidate as entered in scanner
-      rt.scanner.markEntered(candidate.tokenAddress);
-      performanceTrades++;
+      if (entered) performanceTrades++;
 
     } catch (err) {
       log.error("Decision cycle error for candidate", {
@@ -880,6 +720,411 @@ async function decisionCycle(rt: ChainRuntime): Promise<void> {
         error: (err as Error).message,
       });
     }
+  }
+}
+
+// ─── Shared execution paths (strategy loop + autonomous AI) ──────────────────
+
+/** Full exit path: intent → router → journal → PnL ledgers → trackers. */
+async function executeExit(
+  rt: ChainRuntime,
+  position: Position,
+  exitSignal: ExitSignal,
+  marketSnap: MarketSnapshot,
+): Promise<void> {
+  const exitIntent: TradeIntent = {
+    id: generateTradeIntentId(),
+    tokenAddress: position.tokenAddress,
+    chain: position.chain,
+    side: "SELL",
+    mode: config.trading.mode,
+    strategyId: position.strategyId,
+    strategyVersion: "1.0.0",
+    riskVersion: config.risk.version,
+    positionSizeUsd: position.sizeUsd,
+    maxSlippageBps: config.risk.maxSlippageBps,
+    maxPriceImpactBps: config.risk.maxPriceImpactBps,
+    reason: exitSignal.reason,
+    createdAt: new Date(),
+    expiresAt: new Date(Date.now() + 30_000),
+  };
+
+  const exitResult = await rt.positions.exitPosition(position.id, exitSignal, marketSnap.priceUsd, exitIntent);
+
+  // Record exit in journal
+  await journal.recordTradeIntent(exitIntent);
+  await journal.recordExecutionResult(exitResult, exitIntent);
+  rt.fillCalibrator?.record(exitIntent, exitResult); // C2: real quote vs paper fill
+  const closedPosition = rt.positions.getPosition(position.id);
+  if (closedPosition) {
+    await journal.updatePosition(closedPosition);
+    await journal.recordPositionEvent(position.id, "EXIT", marketSnap.priceUsd, exitResult.executedPrice * Number(exitResult.outputAmount) / 1e6 - position.sizeUsd, {
+      reason: exitSignal.reason,
+      urgency: exitSignal.urgency,
+    });
+  }
+
+  // Walk token SM to CLOSED and queue cooldown-gated watchlist re-entry
+  rt.scanner.markExited(position.tokenAddress, exitSignal.reason);
+
+  // Realize PnL into the PnL ledgers. totalValue/drawdown are NOT touched
+  // here — the mark-to-market formula in step 1 owns them (unrealized was
+  // already reflected; realized just moves it into allTimePnlUsd).
+  const realizedPnl = position.unrealizedPnlUsd;
+  rt.portfolio.dailyPnlUsd += realizedPnl;
+  rt.portfolio.weeklyPnlUsd += realizedPnl;
+  rt.portfolio.monthlyPnlUsd += realizedPnl;
+  rt.portfolio.allTimePnlUsd += realizedPnl;
+
+  // Feed the performance tracker (drives sizing multipliers with shrinkage)
+  performanceTracker.record({
+    strategyId: position.strategyId,
+    pnlUsd: realizedPnl,
+    feesUsd: exitResult.feeUsd,
+    slippageUsd: position.sizeUsd * (exitResult.actualSlippageBps / 10_000),
+    durationMs: Date.now() - position.openedAt.getTime(),
+    timestamp: new Date(),
+  });
+  reportTracker.recordClose({
+    strategyId: position.strategyId,
+    pnlUsd: realizedPnl,
+    feesUsd: exitResult.feeUsd,
+    closedAt: new Date(),
+  });
+
+  // Daily loss limit → stop new entries. Deliberately global: one chain
+  // blowing its book halts entries everywhere (fail-safe over throughput).
+  if (rt.portfolio.dailyPnlUsd <= -config.risk.maxDailyLossUsd && !emergency.isStopNewEntries()) {
+    await emergency.setStopNewEntries(true);
+    await journal.recordSystemEvent("DAILY_LOSS_LIMIT_HIT",
+      `[${rt.chain}] Daily loss ${rt.portfolio.dailyPnlUsd.toFixed(2)} reached limit ${-config.risk.maxDailyLossUsd}`);
+    log.error("DAILY LOSS LIMIT REACHED — new entries stopped", {
+      chain: rt.chain,
+      dailyPnl: rt.portfolio.dailyPnlUsd,
+    });
+    alerter.alert("CRITICAL", "daily-loss-limit",
+      `[${rt.chain}] Daily loss limit hit: ${rt.portfolio.dailyPnlUsd.toFixed(2)} USD. New entries stopped automatically.`);
+  }
+
+  log.info("Position closed", {
+    chain: rt.chain,
+    positionId: position.id,
+    realizedPnlUsd: realizedPnl.toFixed(2),
+    pnlPct: position.unrealizedPnlPct.toFixed(2),
+    totalValue: rt.portfolio.totalValueUsd.toFixed(2),
+  });
+  activity.publish("exit",
+    `closed · ${realizedPnl >= 0 ? "+" : ""}$${realizedPnl.toFixed(2)} (${position.unrealizedPnlPct.toFixed(1)}%)`,
+    { token: position.tokenAddress, data: { realizedPnlUsd: realizedPnl, reason: exitSignal.reason } });
+}
+
+/** Full entry path: intent → risk gate → journal → router → position → trackers.
+ *  Returns true when a position was opened. Risk engine owns sizing — the
+ *  decision's confidence only feeds the sizing multiplier, never a bypass. */
+async function executeEntry(
+  rt: ChainRuntime,
+  input: {
+    tokenAddress: string;
+    chain: Chain;
+    features: FeatureSet;
+    decision: StrategyDecision;
+    /** Carried by strategy candidates; fetched fresh when absent. */
+    liqSnap?: LiquiditySnapshot;
+    secAssess?: SecurityAssessment;
+    currentPrice: number;
+    /** Only scanner-known tokens get the scanner state walk. */
+    markEntered: boolean;
+  },
+): Promise<boolean> {
+  try {
+    const stats = performanceTracker.getStats(input.decision.strategyId);
+
+    // Build intent
+    const intent: TradeIntent = {
+      id: generateTradeIntentId(),
+      tokenAddress: input.tokenAddress,
+      chain: input.chain,
+      side: "BUY",
+      mode: config.trading.mode,
+      strategyId: input.decision.strategyId,
+      strategyVersion: input.decision.strategyVersion,
+      riskVersion: config.risk.version,
+      positionSizeUsd: rt.portfolio.totalValueUsd * (config.risk.baseRiskPct / 100),
+      maxSlippageBps: config.risk.maxSlippageBps,
+      maxPriceImpactBps: config.risk.maxPriceImpactBps,
+      reason: input.decision.reasons.join("; "),
+      createdAt: new Date(),
+      expiresAt: new Date(Date.now() + 60_000),
+    };
+
+    // Risk gate
+    const liqSnap = input.liqSnap ?? await rt.providers.liquidity.getLiquiditySnapshot(input.tokenAddress, input.chain);
+    const secAssess = input.secAssess ?? await rt.providers.security.analyzeToken(input.tokenAddress, input.chain);
+
+    const riskResult = riskEngine.evaluate({
+      intent,
+      portfolio: rt.portfolio,
+      liquidity: liqSnap,
+      security: secAssess,
+      marketRegime: rt.regime.regime,
+      strategyConfidence: input.decision.confidence,
+      strategyPerformanceMultiplier: stats.performanceMultiplier,
+      openPositionCount: rt.portfolio.openPositions,
+      dailyLossUsd: Math.max(0, -rt.portfolio.dailyPnlUsd),
+      weeklyLossUsd: Math.max(0, -rt.portfolio.weeklyPnlUsd),
+      currentDrawdownPct: rt.portfolio.currentDrawdownPct,
+      existingTokenExposureUsd: rt.positions.getTokenExposureUsd(input.tokenAddress),
+      existingStrategyExposureUsd: 0,
+    });
+
+    // Journal intent + risk decision BEFORE execution (crash-safe audit trail)
+    await journal.recordTradeIntent(intent);
+    await journal.recordRiskDecision(riskResult.riskDecision);
+
+    if (riskResult.decision === "REJECTED") {
+      log.debug("Trade rejected by risk engine", {
+        chain: rt.chain,
+        token: input.tokenAddress,
+        reasons: riskResult.rejectionReasons,
+      });
+      activity.publish("reject", `risk engine · ${riskResult.rejectionReasons.join("; ")}`,
+        { token: input.tokenAddress });
+      return false;
+    }
+
+    // Adjust intent size to risk-approved amount
+    intent.positionSizeUsd = riskResult.approvedSizeUsd;
+    intent.maxSlippageBps = riskResult.maxSlippageBps;
+
+    // Execute
+    const execResult = await rt.router.execute(intent, input.currentPrice);
+    await journal.recordExecutionResult(execResult, intent);
+    rt.fillCalibrator?.record(intent, execResult); // C2: real quote vs paper fill
+
+    // Open position
+    const position = rt.positions.openPosition(
+      execResult,
+      intent,
+      input.decision.suggestedStopLoss ?? input.currentPrice * 0.90,
+      input.decision.suggestedTakeProfit1,
+      input.decision.suggestedTakeProfit2,
+      input.decision.suggestedTrailingStopPct ?? 15, // scalps trail tighter
+    );
+
+    rt.portfolio.allocatedUsd += riskResult.approvedSizeUsd;
+    rt.portfolio.availableCapitalUsd -= riskResult.approvedSizeUsd;
+    rt.portfolio.openPositions++;
+
+    // Journal the position
+    await journal.insertPosition(position);
+    await journal.recordPositionEvent(position.id, "ENTRY", position.entryPrice, 0, {
+      strategy: input.decision.strategyId,
+      stopLoss: position.stopLoss,
+      takeProfit1: position.takeProfit1 ?? null,
+      sizeUsd: position.sizeUsd,
+    });
+
+    log.info("Trade entered", {
+      chain: rt.chain,
+      positionId: position.id,
+      token: input.tokenAddress,
+      strategy: input.decision.strategyId,
+      sizeUsd: intent.positionSizeUsd,
+      mode: config.trading.mode,
+    });
+    activity.publish("enter",
+      `BUY [${rt.chain}] $${intent.positionSizeUsd.toFixed(2)} @ ${position.entryPrice.toPrecision(4)}`,
+      {
+        token: input.tokenAddress,
+        data: {
+          chain: rt.chain,
+          sizeUsd: intent.positionSizeUsd, entryPrice: position.entryPrice,
+          stopLoss: position.stopLoss, takeProfit1: position.takeProfit1 ?? null,
+          reasons: input.decision.reasons,
+        },
+      });
+
+    // Mark candidate as entered in scanner
+    if (input.markEntered) rt.scanner.markEntered(input.tokenAddress);
+    return true;
+  } catch (err) {
+    log.error("Entry execution error", {
+      chain: rt.chain,
+      token: input.tokenAddress,
+      error: (err as Error).message,
+    });
+    return false;
+  }
+}
+
+// ─── Autonomous AI trader cycle (AI_AUTONOMY=auto) ────────────────────────────
+
+const AI_STRATEGY_ID = "ai-autonomous";
+/** token → epoch ms before which the AI may not act on it again. In-memory —
+ *  worst case after restart is one extra risk-gated AI cycle. */
+const aiCooldowns = new Map<string, number>();
+let aiTicks = 0;
+const aiTicksPerCycle = Math.max(1, Math.round(config.ai.cycleSec / 10));
+
+/** One autonomous cycle: snapshot → propose → guarded dispatch. Never throws;
+ *  any failure degrades to a no-op for that cycle. */
+async function runAiCycle(): Promise<void> {
+  if (!aiTrader) return;
+  if (!config.ai.liveEnabled && config.trading.mode === "LIVE") return;
+
+  try {
+    const agg = aggregatePortfolio();
+    const openPositions = runtimes.flatMap((rt) => rt.positions.getOpenPositions());
+    const candidates: AiCandidate[] = runtimes.flatMap((rt) =>
+      rt.scanner.getTradeCandidates().slice(0, 5));
+    const recentTrades = db
+      ? (await Promise.all(runtimes.map((rt) =>
+          (journal as JournalRepository).getClosedTrades(config.trading.mode, rt.chain, 10))))
+          .flat()
+          .map((r) => ({ token: r.tokenAddress, pnlUsd: r.pnlUsd, pnlPct: r.pnlPct }))
+          .slice(0, 20)
+      : [];
+
+    const snapshot: AiTraderSnapshot = {
+      portfolio: {
+        totalValueUsd: agg.totalValueUsd,
+        availableUsd: agg.availableCapitalUsd,
+        dailyPnlUsd: agg.dailyPnlUsd,
+        drawdownPct: agg.currentDrawdownPct,
+        regime: runtimes.map((rt) => `${rt.chain}:${rt.regime.regime}`).join(","),
+        openPositions: openPositions.length,
+      },
+      positions: openPositions.map((p) => ({
+        positionId: p.id,
+        token: p.tokenAddress,
+        chain: p.chain,
+        strategyId: p.strategyId,
+        entryPrice: p.entryPrice,
+        currentPrice: p.currentPrice,
+        pnlPct: p.unrealizedPnlPct,
+        ageMin: Math.round((Date.now() - p.openedAt.getTime()) / 60_000),
+      })),
+      candidates,
+      recentTrades,
+    };
+
+    const { actions, summary } = await aiTrader.propose(snapshot);
+    log.info("AI trader cycle", { actions: actions.length, summary });
+    for (const action of actions) {
+      await runAiAction(action, candidates);
+    }
+  } catch (err) {
+    log.warn("AI trader cycle failed", { error: (err as Error).message });
+  }
+}
+
+async function runAiAction(action: AiAction, candidates: AiCandidate[]): Promise<void> {
+  const skip = (reason: string): void => {
+    log.info("AI action skipped", { type: action.type, token: action.tokenAddress, reason });
+    activity.publish("info", `ai skip · ${reason}`, { token: action.tokenAddress });
+  };
+  const cooldownUntil = (): number => aiCooldowns.get(action.tokenAddress) ?? 0;
+  const onCooldown = cooldownUntil() > Date.now();
+
+  // ── ENTER ─────────────────────────────────────────────────────────────────
+  if (action.type === "ENTER") {
+    const rt = runtimes.find((r) => r.chain === action.chain);
+    if (!rt) return skip(`chain ${action.chain} not trading`);
+    if (emergency.isStopNewEntries()) return skip("new entries stopped");
+    if (rt.positions.getTokenExposureUsd(action.tokenAddress) > 0) return skip("already held");
+    if (onCooldown) return skip("token cooldown");
+    const aiOpen = runtimes.reduce(
+      (s, r) => s + r.positions.getOpenPositions().filter((p) => p.strategyId === AI_STRATEGY_ID).length, 0);
+    if (aiOpen >= config.ai.maxOpenPositions) return skip(`AI position cap (${config.ai.maxOpenPositions})`);
+
+    // UNKNOWN discipline: any data-fetch failure skips the action
+    let marketSnap: MarketSnapshot, liqSnap: LiquiditySnapshot, secAssess: SecurityAssessment;
+    try {
+      marketSnap = await rt.providers.marketData.getMarketSnapshot(action.tokenAddress, action.chain);
+      liqSnap = await rt.providers.liquidity.getLiquiditySnapshot(action.tokenAddress, action.chain);
+      secAssess = await rt.providers.security.analyzeToken(action.tokenAddress, action.chain);
+    } catch (err) {
+      return skip(`data fetch failed: ${(err as Error).message}`);
+    }
+    const price = marketSnap.priceUsd;
+    if (!(price > 0)) return skip("no live price");
+
+    const decision: StrategyDecision = {
+      strategyId: AI_STRATEGY_ID,
+      strategyVersion: "1.0.0",
+      tokenAddress: action.tokenAddress,
+      decision: "ENTER",
+      confidence: action.confidence ?? 0.5,
+      reasons: [action.rationale ?? "ai autonomous entry"],
+      risks: [],
+      invalidationConditions: [],
+      suggestedStopLoss: price * (1 - (action.suggestedStopLossPct ?? 10) / 100),
+      suggestedTakeProfit1: price * (1 + (action.suggestedTakeProfitPct ?? 5) / 100),
+      evaluatedAt: new Date(),
+    };
+    await journal.recordStrategyDecision(decision, {}, action.chain);
+    const entered = await executeEntry(rt, {
+      tokenAddress: action.tokenAddress,
+      chain: action.chain,
+      features: {},
+      decision,
+      liqSnap,
+      secAssess,
+      currentPrice: price,
+      // AI-named tokens the scanner has never seen have no lifecycle state to walk
+      markEntered: candidates.some((c) => c.tokenAddress === action.tokenAddress && c.chain === action.chain),
+    });
+    aiCooldowns.set(action.tokenAddress, Date.now() + config.ai.tokenCooldownSec * 1000);
+    if (!entered) log.info("AI entry not opened", { token: action.tokenAddress });
+    return;
+  }
+
+  // ── EXIT / TIGHTEN: resolve the position across all chains ────────────────
+  let target: { rt: ChainRuntime; position: Position } | null = null;
+  for (const rt of runtimes) {
+    const match = rt.positions.getOpenPositions().find((p) =>
+      action.positionId ? p.id === action.positionId : p.tokenAddress === action.tokenAddress && p.chain === action.chain);
+    if (match) { target = { rt, position: match }; break; }
+  }
+  if (!target) return skip("position not found");
+  const { rt, position } = target;
+
+  try {
+    if (action.type === "EXIT") {
+      if (onCooldown) return skip("token cooldown");
+      const marketSnap = await rt.providers.marketData.getMarketSnapshot(action.tokenAddress, action.chain);
+      log.info("AI exiting position", { positionId: position.id, token: action.tokenAddress, rationale: action.rationale });
+      await executeExit(rt, position,
+        { reason: `AI exit · ${action.rationale ?? "no rationale"}`, urgency: "NORMAL", suggestedSellPct: 100 },
+        marketSnap);
+      aiCooldowns.set(action.tokenAddress, Date.now() + config.ai.tokenCooldownSec * 1000);
+      return;
+    }
+
+    // TIGHTEN — pcts relative to entry; PositionManager clamps widen attempts
+    const opts: { stopLoss?: number; takeProfit1?: number; trailingStopPct?: number } = {};
+    if (action.tightenStopLossPct !== undefined) {
+      opts.stopLoss = position.entryPrice * (1 - action.tightenStopLossPct / 100);
+    }
+    if (action.tightenTp1Pct !== undefined) {
+      opts.takeProfit1 = position.entryPrice * (1 + action.tightenTp1Pct / 100);
+    }
+    if (action.tightenTrailingPct !== undefined) {
+      opts.trailingStopPct = action.tightenTrailingPct;
+    }
+    if (Object.keys(opts).length === 0) return skip("no tighten values");
+
+    const result = rt.positions.tightenExits(position.id, opts);
+    const marketSnap = await rt.providers.marketData.getMarketSnapshot(action.tokenAddress, action.chain);
+    await journal.recordPositionEvent(position.id, "ADJUST", marketSnap.priceUsd, 0, {
+      by: "ai", applied: result.applied, clamped: result.clamped,
+      rationale: action.rationale ?? "",
+    });
+    activity.publish("info",
+      `ai tighten · ${Object.keys(result.applied).join("+") || "none"}${result.clamped.length ? ` (clamped: ${result.clamped.join("; ")})` : ""}`,
+      { token: action.tokenAddress });
+  } catch (err) {
+    log.warn("AI action failed", { type: action.type, token: action.tokenAddress, error: (err as Error).message });
   }
 }
 
@@ -911,6 +1156,18 @@ async function decisionCycleAll(): Promise<void> {
   }
 
   for (const rt of runtimes) await decisionCycle(rt);
+
+  // Autonomous AI trader — inline every Nth tick (single-threaded interleave:
+  // no concurrent portfolio mutation with the 10s loop; worst case one slow
+  // tick per AI cycle, bounded by AI_TIMEOUT_MS).
+  // ponytail: move to a worker + action queue if AI latency ever hurts ticks.
+  if (aiTrader) {
+    aiTicks++;
+    if (aiTicks >= aiTicksPerCycle) {
+      aiTicks = 0;
+      await runAiCycle();
+    }
+  }
 }
 
 // ─── HTTP monitoring + emergency control ──────────────────────────────────────
