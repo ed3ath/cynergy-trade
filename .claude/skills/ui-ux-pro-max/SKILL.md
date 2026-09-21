@@ -8,45 +8,45 @@ UI/UX design intelligence for web, mobile, and desktop. This skill should be use
 
 ## When to Apply
 
-当任务涉及 **UI 结构、视觉设计决策、交互模式或用户体验质量控制** 时，应使用此 Skill。
+Use this skill when the task involves **UI structure, visual design decisions, interaction patterns, or user-experience quality control**.
 
 ### Primary Use Cases
 
-在以下情况此 Skill 最为有用：
+This skill is most useful when:
 
-- 设计新的页面（Landing Page、Dashboard、Admin、SaaS、Mobile App）
-- 创建或重构 UI 组件（按钮、弹窗、表单、表格、图表等）
-- 选择配色方案、字体系统、间距规范或布局体系
-- 审查 UI 代码的用户体验、可访问性或视觉一致性
-- 实现导航结构、动效或响应式行为
-- 做产品层级的设计决策（风格、信息层级、品牌表达）
-- 提升界面的感知质量、清晰度或可用性
+- Designing new pages (landing page, dashboard, admin, SaaS, mobile app)
+- Creating or refactoring UI components (buttons, modals, forms, tables, charts, etc.)
+- Choosing color schemes, typography systems, spacing standards, or layout systems
+- Reviewing UI code for user experience, accessibility, or visual consistency
+- Implementing navigation structure, motion, or responsive behavior
+- Making product-level design decisions (style, information hierarchy, brand expression)
+- Improving an interface's perceived quality, clarity, or usability
 
 ### Recommended
 
-在以下情况建议使用此 Skill：
+Consider using this skill when:
 
-- UI 看起来"不够专业"，但原因不明确
-- 收到可用性或体验方面的反馈
-- 准备上线前的 UI 质量优化
-- 需要对齐跨平台设计（Web / iOS / Android）
-- 构建设计系统或可复用组件库
+- The UI looks "unprofessional" but the cause is unclear
+- You receive usability or experience feedback
+- Polishing UI quality before launch
+- Aligning cross-platform design (web / iOS / Android)
+- Building a design system or reusable component library
 
 ### Skip
 
-在以下情况无需使用此 Skill：
+No need for this skill when:
 
-- 纯后端逻辑开发
-- 仅涉及 API 或数据库设计
-- 与界面无关的性能优化
-- 基础设施或 DevOps 工作
-- 非视觉类脚本或自动化任务
+- Pure backend logic development
+- API or database design only
+- Performance optimization unrelated to the interface
+- Infrastructure or DevOps work
+- Non-visual scripts or automation tasks
 
-**判断准则**：如果任务会改变某个功能 **看起来如何、使用起来如何、如何运动或如何被交互**，就应该使用此 Skill。
+**Rule of thumb**: if the task changes how a feature **looks, feels, moves, or is interacted with**, use this skill.
 
 ## Rule Categories by Priority
 
-*供人工/AI 查阅：按 1→10 决定先关注哪类规则；需要细则时用 `--domain <Domain>` 查询。脚本不读取本表。*
+*For human/AI reference: use priorities 1→10 to decide which rule category to focus on first; query `--domain <Domain>` for details. The script does not read this table.*
 
 | Priority | Category | Impact | Domain | Key Checks (Must Have) | Anti-Patterns (Avoid) |
 |----------|----------|--------|--------|------------------------|------------------------|
@@ -342,10 +342,10 @@ Use this skill when the user requests any of the following:
 
 | Scenario | Trigger Examples | Start From |
 |----------|-----------------|------------|
-| **New project / page** | "做一个 landing page"、"Build a dashboard" | Step 1 → Step 2 (design system) |
-| **New component** | "Create a pricing card"、"Fix modal focus" | Step 3 (one focused domain search) |
-| **Choose style / color / font** | "What style fits a fintech app?"、"推荐配色" | Step 2 (design system) |
-| **Review existing UI** | "Review this page for UX issues"、"检查无障碍" | Quick Reference checklist above |
+| **New project / page** | "Make a landing page", "Build a dashboard" | Step 1 → Step 2 (design system) |
+| **New component** | "Create a pricing card", "Fix modal focus" | Step 3 (one focused domain search) |
+| **Choose style / color / font** | "What style fits a fintech app?", "Recommend a color palette" | Step 2 (design system) |
+| **Review existing UI** | "Review this page for UX issues", "Check accessibility" | Quick Reference checklist above |
 | **Fix a UI bug** | "Button hover is broken"、"Layout shifts on load" | Quick Reference → relevant section |
 | **Improve / optimize** | "Reduce React list rerenders"、"Fix mobile touch targets" | Step 3 (explicit `react`, `ux`, or `web` domain) |
 | **Implement dark mode** | "Add dark mode support" | Step 3 (domain: style "dark mode") |
@@ -630,10 +630,10 @@ Scope notice: The rules below are for App UI (iOS/Android/React Native/Flutter),
 
 ### Icons & Visual Elements
 
-- 默认图标库使用 **Phosphor (`@phosphor-icons/react`)**。`src/ui-ux-pro-max/data/icons.csv` 中列出的只是常用推荐图标，不是完整集合。
-- 当推荐表中找不到合适的图标时：
-  - **优先继续从 Phosphor 的完整图标集中选择任何语义更贴切的图标**；
-  - 如果 Phosphor 也没有理想选项，可以使用 **Heroicons (`@heroicons/react`)** 作为备选，注意保持风格一致（线性/填充、笔画粗细、圆角风格）。
+- The default icon library is **Phosphor (`@phosphor-icons/react`)**. The icons listed in `src/ui-ux-pro-max/data/icons.csv` are only common recommendations, not the full set.
+- When the recommendation table has no fitting icon:
+  - **Prefer picking any semantically better-fitting icon from Phosphor's complete icon set**;
+  - If Phosphor has no ideal option either, use **Heroicons (`@heroicons/react`)** as a fallback, keeping the style consistent (outline/fill, stroke width, corner radius).
 
 | Rule | Standard | Avoid | Why It Matters |
 |------|----------|--------|----------------|
