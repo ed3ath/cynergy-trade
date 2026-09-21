@@ -86,12 +86,24 @@ export const ExecutionConfigSchema = z.object({
 export type ExecutionConfig = z.infer<typeof ExecutionConfigSchema>;
 
 // ─── AI config ────────────────────────────────────────────────────────────────
+/** Veto-only LLM second opinion. Any OpenAI-compatible chat-completions
+ *  endpoint works: OpenAI, OpenRouter, Ollama/vLLM, gateways, proxies. */
 export const AIConfigSchema = z.object({
   enabled: z.boolean().default(false),
-  provider: z.enum(["anthropic", "mock"]).default("mock"),
-  model: z.string().default("claude-opus-4-5"),
+  provider: z.enum(["openai", "mock"]).default("mock"),
+  baseUrl: z.string().url().default("https://api.openai.com/v1"),
+  apiKey: z.string().optional(),
+  model: z.string().default("gpt-4o-mini"),
   maxCandidatesPerCycle: z.number().int().positive().default(10),
   maxCostPerDayUsd: z.number().positive().default(5.0),
+  /** Blended USD per 1k tokens (prompt+completion) — 0 disables cost tracking.
+   *  ponytail: no per-model pricing table; set it for your endpoint when you
+   *  need the daily cap enforced, upgrade to a pricing map if models rotate. */
+  costPer1kTokensUsd: z.number().nonnegative().default(0),
+  timeoutMs: z.number().positive().default(8_000),
+  /** Offer the agent read-only data tools (function calling). Disable for
+   *  endpoints that reject the `tools` field. */
+  toolsEnabled: z.boolean().default(true),
 });
 export type AIConfig = z.infer<typeof AIConfigSchema>;
 
@@ -172,6 +184,18 @@ export function loadConfig(overrides: Partial<Record<string, unknown>> = {}): Ap
       jito: { enabled: false },
       tonapi: { enabled: true },
       geckoterminal: { enabled: true },
+    },
+    ai: {
+      enabled: process.env["AI_ENABLED"] === "true",
+      provider: process.env["AI_PROVIDER"] ?? "mock",
+      baseUrl: process.env["AI_BASE_URL"],
+      apiKey: process.env["AI_API_KEY"] ?? process.env["OPENAI_API_KEY"],
+      model: process.env["AI_MODEL"],
+      maxCandidatesPerCycle: parseInt(process.env["AI_MAX_CANDIDATES"] ?? "10", 10),
+      maxCostPerDayUsd: parseFloat(process.env["AI_MAX_COST_PER_DAY_USD"] ?? "5"),
+      costPer1kTokensUsd: parseFloat(process.env["AI_COST_PER_1K_TOKENS_USD"] ?? "0"),
+      timeoutMs: parseInt(process.env["AI_TIMEOUT_MS"] ?? "8000", 10),
+      toolsEnabled: process.env["AI_TOOLS"] !== "false",
     },
     database: {
       url: process.env["DATABASE_URL"] ?? "postgresql://trader:trader@localhost:5432/trader",

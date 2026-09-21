@@ -241,6 +241,36 @@ if (!alerter.isEnabled && config.trading.mode === "LIVE") {
   log.warn("LIVE mode without alerting configured (ALERT_TELEGRAM_BOT_TOKEN/CHAT_ID)");
 }
 
+// ─── AI veto agent (optional, veto-only LLM second opinion) ──────────────────
+// OpenAI-compatible /chat/completions endpoint. Can only REJECT candidates;
+// APPROVE = no objection, risk engine still gates everything after it.
+// Tools = read-only data pulls (fresh snapshots + history) — no trade actions.
+const { AiVetoAgent } = await import("./ai-agent.js");
+const aiAgent = config.ai.enabled
+  ? new AiVetoAgent(
+      config.ai,
+      log.child({ component: "ai" }),
+      {
+        getMarketSnapshot: (t, chain) => market.getMarketSnapshot(t, chain),
+        getSecurityAnalysis: (t, chain) => security.analyzeToken(t, chain),
+        getLiquiditySnapshot: (t, chain) => liquidity.getLiquiditySnapshot(t, chain),
+        getMarketHistory: async (t, _chain) => {
+          if (!db) return [];
+          // last 30 snapshots, compact — bounded token spend per tool call
+          return ((journal as JournalRepository).getMarketSnapshotHistory(t) as Promise<unknown[]>)
+            .then((rows) => rows.slice(-30));
+        },
+      },
+    )
+  : null;
+if (aiAgent) {
+  log.info("AI veto agent enabled", {
+    provider: config.ai.provider,
+    model: config.ai.model,
+    baseUrl: config.ai.baseUrl,
+  });
+}
+
 // ─── Shadow-decision tracking (signal quality, spec §43) ────────────────────
 const { ShadowTracker } = await import("./shadow-tracker.js");
 const shadowTracker = new ShadowTracker(
@@ -623,6 +653,21 @@ async function decisionCycle(): Promise<void> {
 
       const strategyDecision = ensembleResult.bestDecision;
       const stats = performanceTracker.getStats(strategyDecision.strategyId);
+
+      // AI veto — cached per token, UNKNOWN on any failure (never blocks trading)
+      if (aiAgent) {
+        const aiVerdict = await aiAgent.veto(candidate);
+        if (aiVerdict.verdict === "REJECT") {
+          log.info("Candidate vetoed by AI agent", {
+            token: candidate.tokenAddress,
+            confidence: aiVerdict.confidence,
+            reason: aiVerdict.reason,
+          });
+          activity.publish("reject", `ai veto · ${aiVerdict.reason}`,
+            { token: candidate.tokenAddress });
+          continue;
+        }
+      }
 
       // Shadow-track every ENTER signal at decision price — signal quality
       // evidence independent of risk approval or execution (spec §43)
