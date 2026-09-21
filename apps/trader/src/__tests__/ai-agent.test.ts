@@ -25,6 +25,7 @@ function cfg(overrides: Partial<AIConfig> = {}): AIConfig {
     maxCostPerDayUsd: 5,
     costPer1kTokensUsd: 0,
     timeoutMs: 1000,
+    toolsEnabled: true,
     ...overrides,
   } as AIConfig;
 }
@@ -127,5 +128,90 @@ describe("AiVetoAgent", () => {
     const body = JSON.parse(String(init.body));
     expect(body.model).toBe("test-model");
     expect(JSON.stringify(body.messages)).toContain("TokenXXX");
+  });
+
+  // ─── tool calling ───────────────────────────────────────────────────────────
+  function toolCallResponse(name: string, args: string): Response {
+    return new Response(JSON.stringify({
+      choices: [{ message: { content: null, tool_calls: [{ id: "call_1", type: "function", function: { name, arguments: args } }] } }],
+      usage: { prompt_tokens: 100, completion_tokens: 50 },
+    }));
+  }
+
+  it("executes requested tools, feeds results back, then parses the final verdict", async () => {
+    const history = vi.fn().mockResolvedValue([{ priceUsd: 0.001 }, { priceUsd: 0.0012 }]);
+    let call = 0;
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      call++;
+      return call === 1
+        ? toolCallResponse("getMarketHistory", JSON.stringify({ token: "TokenXXX" }))
+        : okResponse('{"verdict":"REJECT","confidence":0.9,"reason":"classic pump shape"}');
+    });
+    const agent = new AiVetoAgent(cfg(), createLogger({ t: "test" }), { getMarketHistory: history });
+    const v = await agent.veto(candidate());
+
+    expect(v).toMatchObject({ verdict: "REJECT", reason: "classic pump shape" });
+    expect(history).toHaveBeenCalledTimes(1);
+    expect(history).toHaveBeenCalledWith("TokenXXX", "solana");
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+
+    // second request carries the assistant tool_call + tool result messages
+    const [, secondInit] = fetchSpy.mock.calls[1] as [string, RequestInit];
+    const secondBody = JSON.parse(String(secondInit.body));
+    const roles = secondBody.messages.map((m: { role: string }) => m.role);
+    expect(roles).toEqual(["system", "user", "assistant", "tool"]);
+    expect(secondBody.messages[3].tool_call_id).toBe("call_1");
+    expect(secondBody.messages[3].content).toContain("0.0012");
+  });
+
+  it("offers tools in the request only when the host wired them", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch")
+      .mockImplementation(async () => okResponse('{"verdict":"APPROVE","confidence":0.9,"reason":"ok"}'));
+    const withTools = new AiVetoAgent(cfg(), createLogger({ t: "test" }), { getSecurityAnalysis: vi.fn() });
+    await withTools.veto(candidate());
+    const [, firstInit] = fetchSpy.mock.calls[0] as [string, RequestInit];
+    const offered = JSON.parse(String(firstInit.body)).tools as { function: { name: string } }[];
+    expect(offered.map((t: { function: { name: string } }) => t.function.name)).toEqual(["getSecurityAnalysis"]);
+
+    fetchSpy.mockClear();
+    const bare = new AiVetoAgent(cfg(), createLogger({ t: "test" })); // no context
+    await bare.veto(candidate());
+    const [, bareInit] = fetchSpy.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(String(bareInit.body))).not.toHaveProperty("tools");
+  });
+
+  it("respects toolsEnabled=false — no tools field even when context is wired", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch")
+      .mockImplementation(async () => okResponse('{"verdict":"APPROVE","confidence":0.9,"reason":"ok"}'));
+    const agent = new AiVetoAgent(cfg({ toolsEnabled: false }), createLogger({ t: "test" }), { getMarketSnapshot: vi.fn() });
+    await agent.veto(candidate());
+    const [, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(String(init.body))).not.toHaveProperty("tools");
+  });
+
+  it("returns tool errors to the model as text and still completes the exchange", async () => {
+    const failing = vi.fn().mockRejectedValue(new Error("provider down"));
+    let call = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      call++;
+      return call === 1
+        ? toolCallResponse("getSecurityAnalysis", "{}") // malformed args → candidate token fallback
+        : okResponse('{"verdict":"APPROVE","confidence":0.5,"reason":"proceeded despite tool failure"}');
+    });
+    const agent = new AiVetoAgent(cfg(), createLogger({ t: "test" }), { getSecurityAnalysis: failing });
+    const v = await agent.veto(candidate());
+
+    expect(v.verdict).toBe("APPROVE");
+    expect(failing).toHaveBeenCalledWith("TokenXXX", "solana"); // empty args fell back to candidate
+    const [, errInit] = (vi.mocked(globalThis.fetch).mock.calls[1] as [string, RequestInit]);
+    const errBody = JSON.parse(String(errInit.body));
+    expect(errBody.messages[3].content).toContain("error: provider down");
+  });
+
+  it("maps a stuck tool loop (no final verdict) to UNKNOWN", async () => {
+    vi.spyOn(globalThis, "fetch")
+      .mockImplementation(async () => toolCallResponse("getMarketSnapshot", '{"token":"TokenXXX"}'));
+    const agent = new AiVetoAgent(cfg(), createLogger({ t: "test" }), { getMarketSnapshot: vi.fn().mockResolvedValue({ priceUsd: 1 }) });
+    expect((await agent.veto(candidate())).verdict).toBe("UNKNOWN");
   });
 });

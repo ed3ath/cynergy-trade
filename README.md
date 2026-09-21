@@ -28,6 +28,7 @@ Set API keys in `.env` (copy `.env.example`) for real market data:
 | `AI_ENABLED` | any OpenAI-compatible | `true` → LLM veto agent reviews ENTER signals (veto-only; failures never block trading) |
 | `AI_BASE_URL` / `AI_API_KEY` / `AI_MODEL` | " | endpoint, key, model — e.g. `https://api.openai.com/v1`, `https://openrouter.ai/api/v1`, local Ollama |
 | `AI_COST_PER_1K_TOKENS_USD` | " | USD per 1k tokens — enables the `AI_MAX_COST_PER_DAY_USD` (default 5) cap |
+| `AI_TOOLS` | " | `false` disables the agent's read-only data tools (fresh market/security/liquidity pulls + price history) — set false for endpoints without function-calling support |
 
 Without keys the system runs on deterministic-ish mock providers — full pipeline, zero real data.
 

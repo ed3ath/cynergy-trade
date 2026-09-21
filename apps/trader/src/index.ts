@@ -244,9 +244,24 @@ if (!alerter.isEnabled && config.trading.mode === "LIVE") {
 // ─── AI veto agent (optional, veto-only LLM second opinion) ──────────────────
 // OpenAI-compatible /chat/completions endpoint. Can only REJECT candidates;
 // APPROVE = no objection, risk engine still gates everything after it.
+// Tools = read-only data pulls (fresh snapshots + history) — no trade actions.
 const { AiVetoAgent } = await import("./ai-agent.js");
 const aiAgent = config.ai.enabled
-  ? new AiVetoAgent(config.ai, log.child({ component: "ai" }))
+  ? new AiVetoAgent(
+      config.ai,
+      log.child({ component: "ai" }),
+      {
+        getMarketSnapshot: (t, chain) => market.getMarketSnapshot(t, chain),
+        getSecurityAnalysis: (t, chain) => security.analyzeToken(t, chain),
+        getLiquiditySnapshot: (t, chain) => liquidity.getLiquiditySnapshot(t, chain),
+        getMarketHistory: async (t, _chain) => {
+          if (!db) return [];
+          // last 30 snapshots, compact — bounded token spend per tool call
+          return ((journal as JournalRepository).getMarketSnapshotHistory(t) as Promise<unknown[]>)
+            .then((rows) => rows.slice(-30));
+        },
+      },
+    )
   : null;
 if (aiAgent) {
   log.info("AI veto agent enabled", {
