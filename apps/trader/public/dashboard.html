@@ -176,7 +176,7 @@
   }
   td { padding: 4px 8px; border-bottom: 1px solid var(--grid); }
   tbody tr:last-child td, table > tr:last-child td { border-bottom: none; }
-  td.num, th.num { text-align: right; }
+  td.num, th.num { text-align: right; white-space: nowrap; }
   .mono { font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
   td a { color: var(--series-1); text-decoration: none; }
   td a:hover { text-decoration: underline; }
@@ -194,7 +194,9 @@
   .pill-info { color: var(--series-1); border-color: color-mix(in srgb, var(--series-1) 35%, transparent); }
   /* ── market table ────────────────────────────────────────────────────── */
   .p-market .pbody { overflow: auto; }
-  #market table { min-width: 980px; }
+  #market table { min-width: 820px; }
+  .p-market th, .p-market td { padding-left: 6px; padding-right: 6px; }
+  .p-market td { white-space: nowrap; }
   #market tr[data-token] { cursor: pointer; }
   #market tr[data-token]:hover, #market tr[data-token]:focus { background: var(--wash); outline: none; }
   /* ── activity / console ──────────────────────────────────────────────── */
@@ -203,15 +205,17 @@
     font: 12px/1.6 ui-monospace, Consolas, monospace; padding: 6px 8px;
     flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain;
   }
-  #activity .row, #console .row { display: flex; gap: 8px; }
+  /* grid (not flex): the message cell gets minmax(0,1fr) so a squeezed panel
+     shrinks the message column instead of overflowing the token link onto it */
+  #activity .row, #console .row { display: grid; grid-template-columns: auto 52px minmax(0, 1fr); gap: 8px; align-items: baseline; }
   #activity .row.dim, #console .row.dim { opacity: .65; }
-  #activity .t, #console .t { color: var(--muted); flex: none; }
-  #activity .lv, #console .lv { flex: none; font-weight: 700; width: 56px; }
+  #activity .t, #console .t { color: var(--muted); }
+  #activity .lv, #console .lv { font-weight: 700; }
   #activity .lv-signal, #console .lv-signal { color: var(--series-1); }
   #activity .lv-error, #console .lv-error, #activity .lv-fatal, #console .lv-fatal { color: var(--critical); }
   #activity .lv-warn, #console .lv-warn { color: var(--warning); }
   #activity .lv-skip, #console .lv-skip, #activity .lv-reject, #console .lv-reject { color: var(--muted); }
-  #activity .m, #console .m { word-break: break-all; }
+  #activity .m, #console .m { min-width: 0; overflow-wrap: anywhere; }
   /* ── token drill-down: modal overlay, not an inline space hog ─────────── */
   #token-detail {
     position: fixed; inset: 0; z-index: 100; display: none;
@@ -350,8 +354,17 @@
 "use strict";
 const $ = (id) => document.getElementById(id);
 const fmtUsd = (n) => "$" + n.toLocaleString("en-US", { maximumFractionDigits: 2 });
+const fmtUsdInt = (n) => (n < 0 ? "-$" : "$") + Math.round(Math.abs(n)).toLocaleString("en-US");
 const fmtPct = (n) => (n >= 0 ? "+" : "") + n.toFixed(2) + "%";
-const fmtPrice = (n) => (n == null ? "—" : n >= 1000 ? fmtUsd(n) : "$" + n.toPrecision(3));
+// never scientific notation: toPrecision() prints "1.23e-8" for memecoin prices
+const fmtPrice = (n) => n == null ? "—"
+  : n >= 1000 ? "$" + n.toLocaleString("en-US", { maximumFractionDigits: 2 })
+  : n >= 1 ? "$" + n.toFixed(2)
+  : n >= 0.01 ? "$" + n.toFixed(4)
+  : "$" + n.toLocaleString("en-US", { maximumSignificantDigits: 4 });
+const fmtTick = (v) => Math.abs(v) >= 1e6
+  ? (v < 0 ? "-$" : "$") + Math.abs(v / 1e6).toFixed(2) + "M"
+  : fmtUsdInt(v);
 const fmtCompact = (n) => n == null ? "—" : n >= 1e9 ? "$" + (n / 1e9).toFixed(2) + "B" : n >= 1e6 ? "$" + (n / 1e6).toFixed(2) + "M" : n >= 1e3 ? "$" + (n / 1e3).toFixed(1) + "k" : "$" + n.toFixed(0);
 const fmtAge = (iso) => {
   if (!iso) return "—";
@@ -456,7 +469,7 @@ function renderStatus(status) {
     const daily = p.dailyPnlUsd;
     const tiles = $("tiles");
     tiles.replaceChildren(
-      tile("Total value", fmtUsd(p.totalValueUsd), { hero: true, cls: daily >= 0 ? "up" : "down", text: `daily ${fmtUsd(daily)}` }),
+      tile("Total value", fmtUsdInt(p.totalValueUsd), { hero: true, cls: daily >= 0 ? "up" : "down", text: `daily ${fmtUsd(daily)}` }),
       tile("Drawdown", p.currentDrawdownPct.toFixed(3) + "%"),
       tile("Open positions", String(p.openPositions)),
       tile("Available", fmtUsd(p.availableCapitalUsd)),
@@ -543,7 +556,7 @@ function renderTrades(trades) {
   for (const t of trades) {
     tbl.append(h("tr", {},
       tokenCell(t.tokenAddress),
-      h("td", { class: "num", text: t.entryPrice.toPrecision(4) }),
+      h("td", { class: "num", text: fmtPrice(t.entryPrice) }),
       h("td", { class: "num", text: fmtUsd(t.sizeUsd) }),
       h("td", { class: "num", text: fmtUsd(t.pnlUsd), style: `color: var(--${t.pnlUsd >= 0 ? "good" : "critical"})` }),
       h("td", { class: "num", text: fmtPct(t.pnlPct), style: `color: var(--${t.pnlPct >= 0 ? "good" : "critical"})` }),
@@ -572,29 +585,33 @@ function actRow(e) {
         e.token.slice(0, 6) + "…" + e.token.slice(-4))
     : null;
   const score = e.data && e.data.score != null ? " · score " + Number(e.data.score).toFixed(0) : "";
+  // newest row on top: activity renders descending, live events prepend
   return h("div", { class: "row" + (e.kind === "skip" || e.kind === "cycle" ? " dim" : "") },
     h("span", { class: "t", text: new Date(e.at).toLocaleTimeString() }),
     h("span", { class: "lv lv-" + k.cls, text: k.label }),
-    tok,
-    h("span", { class: "m", text: (tok ? " " : "") + (e.detail ?? "") + score }));
+    h("span", { class: "m" }, tok, (tok ? " · " : "") + (e.detail ?? "") + score));
 }
 function renderActivity() {
   const box = $("activity");
   const frag = document.createDocumentFragment();
-  for (const e of actBuf) if (actFilter === "all" || e.kind !== "cycle") frag.append(actRow(e));
+  for (let i = actBuf.length - 1; i >= 0; i--) {
+    const e = actBuf[i];
+    if (actFilter === "all" || e.kind !== "cycle") frag.append(actRow(e));
+  }
   box.replaceChildren(frag);
-  box.scrollTop = box.scrollHeight;
+  box.scrollTop = 0;
 }
 function pushActivity(e) {
   try { e = JSON.parse(e); } catch { return; }
   actBuf.push(e);
   if (actBuf.length > ACT_CAP) actBuf.shift();
   const box = $("activity");
-  const pinned = box.scrollHeight - box.scrollTop - box.clientHeight < 30;
+  // user scrolled down into history → keep their row in view; else stay pinned to the newest (top)
+  const hold = box.scrollTop > 0 && box.firstElementChild ? box.firstElementChild.offsetHeight : 0;
   if (actFilter === "all" || e.kind !== "cycle") {
-    box.append(actRow(e));
-    while (box.childElementCount > ACT_CAP) box.firstElementChild.remove();
-    if (pinned) box.scrollTop = box.scrollHeight;
+    box.prepend(actRow(e));
+    while (box.childElementCount > ACT_CAP) box.lastElementChild.remove();
+    if (hold) box.scrollTop += hold;
   }
   $("act-count").textContent = `${actBuf.length} events`;
 }
@@ -646,21 +663,25 @@ function logRow(e) {
 function renderLogs() {
   const box = $("console");
   const frag = document.createDocumentFragment();
-  for (const e of logBuf) if (logPass(logClass(e))) frag.append(logRow(e));
+  for (let i = logBuf.length - 1; i >= 0; i--) {
+    const e = logBuf[i];
+    if (logPass(logClass(e))) frag.append(logRow(e));
+  }
   box.replaceChildren(frag);
-  box.scrollTop = box.scrollHeight;
+  box.scrollTop = 0;
 }
 function pushLog(line) {
   logBuf.push(parseLogLine(line));
   if (logBuf.length > LOG_CAP) logBuf.shift();
   const box = $("console");
-  // pin to bottom only while the user is already at the bottom
-  const pinned = box.scrollHeight - box.scrollTop - box.clientHeight < 30;
+  // same contract as activity: newest on top, hold the user's scroll if they
+  // scrolled into the backlog
+  const hold = box.scrollTop > 0 && box.firstElementChild ? box.firstElementChild.offsetHeight : 0;
   const e = logBuf[logBuf.length - 1];
   if (logPass(logClass(e))) {
-    box.append(logRow(e));
-    while (box.childElementCount > LOG_CAP) box.firstElementChild.remove();
-    if (pinned) box.scrollTop = box.scrollHeight;
+    box.prepend(logRow(e));
+    while (box.childElementCount > LOG_CAP) box.lastElementChild.remove();
+    if (hold) box.scrollTop += hold;
   }
   $("log-count").textContent = `${logBuf.length} lines`;
 }
@@ -788,9 +809,9 @@ function renderTokenDetail(d) {
         ...(sec.reasons.length ? [["Flags", sec.reasons.map((r) => `${r.severity}:${r.code}`).join(" · ")]] : []),
       ]) : null,
       d.holderDist ? grp("Holders", [
-        ["Top 1 / 10 / 20 %", `${d.holderDist.top1Pct} / ${d.holderDist.top10Pct} / ${d.holderDist.top20Pct}`],
-        ["Insider / sniper", `${d.holderDist.insiderPct}% / ${d.holderDist.sniperPct}%`],
-        ["Bundler / whale", `${d.holderDist.bundlerPct}% / ${d.holderDist.whalePct}%`],
+        ["Top 1 / 10 / 20 %", `${d.holderDist.top1Pct.toFixed(1)} / ${d.holderDist.top10Pct.toFixed(1)} / ${d.holderDist.top20Pct.toFixed(1)}`],
+        ["Insider / sniper", `${d.holderDist.insiderPct.toFixed(1)}% / ${d.holderDist.sniperPct.toFixed(1)}%`],
+        ["Bundler / whale", `${d.holderDist.bundlerPct.toFixed(1)}% / ${d.holderDist.whalePct.toFixed(1)}%`],
         ["Growth 15m / 1h", `${fmtPct(d.holderDist.holderGrowth15m)} / ${fmtPct(d.holderDist.holderGrowth1h)}`],
       ]) : null,
       d.liquidity ? grp("Pool & execution", [
@@ -807,9 +828,9 @@ function renderTokenDetail(d) {
       ]) : null,
       grp("Scores", [
         ["Opportunity", d.scores.opportunity.toFixed(1)],
-        ["Momentum / security", `${d.scores.momentum} / ${d.scores.security}`],
-        ["Liquidity / holder", `${d.scores.liquidity} / ${d.scores.holder}`],
-        ["Market / exec / risk", `${d.scores.marketQuality} / ${d.scores.execution} / ${d.scores.risk}`],
+        ["Momentum / security", `${d.scores.momentum.toFixed(0)} / ${d.scores.security.toFixed(0)}`],
+        ["Liquidity / holder", `${d.scores.liquidity.toFixed(0)} / ${d.scores.holder.toFixed(0)}`],
+        ["Market / exec / risk", `${d.scores.marketQuality.toFixed(0)} / ${d.scores.execution.toFixed(0)} / ${d.scores.risk.toFixed(0)}`],
       ]),
     ),
   );
@@ -829,7 +850,7 @@ function drawEquity() {
   const rect = $("equity-wrap").getBoundingClientRect();
   const W = Math.max(320, Math.round(rect.width) || 800);
   const H = Math.max(150, Math.round(rect.height) || 240);
-  const L = 56, R = 14, T = 14, B = 26;
+  const L = 64, R = 14, T = 14, B = 26;
   svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
   svg.replaceChildren();
   if (history.length < 2) {
@@ -850,7 +871,7 @@ function drawEquity() {
   for (let v = Math.ceil(lo / step) * step; v <= hi; v += step) {
     svg.append(h("line", { x1: L, x2: W - R, y1: y(v), y2: y(v), stroke: cssVar("--grid"), "stroke-width": 1 }));
     const t = h("text", { x: L - 8, y: y(v) + 4, "text-anchor": "end" });
-    t.textContent = Math.round(v).toLocaleString("en-US");
+    t.textContent = fmtTick(v);
     svg.append(t);
   }
   // x ticks (time)
@@ -868,7 +889,16 @@ function drawEquity() {
   const last = history[history.length - 1];
   svg.append(h("circle", { cx: x(history.length - 1), cy: y(last.totalValueUsd), r: 6, fill: cssVar("--surface") }));
   svg.append(h("circle", { cx: x(history.length - 1), cy: y(last.totalValueUsd), r: 4, fill: cssVar("--series-1") }));
-  const el = h("text", { x: x(history.length - 1) - 6, y: Math.max(T + 8, y(last.totalValueUsd) - 10), "text-anchor": "end" });
+  // surface-stroke halo keeps the label readable where it crosses the line;
+  // flip to the right of the dot when there is no room on the left
+  const lastX = x(history.length - 1);
+  const el = h("text", {
+    x: lastX - W * 0.16 < L + 4 ? lastX + 10 : lastX - 8,
+    y: Math.max(T + 8, y(last.totalValueUsd) - 10),
+    "text-anchor": lastX - W * 0.16 < L + 4 ? "start" : "end",
+    fill: cssVar("--ink"),
+    style: `paint-order: stroke; stroke: ${cssVar("--surface")}; stroke-width: 3px; font-weight: 600`,
+  });
   el.textContent = fmtUsd(last.totalValueUsd);
   svg.append(el);
 
@@ -904,7 +934,8 @@ function drawEquity() {
   const tbl = h("table");
   tbl.append(h("tr", {}, h("th", { text: "Time" }), h("th", { class: "num", text: "Total value" }), h("th", { class: "num", text: "Drawdown" })));
   const stride = Math.max(1, Math.floor(history.length / 24));
-  for (let i = 0; i < history.length; i += stride) {
+  // newest first — latest snapshot is the top row
+  for (let i = history.length - 1; i >= 0; i -= stride) {
     const d = history[i];
     tbl.append(h("tr", {},
       h("td", { text: new Date(d.at).toLocaleTimeString() }),
