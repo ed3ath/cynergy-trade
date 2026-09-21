@@ -69,6 +69,25 @@ daily USD budget (`AI_MAX_COST_PER_DAY_USD`) across both agents (`apps/trader/sr
     `stopNewEntries` (blocks ENTERs only — exits always allowed). Cost cap or timeout →
     empty cycle, never a thrown error, never blocks the 10s deterministic loop.
 
+### Copy-trade (`COPYTRADE_ENABLED`, TON-only)
+
+Follows curated high-PNL wallets (`COPYTRADE_WALLETS`, TonAPI account events —
+live-verified feed in `packages/providers/src/ton/tonapi-wallets.ts`) and can hold
+**multiple positions per token**: `copytrade-scalp` (SL 5%, TP 3/6%, 20min) and
+`copytrade-shortterm` (SL 10%, TP 5/10%, 2h) slots stack with each other and with
+core strategy positions; aggregate per-token exposure stays capped by the risk
+engine's `maxTokenExposureUsd` gate. Every entry — copied or AI — goes through
+`executeEntry` (full risk engine + journal).
+
+- `AI_AUTONOMY=veto` → deterministic copy: each fresh tracked BUY (≤10min old)
+  is veto-agent reviewed, then entered under the profile exit envelope.
+- `AI_AUTONOMY=auto` → tracked swaps (BUYs and SELLs) feed the AI trader
+  snapshot: the agent verifies leads with its read-only tools, ENTERs with a
+  chosen profile, and uses trader SELLs as take-profit hints (TIGHTEN/EXIT).
+- Tracker cursors are in-memory; restart re-baselines (no stale copy, no re-copy).
+  ponytail: wallet list is operator-curated — no PNL leaderboard API exists for
+  TON; solana/EVM feeds need their own wallet adapters.
+
 ## Safety model
 
 - **Risk engine is the final authority** — no component can bypass it

@@ -13,6 +13,8 @@ export * from "./solana/solana-rpc-provider.js";
 export * from "./ton/tonapi-client.js";
 export * from "./ton/tonapi-security.js";
 export * from "./ton/tonapi-holders.js";
+export * from "./ton/tonapi-wallets.js";
+export * from "./ton/ton-address.js";
 export * from "./ton/geckoterminal-discovery.js";
 export * from "./ton/ston-quote.js";
 export * from "./evm/chains.js";

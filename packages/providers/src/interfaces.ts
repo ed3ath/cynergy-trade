@@ -10,6 +10,7 @@ import type {
   ExecutionResult,
   TradeIntent,
 } from "@autonomous-trader/shared";
+import type { TonApiClient } from "./ton/tonapi-client.js";
 
 // ─── Base provider ────────────────────────────────────────────────────────────
 export interface BaseProvider {
@@ -148,4 +149,7 @@ export interface ProviderRegistry {
   quote: SwapQuoteProvider;
   execution: TradeExecutionProvider;
   monitoring: TransactionMonitoringProvider;
+  /** TON only — shared TonAPI client for wallet-activity polling (copy-trade);
+   *  everything TonAPI-bound must use one instance to share its 1rps queue. */
+  tonApiClient?: TonApiClient;
 }

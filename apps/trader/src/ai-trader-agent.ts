@@ -23,6 +23,8 @@ export interface AiAction {
   chain: Chain;
   /** ENTER: 0–1 conviction → risk-engine strategyConfidence (sizing input only). */
   confidence?: number;
+  /** ENTER: copy-trade hold profile — sets the exit envelope (default shortterm). */
+  profile?: "scalp" | "shortterm";
   rationale?: string;
   /** ENTER: pct below entry price for the hard stop (default 10). */
   suggestedStopLossPct?: number;
@@ -63,6 +65,17 @@ export interface AiTraderSnapshot {
   }[];
   candidates: AiCandidate[];
   recentTrades: { token: string; pnlUsd: number; pnlPct: number }[];
+  /** Recent swaps by tracked high-PNL wallets (copy-trade feed), newest last.
+   *  BUYs are candidate entries for the agent's own analysis; SELLs of held
+   *  tokens are take-profit hints. */
+  copySignals?: {
+    token: string;
+    chain: Chain;
+    side: "BUY" | "SELL";
+    symbol: string;
+    walletLabel: string;
+    ageMin: number;
+  }[];
 }
 
 const MAX_TOOL_ROUNDS = 3;        // ponytail: raise if the agent needs deeper research
@@ -75,15 +88,20 @@ const TRAILING_PCT: [number, number] = [1, 50];
 const SYSTEM_PROMPT =
   "You are an autonomous micro-cap token trader on Solana/TON/EVM chains. " +
   "Each cycle you receive a portfolio snapshot: capital, open positions with live PnL, " +
-  "top scanner candidates with quantitative scores, and recent closed trades. " +
+  "top scanner candidates with quantitative scores, recent closed trades, and — when " +
+  "copy-trade is on — recent swaps by tracked high-PNL wallets. " +
   "You may call the provided read-only data tools to refresh data on any token before acting. " +
   "You respond with a list of actions, executed only after the deterministic risk engine approves them. " +
-  "Rules: never ENTER a token you already hold; every ENTER needs a concrete evidence-based thesis; " +
-  "you may EXIT any position or TIGHTEN its exits (raise stop, lower take-profit/trailing) but you can " +
+  "Rules: never ENTER a token you already hold (copy-trade slots excepted — you may add ONE extra, " +
+  "smaller position on a held token when copying a tracked wallet's fresh BUY); every ENTER needs a " +
+  "concrete evidence-based thesis — a tracked wallet's BUY is a lead to verify (tools), not a reason " +
+  "by itself, and their SELL of a token you hold is a take-profit hint; you may EXIT any position or " +
+  "TIGHTEN its exits (raise stop, lower take-profit/trailing) but you can " +
   "never loosen risk; prefer fewer, higher-conviction actions; an empty action list is a valid answer. " +
   "Respond with STRICT JSON only, no markdown fences: " +
   '{"actions":[{"type":"ENTER","tokenAddress":"...","chain":"solana|ton|bsc|base|polygon|arbitrum",' +
-  '"confidence":0.0,"rationale":"one short sentence","suggestedStopLossPct":10,"suggestedTakeProfitPct":5},' +
+  '"confidence":0.0,"rationale":"one short sentence","profile":"scalp|shortterm",' +
+  '"suggestedStopLossPct":10,"suggestedTakeProfitPct":5},' +
   '{"type":"EXIT","tokenAddress":"...","chain":"...","positionId":"...","rationale":"..."},' +
   '{"type":"TIGHTEN","tokenAddress":"...","chain":"...","positionId":"...","tightenStopLossPct":5,' +
   '"tightenTp1Pct":3,"tightenTrailingPct":8}],"summary":"one sentence market read"}';
@@ -259,6 +277,7 @@ export class AiTraderAgent {
         ? Math.min(1, Math.max(0, r["confidence"]))
         : undefined;
       if (confidence !== undefined) action.confidence = confidence;
+      if (r["profile"] === "scalp" || r["profile"] === "shortterm") action.profile = r["profile"];
     }
     if (r["type"] === "ENTER" || r["type"] === "TIGHTEN") {
       const sl = num(r[r["type"] === "ENTER" ? "suggestedStopLossPct" : "tightenStopLossPct"], STOP_LOSS_PCT);

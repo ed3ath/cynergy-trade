@@ -144,6 +144,7 @@ function createTonRegistry(config: ProvidersConfig): ProviderRegistry {
       : new MockSwapQuoteProvider(),
     execution: new MockTradeExecutionProvider(),
     monitoring: new MockTransactionMonitoringProvider(),
+    tonApiClient: tonapi, // shared queue — copy-trade wallet polling uses this
   };
 }
 

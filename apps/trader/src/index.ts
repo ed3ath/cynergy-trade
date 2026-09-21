@@ -23,6 +23,8 @@ import {
   configureLogger,
   createLogger,
   generateTradeIntentId,
+  COPYTRADE_PROFILES,
+  copytradeProfileFor,
   type Chain,
   type PortfolioSnapshot,
   type TradeIntent,
@@ -425,6 +427,7 @@ const riskEngine = new RiskEngine(
 // ─── AI agents (optional LLM: veto second opinion + autonomous trader) ───────
 import type { AiCandidate } from "./ai-agent.js";
 import type { AiAction, AiTraderSnapshot } from "./ai-trader-agent.js";
+import type { CopyTradeSignal } from "./copytrade-tracker.js";
 // OpenAI-compatible /chat/completions endpoint. The veto agent can only REJECT
 // strategy candidates. The autonomous trader (AI_AUTONOMY=auto) proposes
 // ENTER/EXIT/TIGHTEN actions — every entry still passes the full risk engine,
@@ -468,6 +471,33 @@ if (aiTrader) {
     maxActionsPerCycle: config.ai.maxActionsPerCycle,
     maxOpenPositions: config.ai.maxOpenPositions,
     liveEnabled: config.ai.liveEnabled,
+  });
+}
+
+// ─── Copy-trade tracker (COPYTRADE_ENABLED — AI-gated wallet following) ───────
+// TON-only (TonApiClient wallet feed). veto mode: deterministic copy of tracked
+// BUYs after the veto agent's second opinion. auto mode: signals only feed the
+// AI trader snapshot — the agent ENTERs/TIGHTENs/EXITs through its own guards.
+const { CopyTradeTracker } = await import("./copytrade-tracker.js");
+const tonRt = runtimes.find((r) => r.chain === "ton");
+const copyTracker = config.copytrade.enabled
+    && config.ai.enabled && config.ai.autonomy !== "off"
+    && config.copytrade.wallets.length > 0 && tonRt?.providers.tonApiClient
+  ? new CopyTradeTracker(
+      tonRt.providers.tonApiClient,
+      config.copytrade,
+      log.child({ component: "copytrade" }),
+    )
+  : null;
+if (config.copytrade.enabled && !copyTracker) {
+  log.warn("copy-trade requested but inactive — needs AI_ENABLED=true, AI_AUTONOMY=veto|auto, TRADING_CHAIN with ton, COPYTRADE_WALLETS, tonapi enabled");
+}
+if (copyTracker) {
+  log.info("Copy-trade tracker enabled", {
+    wallets: config.copytrade.wallets.length,
+    profile: config.copytrade.profile,
+    pollSec: config.copytrade.pollSec,
+    autonomy: config.ai.autonomy,
   });
 }
 
@@ -636,10 +666,15 @@ async function decisionCycle(rt: ChainRuntime): Promise<void> {
 
   for (const candidate of candidates.slice(0, 5)) { // cap per cycle
     try {
-      // Never re-enter a token we already hold — re-entry goes through the
-      // scanner's CLOSED→WATCHLIST cooldown path after the position exits.
-      // Without this, a restart re-seed re-promotes held tokens and pyramids.
-      if (rt.positions.getTokenExposureUsd(candidate.tokenAddress) > 0) continue;
+      // Never re-enter a token core strategies already hold — re-entry goes
+      // through the scanner's CLOSED→WATCHLIST cooldown path after the
+      // position exits. Without this, a restart re-seed re-promotes held
+      // tokens and pyramids. Copy-trade slots don't block: scalp/shortterm
+      // positions may stack with a core position on the same token (aggregate
+      // exposure still capped by the risk engine's maxTokenExposureUsd gate).
+      if (rt.positions.getOpenPositions().some(
+        (p) => p.tokenAddress === candidate.tokenAddress && !copytradeProfileFor(p.strategyId),
+      )) continue;
 
       const strategyCtx: StrategyContext = {
         candidate,
@@ -834,6 +869,8 @@ async function executeEntry(
     currentPrice: number;
     /** Only scanner-known tokens get the scanner state walk. */
     markEntered: boolean;
+    /** Per-position time stop — copy-trade profiles. */
+    timeStopMs?: number;
   },
 ): Promise<boolean> {
   try {
@@ -909,6 +946,7 @@ async function executeEntry(
       input.decision.suggestedTakeProfit1,
       input.decision.suggestedTakeProfit2,
       input.decision.suggestedTrailingStopPct ?? 15, // scalps trail tighter
+      input.timeStopMs,
     );
 
     rt.portfolio.allocatedUsd += riskResult.approvedSizeUsd;
@@ -1007,6 +1045,15 @@ async function runAiCycle(): Promise<void> {
       candidates,
       recentTrades,
     };
+    const copySignals = copyTracker?.recentActivity(10).map((s) => ({
+      token: s.swap.jettonMaster,
+      chain: "ton" as const,
+      side: s.swap.side,
+      symbol: s.swap.symbol,
+      walletLabel: s.label,
+      ageMin: Math.max(0, Math.round((Date.now() / 1000 - s.swap.timestampSec) / 60)),
+    }));
+    if (copySignals && copySignals.length > 0) snapshot.copySignals = copySignals;
 
     const { actions, summary } = await aiTrader.propose(snapshot);
     log.info("AI trader cycle", { actions: actions.length, summary });
@@ -1031,11 +1078,28 @@ async function runAiAction(action: AiAction, candidates: AiCandidate[]): Promise
     const rt = runtimes.find((r) => r.chain === action.chain);
     if (!rt) return skip(`chain ${action.chain} not trading`);
     if (emergency.isStopNewEntries()) return skip("new entries stopped");
-    if (rt.positions.getTokenExposureUsd(action.tokenAddress) > 0) return skip("already held");
+    // Copy-trade slots don't count as "held": the AI may add ONE extra position
+    // on a token held only under copytrade-* (its own or core positions block).
+    const held = rt.positions.getOpenPositions().filter((p) => p.tokenAddress === action.tokenAddress);
+    if (held.some((p) => !copytradeProfileFor(p.strategyId))) return skip("already held");
     if (onCooldown) return skip("token cooldown");
+    const profile = action.profile ? COPYTRADE_PROFILES[action.profile] : null;
+    if (profile) {
+      const copySlots = held.filter((p) => copytradeProfileFor(p.strategyId)).length;
+      if (copySlots >= config.copytrade.maxSlotsPerToken) {
+        return skip(`copy slot cap (${config.copytrade.maxSlotsPerToken})`);
+      }
+      const copyTotal = runtimes.reduce(
+        (s, r) => s + r.positions.getOpenPositions().filter((p) => copytradeProfileFor(p.strategyId)).length, 0);
+      if (copyTotal >= config.copytrade.maxPositions) {
+        return skip(`copy position cap (${config.copytrade.maxPositions})`);
+      }
+    }
     const aiOpen = runtimes.reduce(
       (s, r) => s + r.positions.getOpenPositions().filter((p) => p.strategyId === AI_STRATEGY_ID).length, 0);
-    if (aiOpen >= config.ai.maxOpenPositions) return skip(`AI position cap (${config.ai.maxOpenPositions})`);
+    if (!profile && aiOpen >= config.ai.maxOpenPositions) {
+      return skip(`AI position cap (${config.ai.maxOpenPositions})`);
+    }
 
     // UNKNOWN discipline: any data-fetch failure skips the action
     let marketSnap: MarketSnapshot, liqSnap: LiquiditySnapshot, secAssess: SecurityAssessment;
@@ -1050,7 +1114,7 @@ async function runAiAction(action: AiAction, candidates: AiCandidate[]): Promise
     if (!(price > 0)) return skip("no live price");
 
     const decision: StrategyDecision = {
-      strategyId: AI_STRATEGY_ID,
+      strategyId: profile?.strategyId ?? AI_STRATEGY_ID,
       strategyVersion: "1.0.0",
       tokenAddress: action.tokenAddress,
       decision: "ENTER",
@@ -1058,8 +1122,14 @@ async function runAiAction(action: AiAction, candidates: AiCandidate[]): Promise
       reasons: [action.rationale ?? "ai autonomous entry"],
       risks: [],
       invalidationConditions: [],
-      suggestedStopLoss: price * (1 - (action.suggestedStopLossPct ?? 10) / 100),
-      suggestedTakeProfit1: price * (1 + (action.suggestedTakeProfitPct ?? 5) / 100),
+      suggestedStopLoss: price * (1 - (profile?.stopLossPct ?? action.suggestedStopLossPct ?? 10) / 100),
+      suggestedTakeProfit1: price * (1 + (profile?.takeProfit1Pct ?? action.suggestedTakeProfitPct ?? 5) / 100),
+      ...(profile
+        ? {
+            suggestedTakeProfit2: price * (1 + profile.takeProfit2Pct / 100),
+            suggestedTrailingStopPct: profile.trailingStopPct,
+          }
+        : {}),
       evaluatedAt: new Date(),
     };
     await journal.recordStrategyDecision(decision, {}, action.chain);
@@ -1073,6 +1143,7 @@ async function runAiAction(action: AiAction, candidates: AiCandidate[]): Promise
       currentPrice: price,
       // AI-named tokens the scanner has never seen have no lifecycle state to walk
       markEntered: candidates.some((c) => c.tokenAddress === action.tokenAddress && c.chain === action.chain),
+      ...(profile ? { timeStopMs: profile.timeStopMs } : {}),
     });
     aiCooldowns.set(action.tokenAddress, Date.now() + config.ai.tokenCooldownSec * 1000);
     if (!entered) log.info("AI entry not opened", { token: action.tokenAddress });
@@ -1128,6 +1199,127 @@ async function runAiAction(action: AiAction, candidates: AiCandidate[]): Promise
   }
 }
 
+// ─── Copy-trade cycle (COPYTRADE_ENABLED — AI-gated wallet following) ─────────
+
+let copyTicks = 0;
+const copyTicksPerPoll = Math.max(1, Math.round(config.copytrade.pollSec / 10));
+
+/** Poll tracked wallets. In auto mode the signals only feed the AI trader
+ *  snapshot (the agent decides on its own cycle); in veto mode each fresh
+ *  BUY is copied deterministically after the veto agent's second opinion. */
+async function runCopyCycle(): Promise<void> {
+  if (!copyTracker) return;
+  const signals = await copyTracker.poll();
+  if (config.ai.autonomy === "auto") return;
+  if (emergency.isStopNewEntries()) return;
+  for (const signal of signals) await runCopyEntry(signal);
+}
+
+/** veto-mode copy entry: fresh data → veto agent → executeEntry under the
+ *  copy-trade profile's exit envelope. Mirrors the AI ENTER discipline. */
+async function runCopyEntry(signal: CopyTradeSignal): Promise<void> {
+  const swap = signal.swap;
+  const skip = (reason: string): void => {
+    log.info("copytrade entry skipped", { token: swap.jettonMaster, symbol: swap.symbol, reason });
+  };
+  const rt = runtimes.find((r) => r.chain === "ton");
+  if (!rt) return skip("no ton runtime");
+
+  const copyTotal = runtimes.reduce(
+    (s, r) => s + r.positions.getOpenPositions().filter((p) => copytradeProfileFor(p.strategyId)).length, 0);
+  if (copyTotal >= config.copytrade.maxPositions) {
+    return skip(`copy position cap (${config.copytrade.maxPositions})`);
+  }
+  const copySlots = rt.positions.getOpenPositions()
+    .filter((p) => p.tokenAddress === swap.jettonMaster && copytradeProfileFor(p.strategyId)).length;
+  if (copySlots >= config.copytrade.maxSlotsPerToken) {
+    return skip(`copy slot cap (${config.copytrade.maxSlotsPerToken})`);
+  }
+
+  // UNKNOWN discipline: any data-fetch failure skips the entry
+  let marketSnap: MarketSnapshot, liqSnap: LiquiditySnapshot, secAssess: SecurityAssessment;
+  try {
+    marketSnap = await rt.providers.marketData.getMarketSnapshot(swap.jettonMaster, "ton");
+    liqSnap = await rt.providers.liquidity.getLiquiditySnapshot(swap.jettonMaster, "ton");
+    secAssess = await rt.providers.security.analyzeToken(swap.jettonMaster, "ton");
+  } catch (err) {
+    return skip(`data fetch failed: ${(err as Error).message}`);
+  }
+  const price = marketSnap.priceUsd;
+  if (!(price > 0)) return skip("no live price");
+
+  if (aiAgent) {
+    const verdict = await aiAgent.veto({
+      tokenAddress: swap.jettonMaster,
+      chain: "ton",
+      market: {
+        priceUsd: marketSnap.priceUsd,
+        ...(marketSnap.marketCapUsd !== undefined ? { marketCapUsd: marketSnap.marketCapUsd } : {}),
+        volumeUsd5m: marketSnap.volumeUsd5m,
+        volumeUsd1h: marketSnap.volumeUsd1h,
+        priceChange5m: marketSnap.priceChange5m,
+        priceChange1h: marketSnap.priceChange1h,
+        buyVolumeUsd1m: marketSnap.buyVolumeUsd1m,
+        sellVolumeUsd1m: marketSnap.sellVolumeUsd1m,
+        uniqueBuyers1m: marketSnap.uniqueBuyers1m,
+        uniqueSellers1m: marketSnap.uniqueSellers1m,
+      },
+      liquidity: {
+        liquidityUsd: liqSnap.liquidityUsd,
+        poolAgeMs: liqSnap.poolAgeMs,
+        estimatedSlippageBps500: liqSnap.estimatedSlippageBps500,
+        liquidityChange5m: liqSnap.liquidityChange5m,
+      },
+      security: {
+        status: secAssess.status,
+        score: secAssess.score,
+        reasons: secAssess.reasons.map((r) => ({ message: r.message })),
+      },
+      signalContext: `copy-trade BUY by tracked wallet ${signal.label}` +
+        `${swap.tonAmount ? ` (${swap.tonAmount.toFixed(1)} TON via ${swap.dex})` : ""}`,
+    });
+    if (verdict.verdict === "REJECT") {
+      log.info("Copytrade candidate vetoed by AI", { token: swap.jettonMaster, reason: verdict.reason });
+      activity.publish("reject", `ai veto · copy-trade ${swap.symbol} · ${verdict.reason}`,
+        { token: swap.jettonMaster });
+      return;
+    }
+  }
+
+  const profile = COPYTRADE_PROFILES[config.copytrade.profile];
+  const decision: StrategyDecision = {
+    strategyId: profile.strategyId,
+    strategyVersion: "1.0.0",
+    tokenAddress: swap.jettonMaster,
+    decision: "ENTER",
+    confidence: 0.6,
+    reasons: [
+      `copy-trade: ${signal.label} bought ${swap.symbol}` +
+        `${swap.tonAmount ? ` for ${swap.tonAmount.toFixed(1)} TON` : ""} via ${swap.dex}`,
+    ],
+    risks: [],
+    invalidationConditions: [],
+    suggestedStopLoss: price * (1 - profile.stopLossPct / 100),
+    suggestedTakeProfit1: price * (1 + profile.takeProfit1Pct / 100),
+    suggestedTakeProfit2: price * (1 + profile.takeProfit2Pct / 100),
+    suggestedTrailingStopPct: profile.trailingStopPct,
+    evaluatedAt: new Date(),
+  };
+  await journal.recordStrategyDecision(decision, {}, "ton");
+  const entered = await executeEntry(rt, {
+    tokenAddress: swap.jettonMaster,
+    chain: "ton",
+    features: {},
+    decision,
+    liqSnap,
+    secAssess,
+    currentPrice: price,
+    markEntered: false, // scanner has never seen a copy-trade token
+    timeStopMs: profile.timeStopMs,
+  });
+  if (!entered) log.info("Copytrade entry not opened", { token: swap.jettonMaster, symbol: swap.symbol });
+}
+
 /** Outer cycle: emergency check + PnL window rollover (all books), then chains. */
 async function decisionCycleAll(): Promise<void> {
   if (emergency.isKillSwitchActive()) {
@@ -1166,6 +1358,17 @@ async function decisionCycleAll(): Promise<void> {
     if (aiTicks >= aiTicksPerCycle) {
       aiTicks = 0;
       await runAiCycle();
+    }
+  }
+
+  // Copy-trade wallet polling — same single-threaded interleave. The tracker
+  // shares TonAPI's 1rps serial queue, so a poll can slow a tick but never
+  // overlaps another poll.
+  if (copyTracker) {
+    copyTicks++;
+    if (copyTicks >= copyTicksPerPoll) {
+      copyTicks = 0;
+      await runCopyCycle();
     }
   }
 }

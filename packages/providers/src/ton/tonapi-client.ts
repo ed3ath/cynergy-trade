@@ -24,6 +24,37 @@ export interface TonHolder {
   balance?: string;
 }
 
+// ─── Account events (wallet swap feed for copy-trade) ────────────────────────
+// Live-verified 2026-09-21: envelope {events: [...], next_from}; event keys
+// event_id/timestamp(sec)/lt/is_scam/in_progress/actions[type=JettonSwap].
+export interface TonJettonRef {
+  address: string; // raw 0:hex
+  name?: string;
+  symbol?: string;
+  decimals?: number;
+  verification?: string;
+}
+
+export interface TonJettonSwapPayload {
+  dex?: string;
+  amount_in?: number | string; // "" when the in-leg is native TON
+  amount_out?: number | string;
+  ton_in?: number;
+  ton_out?: number;
+  user_wallet?: { address?: string; is_scam?: boolean };
+  jetton_master_in?: TonJettonRef;
+  jetton_master_out?: TonJettonRef;
+}
+
+export interface TonAccountEvent {
+  event_id: string;
+  timestamp: number;
+  lt: number;
+  is_scam?: boolean;
+  in_progress?: boolean;
+  actions?: { type: string; JettonSwap?: TonJettonSwapPayload }[];
+}
+
 export class TonApiClient {
   private queue: Promise<unknown> = Promise.resolve();
   private lastCallAt = 0;
@@ -41,6 +72,12 @@ export class TonApiClient {
     // endpoint envelope is {addresses: [...]} — live-verified 2026-09-16
     return this.enqueue<{ addresses?: TonHolder[] }>(`/v2/jettons/${address}/holders?limit=${limit}`)
       .then((b) => b.addresses ?? []);
+  }
+
+  /** Newest events first; `beforeLt` pages via next_from / lt cursor. */
+  getAccountEvents(address: string, limit = 50, beforeLt?: number): Promise<{ events?: TonAccountEvent[] }> {
+    const page = beforeLt !== undefined ? `&before_lt=${beforeLt}` : "";
+    return this.enqueue<{ events?: TonAccountEvent[] }>(`/v2/accounts/${address}/events?limit=${limit}${page}`);
   }
 
   private enqueue<T>(path: string): Promise<T> {
