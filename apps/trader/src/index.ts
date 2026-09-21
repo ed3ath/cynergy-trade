@@ -705,7 +705,7 @@ async function decisionCycle(): Promise<void> {
       const position = positionManager.openPosition(
         execResult,
         intent,
-        strategyDecision.suggestedStopLoss ?? currentPrice * 0.85,
+        strategyDecision.suggestedStopLoss ?? currentPrice * 0.90,
         strategyDecision.suggestedTakeProfit1,
         strategyDecision.suggestedTakeProfit2,
         strategyDecision.suggestedTrailingStopPct ?? 15, // scalps trail tighter
