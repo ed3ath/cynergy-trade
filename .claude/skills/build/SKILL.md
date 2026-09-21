@@ -15,15 +15,18 @@ done
 pnpm exec tsc -p apps/trader/tsconfig.json
 ```
 
-If `packages/shared/src/types.ts` (or config) changed, ALL downstream packages must rebuild — their `dist/` is what imports resolve to.
+If `packages/shared/src/types.ts` (or config) changed, ALL downstream packages must rebuild — their `dist/` is what imports resolve to. The running daemon executes `apps/trader/dist` — after rebuilding, restart the trader (see `run-trader` skill) or the old code keeps running.
 
 ## Tests
 
 ```bash
-pnpm exec vitest run packages             # unit tests, offline, deterministic
-pnpm exec vitest run tests/integration    # LIVE APIs (GoPlus/Jupiter/Solana RPC) — network required
+CI=true pnpm exec vitest run packages     # unit tests, offline, deterministic
+CI=true pnpm exec vitest run apps         # trader app tests (ai-agent, alerter, pnl-windows)
+pnpm exec vitest run tests/integration    # LIVE APIs (GoPlus/Jupiter/Solana RPC/TON) — network required
 pnpm exec vitest run packages/core       # single package
 ```
+
+`CI=true` matters in non-TTY shells — vitest's interactive reporter garbles output otherwise.
 
 ## Common failures
 

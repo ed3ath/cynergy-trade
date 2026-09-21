@@ -43,3 +43,11 @@ garbage address (`1111...`) as a known-bad case.
 - Jupiter: `GET lite-api.jup.ag/swap/v1/quote` (+`POST /swap/v1/swap`), free tier no key.
 - Birdeye: `public-api.birdeye.so/defi/*`, `X-API-KEY` + `X-CHAIN: solana` headers.
 - Solana RPC: standard JSON-RPC, any endpoint.
+
+## TON (`TRADING_CHAIN=ton`)
+
+Verified endpoints (TonAPI holders/security, STON.fi quotes, GeckoTerminal hot
+pools/discovery): see `tests/integration/ton.live.test.ts` + `ston-quote.live.test.ts`
+for known-good addresses and params, and `packages/providers/src/ton/` for the
+verified shapes. TON addresses are NOT draggable from Solana intuition — always
+probe with the jetton masters used in those tests.
