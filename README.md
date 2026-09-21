@@ -58,13 +58,17 @@ Get-NetTCPConnection -LocalPort 3000 -State Listen | % { Stop-Process $_.OwningP
 | `HELIUS_API_KEY` | Solana RPC, tx monitoring, stream discovery |
 | `BIRDEYE_API_KEY` | Market data, liquidity (TON chain: TonAPI + GeckoTerminal, keyless) |
 | `GOPLUS_API_KEY` | Token security (works keyless) |
+| `AI_ENABLED` | `true` → LLM veto agent reviews ENTER signals (veto-only; agent failures never block trading) |
+| `AI_BASE_URL` / `AI_API_KEY` / `AI_MODEL` | Any OpenAI-compatible endpoint — e.g. `https://api.openai.com/v1`, OpenRouter, local Ollama |
+| `AI_TOOLS` | `false` disables the agent's read-only data tools (for endpoints without function-calling) |
+| `AI_COST_PER_1K_TOKENS_USD` | USD per 1k tokens — enables the `AI_MAX_COST_PER_DAY_USD` cap (default 5) |
 | `WALLET_PUBLIC_KEY` / `WALLET_PRIVATE_KEY` | Wallet (LIVE only) |
 | `MONITOR_TOKEN` | Bearer auth for emergency POSTs — without it they're refused (fail-safe) |
 | `SERVER_PORT` | Monitor port, default 3000 |
 | `MAX_DAILY_LOSS_USD`, `MAX_DRAWDOWN_PCT`, `MAX_POSITION_VALUE_USD`, `MAX_CONCURRENT_POSITIONS`, `MAX_TOTAL_EXPOSURE_USD`, `MIN_LIQUIDITY_USD` | Risk limits |
 | `TRADER_SEED_TOKENS` | Comma-separated tokens injected into the scanner (pipeline testing) |
 
-Full list: `.env.example` / `.env.production.example`. Dev-only overrides (e.g. `SERVER_PORT=3001`) go in `apps/trader/.env.dev` — loaded only by `pnpm --filter @autonomous-trader/trader dev`, gitignored.
+Full list: `.env.example` / `.env.production.example`. All env lives in the root `.env` (loaded by both the trader and the watchdog daemon); there are no per-app env files. `SERVER_PORT` must match the daemon's `MONITOR_PORT` (default 3000) — stop the watchdog before running a dev instance on another port.
 
 Without API keys the system runs on mock providers — full pipeline, zero real data.
 
