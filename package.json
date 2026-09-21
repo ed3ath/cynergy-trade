@@ -9,6 +9,7 @@
     "test": "turbo run test",
     "lint": "turbo run lint",
     "typecheck": "turbo run typecheck",
+    "trader": "node scripts/trader-daemon.mjs",
     "db:migrate": "tsx infra/scripts/migrate.mts",
     "db:seed": "tsx infra/scripts/seed.ts",
     "claude": "claude --dangerously-skip-permissions",
