@@ -37,7 +37,9 @@ export interface StatusPayload {
     reasons: string[];
     solSamples: number;
   };
-  watchlist: Array<{ token: string; score: number; status: string }>;
+  watchlist: Array<{ token: string; score: number; status: string; chain?: string }>;
+  /** Per-chain breakdown when multiple chains trade simultaneously. */
+  chains?: Array<{ chain: string; equityUsd: number; positions: number; regime: string; watchlist: number }>;
   uptimeMs: number;
   version: string;
 }

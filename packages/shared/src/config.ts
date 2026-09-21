@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { CHAIN_VALUES } from "./types.js";
 
 // ─── Trading mode ─────────────────────────────────────────────────────────────
 export const TradingModeSchema = z.enum(["PAPER", "SHADOW", "LIVE"]);
@@ -111,7 +112,9 @@ export type AIConfig = z.infer<typeof AIConfigSchema>;
 export const AppConfigSchema = z.object({
   trading: z.object({
     mode: TradingModeSchema.default("PAPER"),
-    chain: z.enum(["solana", "ton"]).default("solana"),
+    /** Chains traded simultaneously — TRADING_CHAIN accepts a comma list
+     *  ("solana,ton,bsc"). One scanner/equity book per chain, shared risk. */
+    chains: z.array(z.enum(CHAIN_VALUES)).min(1).default(["solana"]),
     walletPublicKey: z.string().optional(),
     /** Manually inject tokens into the scanner (TRADER_SEED_TOKENS, comma-sep) —
      *  for testing the full pipeline on liquid tokens when discovery finds only dust. */
@@ -151,7 +154,10 @@ export function loadConfig(overrides: Partial<Record<string, unknown>> = {}): Ap
   const raw = {
     trading: {
       mode: process.env["TRADING_MODE"] ?? "PAPER",
-      chain: process.env["TRADING_CHAIN"] ?? "solana",
+      chains: [...new Set(
+        (process.env["TRADING_CHAIN"] ?? "solana")
+          .split(",").map((s) => s.trim().toLowerCase()).filter((s) => s.length > 0),
+      )],
       walletPublicKey: process.env["WALLET_PUBLIC_KEY"],
       seedTokens: (process.env["TRADER_SEED_TOKENS"] ?? "")
         .split(",").map((s) => s.trim()).filter((s) => s.length > 0),

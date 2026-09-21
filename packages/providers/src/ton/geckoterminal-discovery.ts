@@ -1,22 +1,24 @@
 /**
- * TON discovery — GeckoTerminal, poll-based (same skeleton as Raydium).
+ * GeckoTerminal poll-based discovery (same skeleton as Raydium). Works for any
+ * GT network — ton, bsc, base, polygon, arbitrum — via the `network` cfg.
  *
  * Two polls:
- *  1. new pools — GET /api/v2/networks/ton/new_pools (15s)
- *  2. hot pools — GET /api/v2/networks/ton/pools?sort=h24_volume_usd_desc (60s);
- *     fresh TON pools are overwhelmingly dust, so top h24-volume movers with
+ *  1. new pools — GET /api/v2/networks/<net>/new_pools (default 30s)
+ *  2. hot pools — GET /api/v2/networks/<net>/pools?sort=h24_volume_usd_desc (120s);
+ *     fresh pools are overwhelmingly dust, so top h24-volume movers with
  *     positive 1h momentum feed the watchlist too (recipe verified 2026-09-16)
  *
- * Free, no key, ~30 req/min → 4/min + 1/min is safe.
+ * Free, no key, ~30 req/min shared per IP across ALL networks → 2/min + 0.5/min
+ * per chain stays safe up to ~6 chains polling simultaneously.
  *
- * Emits the base jetton of each pool (address after the "ton_" prefix in
- * relationship ids). Pools where the base is native TON (zero address), USDT
- * or stTON are skipped — we trade jettons, not the native coin or stables.
+ * Emits the base token of each pool (address after the "<network>_" prefix in
+ * relationship ids). Pools whose base is on the skip list (native coin, wrapped
+ * native, major stables) are skipped — we trade the memes, not the gas asset.
  *
- * ponytail: STON.fi/DeDust pool-creation websockets when TON graduates past
+ * ponytail: DEX-native pool-creation websockets when a chain graduates past
  * paper — adapter boundary stays, scanner sees the same events.
  */
-import type { TokenDiscoveredEvent } from "@autonomous-trader/shared";
+import type { Chain, TokenDiscoveredEvent } from "@autonomous-trader/shared";
 import { createLogger, type Logger } from "@autonomous-trader/shared";
 import { AbstractProvider } from "../abstract-provider.js";
 import type { TokenDiscoveryProvider } from "../interfaces.js";
@@ -45,13 +47,20 @@ interface GtPool {
 }
 
 export interface GeckoTerminalDiscoveryConfig {
-  pollIntervalMs: number;  // default 15s (4/min vs 30/min limit)
+  /** GeckoTerminal network slug ("ton", "bsc", "base", …). */
+  network: string;
+  /** Chain stamped on emitted events. */
+  chain: Chain;
+  /** Base-token ids (GT "<network>_<addr>" form) never worth trading:
+   *  native coin, wrapped native, major stables. */
+  skipBaseTokenIds: string[];
+  pollIntervalMs: number;  // default 30s (2/min vs 30/min limit, shared per IP)
   maxSeenPools: number;    // LRU cap, default 50_000
-  /** Pools below this reserve never pass scanner gates — skip early, save tonapi calls. */
+  /** Pools below this reserve never pass scanner gates — skip early, save downstream calls. */
   minReserveUsd: number;
   /** Hot-pool poll (top h24-volume movers, not just new pools). */
   hotPoolsEnabled: boolean;
-  hotPoolsIntervalMs: number;  // default 60s
+  hotPoolsIntervalMs: number;  // default 120s
   /** Minimum pool reserve for a hot pool (50k = scanner's own liquidity gate). */
   hotMinReserveUsd: number;
   /** Minimum 1h price change % for a hot pool — momentum must be positive. */
@@ -59,6 +68,9 @@ export interface GeckoTerminalDiscoveryConfig {
 }
 
 const DEFAULTS: GeckoTerminalDiscoveryConfig = {
+  network: "ton",
+  chain: "ton",
+  skipBaseTokenIds: [TON_NATIVE_ID, USDT_TON_ID, STTON_ID],
   // GT throttles sustained polling harder than the documented 30/min — a 15s
   // new-pool poll ran all day and got the IP 429'd (verified 2026-09-16).
   // 2/min + 0.5/min with backoff stays well inside the real limit.
@@ -104,8 +116,9 @@ export class GeckoTerminalDiscoveryProvider extends AbstractProvider implements 
     if (this.cfg.hotPoolsEnabled) {
       this.hotTimer = setInterval(() => void this.pollHotPools(), this.cfg.hotPoolsIntervalMs);
     }
-    this.log.info("GeckoTerminal TON discovery polling started", {
-      network: "ton",
+    this.log.info("GeckoTerminal discovery polling started", {
+      network: this.cfg.network,
+      chain: this.cfg.chain,
       intervalMs: this.cfg.pollIntervalMs,
       hotPools: this.cfg.hotPoolsEnabled,
     });
@@ -131,7 +144,7 @@ export class GeckoTerminalDiscoveryProvider extends AbstractProvider implements 
     if (this.polling || Date.now() < this.backoffUntil) return;
     this.polling = true;
     try {
-      const res = await fetch(`${this.baseUrl}/api/v2/networks/ton/new_pools`, {
+      const res = await fetch(`${this.baseUrl}/api/v2/networks/${this.cfg.network}/new_pools`, {
         headers: { accept: "application/json" },
         signal: AbortSignal.timeout(10_000),
       });
@@ -157,7 +170,7 @@ export class GeckoTerminalDiscoveryProvider extends AbstractProvider implements 
     this.pollingHot = true;
     try {
       const res = await fetch(
-        `${this.baseUrl}/api/v2/networks/ton/pools?sort=h24_volume_usd_desc&page=1`,
+        `${this.baseUrl}/api/v2/networks/${this.cfg.network}/pools?sort=h24_volume_usd_desc&page=1`,
         { headers: { accept: "application/json" }, signal: AbortSignal.timeout(10_000) },
       );
       if (!res.ok) throw new Error(`GeckoTerminal HTTP ${res.status}`);
@@ -192,7 +205,7 @@ export class GeckoTerminalDiscoveryProvider extends AbstractProvider implements 
     const poolId = pool.id ?? pool.attributes?.address;
     const baseId = pool.relationships?.base_token?.data?.id;
     if (!poolId || !baseId) return null;
-    if (baseId === TON_NATIVE_ID || baseId === USDT_TON_ID || baseId === STTON_ID) return null;
+    if (this.cfg.skipBaseTokenIds.includes(baseId)) return null;
 
     if (this.seenPools.has(poolId)) return null;
     this.seenPools.add(poolId);
@@ -205,8 +218,8 @@ export class GeckoTerminalDiscoveryProvider extends AbstractProvider implements 
     if (h1 == null || !Number.isFinite(Number(h1)) || Number(h1) <= this.cfg.hotMinH1ChangePct) return null;
 
     const event: TokenDiscoveredEvent = {
-      tokenAddress: baseId.slice("ton_".length),
-      chain: "ton",
+      tokenAddress: baseId.slice(this.cfg.network.length + 1),
+      chain: this.cfg.chain,
       firstSeenAt: new Date(),
       source: "geckoterminal:hot",
       pool: pool.attributes?.address ?? poolId,
@@ -227,7 +240,8 @@ export class GeckoTerminalDiscoveryProvider extends AbstractProvider implements 
     const poolId = pool.id ?? pool.attributes?.address;
     const baseId = pool.relationships?.base_token?.data?.id;
     if (!poolId || !baseId) return null;
-    if (baseId === TON_NATIVE_ID) return null; // native TON as base — not a jetton trade
+    // skip list covers native coin + stables — a meme trade neither
+    if (this.cfg.skipBaseTokenIds.includes(baseId)) return null;
 
     if (this.seenPools.has(poolId)) return null;
     this.seenPools.add(poolId);
@@ -238,8 +252,8 @@ export class GeckoTerminalDiscoveryProvider extends AbstractProvider implements 
 
     const dex = pool.relationships?.dex?.data?.id ?? "unknown-dex";
     const event: TokenDiscoveredEvent = {
-      tokenAddress: baseId.slice("ton_".length),
-      chain: "ton",
+      tokenAddress: baseId.slice(this.cfg.network.length + 1),
+      chain: this.cfg.chain,
       firstSeenAt: pool.attributes?.pool_created_at
         ? new Date(pool.attributes.pool_created_at)
         : new Date(),
@@ -247,7 +261,7 @@ export class GeckoTerminalDiscoveryProvider extends AbstractProvider implements 
       pool: pool.attributes?.address ?? poolId,
       initialLiquidityUsd: reserve,
     };
-    this.log.debug("TON pool discovered", { jetton: event.tokenAddress, pool: event.pool, dex });
+    this.log.debug("Pool discovered", { token: event.tokenAddress, chain: event.chain, pool: event.pool, dex });
     this.handlers.forEach((h) => h(event));
     return event;
   }

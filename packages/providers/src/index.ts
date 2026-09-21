@@ -15,4 +15,6 @@ export * from "./ton/tonapi-security.js";
 export * from "./ton/tonapi-holders.js";
 export * from "./ton/geckoterminal-discovery.js";
 export * from "./ton/ston-quote.js";
+export * from "./evm/chains.js";
+export * from "./evm/goplus-evm.js";
 export * from "./provider-factory.js";

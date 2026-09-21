@@ -54,7 +54,7 @@ Get-NetTCPConnection -LocalPort 3000 -State Listen | % { Stop-Process $_.OwningP
 | Key | Purpose |
 |---|---|
 | `TRADING_MODE` | `PAPER` (default) \| `SHADOW` (real quotes, no tx) \| `LIVE` |
-| `TRADING_CHAIN` | `solana` (default) \| `ton` |
+| `TRADING_CHAIN` | comma list: `solana` (default), `ton`, `bsc`, `base`, `polygon`, `arbitrum` — e.g. `solana,ton,bsc` trades all three simultaneously (capital splits evenly; EVM chains are PAPER-only) |
 | `HELIUS_API_KEY` | Solana RPC, tx monitoring, stream discovery |
 | `BIRDEYE_API_KEY` | Market data, liquidity (TON chain: TonAPI + GeckoTerminal, keyless) |
 | `GOPLUS_API_KEY` | Token security (works keyless) |

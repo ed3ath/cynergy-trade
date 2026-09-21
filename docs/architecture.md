@@ -4,8 +4,16 @@ Roadmap + phase gates: `docs/roadmap.md`.
 
 ## Overview
 
-Autonomous crypto trading system targeting newly-launched tokens. Chain is selected by `TRADING_CHAIN` (`solana` default, or `ton`).
+Autonomous crypto trading system targeting newly-launched tokens. `TRADING_CHAIN` selects
+the chains traded simultaneously — a comma list of `solana`, `ton`, and the cheap-gas EVM
+family `bsc|base|polygon|arbitrum` (e.g. `TRADING_CHAIN=solana,ton,bsc`, default `solana`).
 TypeScript monorepo, modular packages, deterministic risk firewall around all capital deployment.
+
+Multi-chain model: one runtime per chain (providers, scanner, execution router, positions,
+equity book, regime sampler). Shared: journal, emergency controller, idempotency guard,
+risk engine, alerter, AI veto, performance trackers. `STARTING_CAPITAL_USD` splits evenly
+across active chains (`base_capital_usd:<chain>` system-state keys). Risk limits apply
+per-chain book; a daily-loss breach on any chain stops new entries globally (fail-safe).
 
 ```
 DISCOVERY → SCANNER → STRATEGY ENSEMBLE → RISK ENGINE → EXECUTION → POSITION MGMT → PERFORMANCE
@@ -16,7 +24,7 @@ DISCOVERY → SCANNER → STRATEGY ENSEMBLE → RISK ENGINE → EXECUTION → PO
 | Package | Purpose |
 |---|---|
 | `@autonomous-trader/shared` | Domain types, config (zod-validated), structured logger, ID generators |
-| `@autonomous-trader/providers` | Provider interfaces + mock and live implementations (GoPlus, Jupiter, Birdeye, SolanaRPC, Raydium discovery, TON: TonAPI + GeckoTerminal), health tracking |
+| `@autonomous-trader/providers` | Provider interfaces + mock and live implementations (GoPlus, Jupiter, Birdeye, SolanaRPC, Raydium discovery, TON: TonAPI + GeckoTerminal, EVM: GeckoTerminal + DexScreener + GoPlus), health tracking |
 | `@autonomous-trader/core` | State machines, risk engine, emergency controller, performance tracker, regime detector, Postgres journal |
 | `@autonomous-trader/scanner` | Token lifecycle, feature engine, hard-gate filters, scoring |
 | `@autonomous-trader/strategy` | Strategy interface, ensemble engine (Fresh Momentum, Micro Scalp) |
@@ -64,6 +72,7 @@ DISCOVERY → SCANNER → STRATEGY ENSEMBLE → RISK ENGINE → EXECUTION → PO
 - ✅ Ops: HTTP monitor (`/health /status /events /metrics /market /history /trades /report`, dashboard at `/`, bearer-auth emergency controls), `docker-compose.prod.yml` (self-migrating boot), ShadowTracker (ENTER decisions evaluated at 15min horizon → `shadow_decisions`)
 - ✅ Durable idempotency (Postgres `executed_intents` + fallback), wallet signing (`WALLET_PRIVATE_KEY` → VersionedTransaction)
 - ✅ TON chain (`TRADING_CHAIN=ton`, TonAPI/GeckoTerminal providers, coarse-path strategy), multi-opportunity trading (remaining balance, per-tick equity), dashboard UI at `/`
+- ✅ Multi-chain simultaneous trading: `TRADING_CHAIN` accepts comma lists; EVM family (bsc/base/polygon/arbitrum) on GeckoTerminal discovery + DexScreener market/liquidity + GoPlus EVM security/holders — all keyless, PAPER-only (SHADOW/LIVE boot-refused until a quote aggregator + signing path exist)
 - 🔜 Phase 4: backtester at volume (needs accumulated snapshot data — run paper mode 24/7 first)
 - 🔜 Shadow-mode validation at volume, token re-entry after exit, Helius webhook discovery
 

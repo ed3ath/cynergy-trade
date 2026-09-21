@@ -445,6 +445,7 @@ export class JournalRepository {
   // ─── Shadow decisions (signal-quality evidence, spec §43) ──────────────────
   async insertShadowDecision(d: {
     tokenAddress: string;
+    chain: string;
     strategyId: string;
     decisionPrice: number;
     confidence: number;
@@ -453,13 +454,13 @@ export class JournalRepository {
   }): Promise<void> {
     await this.db.query(
       `INSERT INTO shadow_decisions
-        (token_address, strategy_id, decision, decision_price, confidence, horizon_minutes, decided_at)
-       VALUES ($1,$2,'ENTER',$3,$4,$5,$6)`,
-      [d.tokenAddress, d.strategyId, d.decisionPrice, d.confidence, d.horizonMinutes, d.decidedAt],
+        (token_address, chain, strategy_id, decision, decision_price, confidence, horizon_minutes, decided_at)
+       VALUES ($1,$2,$3,'ENTER',$4,$5,$6,$7)`,
+      [d.tokenAddress, d.chain, d.strategyId, d.decisionPrice, d.confidence, d.horizonMinutes, d.decidedAt],
     );
   }
 
-  async getDueShadowDecisions(horizonMinutes: number, limit: number): Promise<Array<{
+  async getDueShadowDecisions(horizonMinutes: number, limit: number, chain?: string): Promise<Array<{
     id: number;
     tokenAddress: string;
     decisionPrice: number;
@@ -469,8 +470,9 @@ export class JournalRepository {
       `SELECT id, token_address, decision_price, decided_at
        FROM shadow_decisions
        WHERE evaluated_at IS NULL AND decided_at < NOW() - ($1 || ' minutes')::interval
+         AND ($3::chain_type IS NULL OR chain = $3::chain_type)
        ORDER BY decided_at LIMIT $2`,
-      [String(horizonMinutes), limit],
+      [String(horizonMinutes), limit, chain ?? null],
     );
     return rows.map((r) => ({
       id: r.id,
@@ -488,14 +490,16 @@ export class JournalRepository {
     );
   }
 
-  async getShadowStats(): Promise<{ total: number; evaluated: number; avgReturnPct: number; winRate: number }> {
+  async getShadowStats(chain?: string): Promise<{ total: number; evaluated: number; avgReturnPct: number; winRate: number }> {
     const { rows } = await this.db.query<{ total: string; evaluated: string; avg_ret: string | null; win_rate: string | null }>(
       `SELECT COUNT(*) AS total,
               COUNT(evaluated_at) AS evaluated,
               AVG(outcome_return_pct) FILTER (WHERE evaluated_at IS NOT NULL) AS avg_ret,
               AVG(CASE WHEN outcome_return_pct > 0 THEN 1.0 ELSE 0 END)
                 FILTER (WHERE evaluated_at IS NOT NULL) AS win_rate
-       FROM shadow_decisions`,
+       FROM shadow_decisions
+       WHERE ($1::chain_type IS NULL OR chain = $1::chain_type)`,
+      [chain ?? null],
     );
     const r = rows[0];
     return {

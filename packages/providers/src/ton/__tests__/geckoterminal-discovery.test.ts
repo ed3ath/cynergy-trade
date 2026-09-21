@@ -187,3 +187,56 @@ describe("GeckoTerminalDiscoveryProvider.processHotPool", () => {
     }
   });
 });
+
+describe("GeckoTerminalDiscoveryProvider — EVM networks", () => {
+  // live payload shape captured 2026-09-21 from networks/bsc/new_pools
+  const WBNB_BSC = "bsc_0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c";
+  const bsc = () => new GeckoTerminalDiscoveryProvider("http://gt.test", {
+    network: "bsc",
+    chain: "bsc",
+    skipBaseTokenIds: [WBNB_BSC, "bsc_0x55d398326f99059ff775485246999027b3197955"],
+  });
+
+  const bscPool = (baseId = "bsc_0xf91d10c171dac26b9053f3d57e38afc0acf9ffff") => ({
+    id: "bsc_0x172fcd41e0913e95784454622d1c3724f546f849",
+    attributes: { address: "0x172fcd41e0913e95784454622d1c3724f546f849", pool_created_at: "2026-09-21T01:19:47Z", reserve_in_usd: "12000" },
+    relationships: {
+      base_token: { data: { id: baseId } },
+      quote_token: { data: { id: "bsc_0x0000000000000000000000000000000000000000" } }, // native BNB
+      dex: { data: { id: "four-meme" } },
+    },
+  });
+
+  it("emits the base ERC20 with chain=bsc and bsc_ prefix stripped", () => {
+    const ev = bsc().processPool(bscPool() as never);
+    expect(ev?.tokenAddress).toBe("0xf91d10c171dac26b9053f3d57e38afc0acf9ffff");
+    expect(ev?.chain).toBe("bsc");
+    expect(ev?.source).toBe("geckoterminal:four-meme");
+  });
+
+  it("skips wrapped-native and stable bases", () => {
+    const p = bsc();
+    expect(p.processPool(bscPool(WBNB_BSC) as never)).toBeNull();
+    expect(p.processPool(bscPool("bsc_0x55d398326f99059ff775485246999027b3197955") as never)).toBeNull();
+  });
+
+  it("polls the bsc new_pools endpoint", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ data: [bscPool()] }), {
+        status: 200, headers: { "content-type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const events: unknown[] = [];
+    const p = bsc();
+    p.subscribe((e) => events.push(e));
+
+    await p.pollOnce();
+
+    expect(events).toHaveLength(1);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://gt.test/api/v2/networks/bsc/new_pools",
+      expect.objectContaining({ headers: { accept: "application/json" } }),
+    );
+  });
+});
