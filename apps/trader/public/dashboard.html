@@ -9,6 +9,8 @@
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
   /* Design system: ui-ux-pro-max "Minimalism & Swiss / Trust" — navy + gold terminal.
+     Layout: ui-ux-pro-max "Data-Dense Dashboard" — one 100dvh shell, no page scroll;
+     every panel scrolls internally (tables keep sticky headers).
      Chart colors are the dataviz reference palette, re-validated against these
      surfaces (series-1 passes all checks on #222735 dark / #ffffff light;
      status hexes carry icon+label, never color alone). */
@@ -48,66 +50,112 @@
   }
   * { box-sizing: border-box; }
   body {
-    margin: 0; padding: 0 20px 20px; background: var(--page); color: var(--ink);
-    font: 14px/1.5 Inter, system-ui, -apple-system, "Segoe UI", sans-serif;
+    margin: 0; background: var(--page); color: var(--ink);
+    font: 13px/1.45 Inter, system-ui, -apple-system, "Segoe UI", sans-serif;
     font-feature-settings: "tnum" 0;
+    /* terminal shell: appbar + KPI strip + grid share the viewport; nothing scrolls at page level */
+    display: flex; flex-direction: column; gap: 8px;
+    height: 100dvh; padding: 0 10px 10px; overflow: hidden;
   }
   /* ── app bar ─────────────────────────────────────────────────────────── */
   .appbar {
-    position: sticky; top: 0; z-index: 40;
-    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
-    margin: 0 -20px; padding: 10px 20px;
+    flex: none; display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    margin: 0 -10px; padding: 7px 10px;
     background: var(--page); border-bottom: 1px solid var(--ring);
   }
-  .brand { display: flex; align-items: center; gap: 10px; }
-  .brand .mark { width: 26px; height: 26px; flex: none; color: var(--accent); }
-  .brand h1 { font-size: 15px; margin: 0; font-weight: 600; letter-spacing: -0.01em; }
-  header .sub { color: var(--ink-2); font-size: 13px; }
+  .brand { display: flex; align-items: center; gap: 8px; }
+  .brand .mark { width: 22px; height: 22px; flex: none; color: var(--accent); }
+  .brand h1 { font-size: 14px; margin: 0; font-weight: 600; letter-spacing: -0.01em; }
+  header .sub { color: var(--ink-2); font-size: 12px; }
   .appbar .spacer { flex: 1; }
   .chip { display: inline-flex; align-items: center; gap: 6px; }
   .chip .dot { width: 8px; height: 8px; border-radius: 50%; }
   #theme-toggle {
     display: inline-flex; align-items: center; gap: 6px; cursor: pointer;
     font: 12px/1 Inter, system-ui, sans-serif; font-weight: 500;
-    padding: 6px 12px; border-radius: 8px;
+    padding: 5px 10px; border-radius: 8px;
     border: 1px solid var(--ring); background: var(--surface); color: var(--ink-2);
     transition: border-color 0.15s, color 0.15s;
   }
   #theme-toggle:hover { border-color: var(--accent); color: var(--ink); }
   #theme-toggle svg { width: 14px; height: 14px; }
-  #theme-toggle:focus-visible, .logbar button:focus-visible {
+  #theme-toggle:focus-visible, .ph button:focus-visible, #detail-close:focus-visible {
     outline: 2px solid var(--accent); outline-offset: 1px;
   }
   #banner {
-    display: none; align-items: center; gap: 10px; padding: 10px 14px; margin: 14px 0;
+    display: none; align-items: center; gap: 10px; padding: 8px 12px; flex: none;
     border: 1px solid var(--critical); border-radius: 10px;
     background: color-mix(in srgb, var(--critical) 10%, transparent);
     color: var(--critical); font-weight: 600;
   }
-  #banner svg { width: 18px; height: 18px; flex: none; }
-  /* ── cards & tiles ───────────────────────────────────────────────────── */
-  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 14px; }
+  #banner svg { width: 16px; height: 16px; flex: none; }
+  /* ── KPI strip: portfolio tiles + scanner tiles in one row ────────────── */
+  .kpis { flex: none; display: flex; gap: 8px; align-items: stretch; min-width: 0; }
+  .tiles { display: grid; gap: 8px; min-width: 0; }
+  #tiles { flex: 1.6; grid-template-columns: repeat(6, 1fr); }
+  .scan-group {
+    flex: 1; display: flex; flex-direction: column; gap: 4px; min-width: 0;
+    padding: 6px 8px; border: 1px solid var(--ring); border-radius: 10px;
+    background: var(--surface);
+  }
+  .scan-head {
+    color: var(--ink-2); font-size: 10px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.08em;
+    display: flex; justify-content: space-between; gap: 8px; min-width: 0;
+  }
+  .scan-head #scan-foot {
+    font-weight: 400; text-transform: none; letter-spacing: 0;
+    color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .scan-group .tiles { grid-template-columns: repeat(4, 1fr); flex: 1; }
   .tile {
-    background: var(--surface); border: 1px solid var(--ring); border-radius: 10px; padding: 12px 14px;
+    background: var(--surface); border: 1px solid var(--ring); border-radius: 10px;
+    padding: 7px 10px; min-width: 0; overflow: hidden;
     transition: border-color 0.15s;
   }
-  .tile .label { color: var(--ink-2); font-size: 11px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.06em; }
-  .tile .value { font-size: 26px; font-weight: 600; margin-top: 4px; letter-spacing: -0.01em; }
-  .tile.hero .value { font-size: 42px; }
-  .tile .delta { font-size: 12px; margin-top: 2px; font-weight: 500; }
+  .scan-group .tile { border: none; background: var(--wash); border-radius: 8px; padding: 4px 8px; }
+  .tile .label { color: var(--ink-2); font-size: 10px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.06em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .tile .value { font-size: 19px; font-weight: 600; margin-top: 2px; letter-spacing: -0.01em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .tile.hero .value { font-size: 26px; }
+  .tile .delta { font-size: 11px; margin-top: 1px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .delta.up   { color: var(--good); }
   .delta.down { color: var(--critical); }
-  section {
+  /* ── main grid: equity | market (tall) | activity+console ─────────────── */
+  main.grid {
+    flex: 1; min-height: 0; display: grid; gap: 8px;
+    grid-template-columns: minmax(300px, 1fr) minmax(420px, 1.4fr) minmax(270px, 0.85fr);
+    grid-template-rows: minmax(0, 1.1fr) minmax(0, 1fr);
+  }
+  .panel {
     background: var(--surface); border: 1px solid var(--ring); border-radius: 10px;
-    padding: 14px; margin-bottom: 14px;
+    padding: 8px 10px; margin: 0; min-width: 0; min-height: 0;
+    display: flex; flex-direction: column; gap: 6px;
   }
-  section h2 {
-    font-size: 11px; color: var(--ink-2); margin: 0 0 12px; font-weight: 600;
-    text-transform: uppercase; letter-spacing: 0.08em;
+  .p-equity    { grid-column: 1; grid-row: 1; }
+  .p-book      { grid-column: 1; grid-row: 2; }
+  .p-market    { grid-column: 2; grid-row: 1 / span 2; }
+  .p-activity  { grid-column: 3; grid-row: 1; }
+  .p-console   { grid-column: 3; grid-row: 2; }
+  .ph { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; flex: none; }
+  .ph h2 {
+    font-size: 10px; color: var(--ink-2); margin: 0; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.08em; margin-right: 2px;
   }
+  .ph .count { color: var(--muted); font-size: 11px; }
+  .ph button {
+    font: 11px/1 Inter, system-ui, sans-serif; font-weight: 500; padding: 4px 12px;
+    border-radius: 999px; cursor: pointer;
+    border: 1px solid var(--ring); background: var(--surface); color: var(--ink-2);
+    transition: border-color 0.15s, color 0.15s, background 0.15s;
+  }
+  .ph button:hover { color: var(--ink); }
+  .ph button.on {
+    background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 600;
+  }
+  .pbody { flex: 1; min-height: 0; overflow: auto; }
   /* ── equity chart ────────────────────────────────────────────────────── */
-  #equity-wrap { position: relative; }
-  #equity-svg { width: 100%; height: 240px; display: block; }
+  #equity-wrap { position: relative; flex: 1; min-height: 120px; }
+  #equity-svg { width: 100%; height: 100%; display: block; }
   #equity-svg text { font: 11px Inter, system-ui, sans-serif; fill: var(--muted); }
   #tooltip {
     position: absolute; display: none; pointer-events: none; background: var(--surface);
@@ -116,53 +164,44 @@
   }
   #tooltip .v { font-weight: 600; }
   #tooltip .t { color: var(--ink-2); font-size: 11px; }
-  /* ── tables ──────────────────────────────────────────────────────────── */
+  details { margin-top: 4px; flex: none; }
+  summary { color: var(--ink-2); font-size: 11px; cursor: pointer; }
+  /* ── tables (sticky headers inside scrolling panels) ──────────────────── */
   table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
-  th { text-align: left; color: var(--muted); font-weight: 500; font-size: 11px; padding: 6px 8px; border-bottom: 1px solid var(--baseline); text-transform: uppercase; letter-spacing: 0.05em; }
-  td { padding: 6px 8px; border-bottom: 1px solid var(--grid); }
+  th {
+    text-align: left; color: var(--muted); font-weight: 500; font-size: 10px;
+    padding: 4px 8px; border-bottom: 1px solid var(--baseline);
+    text-transform: uppercase; letter-spacing: 0.05em;
+    position: sticky; top: 0; background: var(--surface); z-index: 1;
+  }
+  td { padding: 4px 8px; border-bottom: 1px solid var(--grid); }
   tbody tr:last-child td, table > tr:last-child td { border-bottom: none; }
   td.num, th.num { text-align: right; }
   .mono { font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
   td a { color: var(--series-1); text-decoration: none; }
   td a:hover { text-decoration: underline; }
-  details { margin-top: 8px; }
-  summary { color: var(--ink-2); font-size: 12px; cursor: pointer; }
   .refreshing { opacity: .55; transition: opacity .2s; }
-  .empty { color: var(--muted); padding: 8px; }
+  .empty { color: var(--muted); padding: 6px 8px; }
   .pill {
     display: inline-block; padding: 1px 9px; border-radius: 999px;
     font-size: 11px; font-weight: 500; line-height: 1.7;
     border: 1px solid var(--ring); color: var(--ink-2); background: var(--wash);
+    white-space: nowrap;
   }
   .pill-good { color: var(--good); border-color: color-mix(in srgb, var(--good) 35%, transparent); }
   .pill-warn { color: var(--warning); border-color: color-mix(in srgb, var(--warning) 35%, transparent); }
   .pill-bad  { color: var(--critical); border-color: color-mix(in srgb, var(--critical) 35%, transparent); }
   .pill-info { color: var(--series-1); border-color: color-mix(in srgb, var(--series-1) 35%, transparent); }
   /* ── market table ────────────────────────────────────────────────────── */
-  #market { overflow-x: auto; }
+  .p-market .pbody { overflow: auto; }
   #market table { min-width: 980px; }
   #market tr[data-token] { cursor: pointer; }
   #market tr[data-token]:hover, #market tr[data-token]:focus { background: var(--wash); outline: none; }
-  #token-detail .detail-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; margin-top: 8px; }
-  #token-detail .detail-grid .grp { border: 1px solid var(--ring); border-radius: 8px; padding: 8px 10px; }
-  #token-detail .grp h3 { font-size: 12px; color: var(--ink-2); margin: 0 0 6px; font-weight: 600; }
-  #token-detail td { padding: 3px 6px; }
   /* ── activity / console ──────────────────────────────────────────────── */
-  .logbar { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; flex-wrap: wrap; }
-  .logbar button {
-    font: 12px/1 Inter, system-ui, sans-serif; font-weight: 500; padding: 5px 14px; border-radius: 999px; cursor: pointer;
-    border: 1px solid var(--ring); background: var(--surface); color: var(--ink-2);
-    transition: border-color 0.15s, color 0.15s, background 0.15s;
-  }
-  .logbar button:hover { color: var(--ink); }
-  .logbar button.on {
-    background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 600;
-  }
-  .logbar .count { color: var(--muted); font-size: 12px; }
   #activity, #console {
     background: var(--page); border: 1px solid var(--ring); border-radius: 8px;
-    font: 12px/1.65 ui-monospace, Consolas, monospace; padding: 8px 10px;
-    height: 280px; overflow-y: auto; overscroll-behavior: contain;
+    font: 12px/1.6 ui-monospace, Consolas, monospace; padding: 6px 8px;
+    flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain;
   }
   #activity .row, #console .row { display: flex; gap: 8px; }
   #activity .row.dim, #console .row.dim { opacity: .65; }
@@ -173,11 +212,43 @@
   #activity .lv-warn, #console .lv-warn { color: var(--warning); }
   #activity .lv-skip, #console .lv-skip, #activity .lv-reject, #console .lv-reject { color: var(--muted); }
   #activity .m, #console .m { word-break: break-all; }
-  @media (max-width: 600px) {
-    body { padding: 0 12px 12px; }
-    .appbar { margin: 0 -12px; padding: 10px 12px; }
-    .tile.hero .value { font-size: 32px; }
-    .tile .value { font-size: 22px; }
+  /* ── token drill-down: modal overlay, not an inline space hog ─────────── */
+  #token-detail {
+    position: fixed; inset: 0; z-index: 100; display: none;
+    align-items: center; justify-content: center; padding: 24px;
+    background: rgba(15,23,42,0.55);
+  }
+  #token-detail.open { display: flex; }
+  #token-detail .sheet {
+    background: var(--surface); border: 1px solid var(--ring); border-radius: 12px;
+    width: min(960px, 100%); max-height: calc(100dvh - 48px);
+    overflow: auto; padding: 14px 16px; box-shadow: 0 12px 40px rgba(0,0,0,.35);
+  }
+  #detail-close {
+    font: 12px/1 Inter, system-ui, sans-serif; font-weight: 600; padding: 5px 12px;
+    border-radius: 999px; cursor: pointer; margin-left: auto; flex: none;
+    border: 1px solid var(--ring); background: var(--surface); color: var(--ink-2);
+  }
+  #detail-close:hover { border-color: var(--critical); color: var(--critical); }
+  #token-detail .detail-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 8px; margin-top: 8px; }
+  #token-detail .detail-grid .grp { border: 1px solid var(--ring); border-radius: 8px; padding: 6px 10px; }
+  #token-detail .grp h3 { font-size: 11px; color: var(--ink-2); margin: 0 0 4px; font-weight: 600; }
+  #token-detail td { padding: 2px 6px; }
+  /* ── narrow screens: back to a stacked, scrolling page ────────────────── */
+  @media (max-width: 1023px) {
+    body { display: block; height: auto; min-height: 100dvh; overflow: auto; padding: 0 12px 12px; }
+    .appbar { margin: 0 -12px; padding: 8px 12px; }
+    .kpis { flex-direction: column; margin-top: 10px; }
+    #tiles { grid-template-columns: repeat(2, 1fr); }
+    main.grid { display: flex; flex-direction: column; margin-top: 8px; }
+    .panel { flex: none; }
+    #equity-wrap { min-height: 200px; }
+    #equity-svg { height: 200px; }
+    #activity, #console { flex: none; height: 240px; }
+    .pbody { overflow: visible; }
+    .p-market .pbody { overflow-x: auto; }
+    .tile.hero .value { font-size: 22px; }
+    .tile .value { font-size: 17px; }
   }
   @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after { transition: none !important; animation: none !important; }
@@ -214,59 +285,66 @@
   <span id="banner-text"></span>
 </div>
 
-<section>
-  <h2>Scanner activity</h2>
-  <div class="tiles" id="scan-tiles"></div>
-  <div class="sub" id="scan-foot" style="color: var(--ink-2); font-size: 12px; margin-top: 8px"></div>
-</section>
-
-<div class="tiles" id="tiles"></div>
-
-<section>
-  <h2>Equity — total value over time (paper)</h2>
-  <div id="equity-wrap">
-    <svg id="equity-svg" viewBox="0 0 800 240" role="img" aria-label="Equity curve"></svg>
-    <div id="tooltip"></div>
+<div class="kpis">
+  <div class="tiles" id="tiles"></div>
+  <div class="scan-group">
+    <div class="scan-head"><span>Scanner</span><span id="scan-foot"></span></div>
+    <div class="tiles" id="scan-tiles"></div>
   </div>
-  <details><summary>Table view</summary><div id="equity-table"></div></details>
-</section>
+</div>
 
-<section>
-  <h2>Open positions</h2>
-  <div id="positions"></div>
-</section>
+<main class="grid">
+  <section class="panel p-equity">
+    <div class="ph"><h2>Equity — total value (paper)</h2></div>
+    <div id="equity-wrap">
+      <svg id="equity-svg" role="img" aria-label="Equity curve"></svg>
+      <div id="tooltip"></div>
+    </div>
+    <details><summary>Table view</summary><div id="equity-table"></div></details>
+  </section>
 
-<section>
-  <h2>Trade history</h2>
-  <div id="trades"></div>
-</section>
+  <section class="panel p-book">
+    <div class="ph">
+      <h2>Book</h2>
+      <button id="tab-positions" class="on">Positions</button>
+      <button id="tab-trades">Trades</button>
+    </div>
+    <div class="pbody">
+      <div id="positions"></div>
+      <div id="trades" hidden></div>
+    </div>
+  </section>
 
-<section>
-  <h2>Activity — every tick, every decision</h2>
-  <div class="logbar">
-    <button id="actf-all" class="on" data-a="all">All</button>
-    <button id="actf-actions" data-a="actions">Actions only</button>
-    <span class="count" id="act-count"></span>
-  </div>
-  <div id="activity"></div>
-</section>
+  <section class="panel p-market">
+    <div class="ph"><h2>Market — every tracked token</h2><span class="count">click a row for detail</span></div>
+    <div class="pbody" id="market"></div>
+  </section>
 
-<section>
-  <h2>Console — live decision log</h2>
-  <div class="logbar">
-    <button id="logf-signals" class="on" data-f="signals">Signals</button>
-    <button id="logf-all" data-f="all">All</button>
-    <button id="logf-errors" data-f="errors">Errors</button>
-    <span class="count" id="log-count"></span>
-  </div>
-  <div id="console"></div>
-</section>
+  <section class="panel p-activity">
+    <div class="ph">
+      <h2>Activity</h2>
+      <button id="actf-all" class="on" data-a="all">All</button>
+      <button id="actf-actions" data-a="actions">Actions</button>
+      <span class="count" id="act-count"></span>
+    </div>
+    <div id="activity"></div>
+  </section>
 
-<section>
-  <h2>Market data — every tracked token, live from the scanner</h2>
-  <div id="market"></div>
-  <div id="token-detail" style="margin-top: 12px"></div>
-</section>
+  <section class="panel p-console">
+    <div class="ph">
+      <h2>Console</h2>
+      <button id="logf-signals" class="on" data-f="signals">Signals</button>
+      <button id="logf-all" data-f="all">All</button>
+      <button id="logf-errors" data-f="errors">Errors</button>
+      <span class="count" id="log-count"></span>
+    </div>
+    <div id="console"></div>
+  </section>
+</main>
+
+<div id="token-detail" role="dialog" aria-modal="true" aria-label="Token detail">
+  <div class="sheet" id="token-sheet"></div>
+</div>
 
 <script>
 "use strict";
@@ -417,6 +495,16 @@ function renderStatus(status) {
   } finally {
     document.body.classList.remove("refreshing");
   }
+}
+
+// Book tabs — both panes stay rendered, only visibility flips
+for (const [tab, pane] of [["tab-positions", "positions"], ["tab-trades", "trades"]]) {
+  $(tab).addEventListener("click", () => {
+    $("tab-positions").classList.toggle("on", tab === "tab-positions");
+    $("tab-trades").classList.toggle("on", tab === "tab-trades");
+    $("positions").hidden = pane !== "positions";
+    $("trades").hidden = pane !== "trades";
+  });
 }
 
 // /metrics is the only thing still polled — the status payload arrives live
@@ -576,10 +664,10 @@ function pushLog(line) {
   }
   $("log-count").textContent = `${logBuf.length} lines`;
 }
-document.querySelectorAll(".logbar button[data-f]").forEach((b) =>
+document.querySelectorAll(".ph button[data-f]").forEach((b) =>
   b.addEventListener("click", () => {
     logFilter = b.dataset.f;
-    document.querySelectorAll(".logbar button[data-f]").forEach((x) => x.classList.toggle("on", x === b));
+    document.querySelectorAll(".ph button[data-f]").forEach((x) => x.classList.toggle("on", x === b));
     renderLogs();
   }));
 const logEs = new EventSource("/logs");
@@ -627,16 +715,27 @@ function renderMarket(rows) {
   }
   el.replaceChildren(tbl);
 }
-// ── /market/:token → drill-down detail panel ────────────────────────────────
+// ── /market/:token → drill-down modal ────────────────────────────────────────
 let detailReqToken = null;
+function closeTokenDetail() {
+  $("token-detail").classList.remove("open");
+  detailReqToken = null; // also cancels any in-flight detail fetch
+}
 async function showTokenDetail(token) {
   detailReqToken = token;
-  $("token-detail").replaceChildren(h("div", { class: "empty", text: "loading detail…" }));
+  $("token-detail").classList.add("open");
+  $("token-sheet").replaceChildren(h("div", { class: "empty", text: "loading detail…" }));
   let d = null;
   try { d = await fetch("/market/" + encodeURIComponent(token)).then((r) => r.json()); } catch { /* keep null */ }
   if (detailReqToken !== token) return; // a newer click superseded this fetch
   renderTokenDetail(d);
 }
+$("token-detail").addEventListener("click", (e) => {
+  if (e.target === $("token-detail")) closeTokenDetail(); // backdrop click
+});
+addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && $("token-detail").classList.contains("open")) closeTokenDetail();
+});
 function kvTable(pairs) {
   const t = h("table");
   for (const [k, v] of pairs) {
@@ -655,8 +754,9 @@ function fmtDur(ms) {
     : `${Math.round(ms / 60000)}m`;
 }
 function renderTokenDetail(d) {
-  const el = $("token-detail");
-  if (!d || !d.token) { el.replaceChildren(h("div", { class: "empty", text: "token not tracked" })); return; }
+  const el = $("token-sheet");
+  const close = h("button", { id: "detail-close", text: "Close", onclick: closeTokenDetail });
+  if (!d || !d.token) { el.replaceChildren(close, h("div", { class: "empty", text: "token not tracked" })); return; }
   const sec = d.security;
   const hist = d.history || [];
   const spark = h("svg", { viewBox: "0 0 300 64", preserveAspectRatio: "none", style: "width: 100%; height: 64px; display: block" });
@@ -671,6 +771,7 @@ function renderTokenDetail(d) {
     spark.append(h("path", { d: line, fill: "none", stroke: cssVar("--series-1"), "stroke-width": 1.5 }));
   }
   el.replaceChildren(
+    close,
     h("div", { style: "display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap" },
       h("a", { class: "mono", href: explorerUrl(d.token), target: "_blank", rel: "noopener", text: d.token }),
       h("span", { text: d.status, style: "font-weight: 600" }),
@@ -712,6 +813,7 @@ function renderTokenDetail(d) {
       ]),
     ),
   );
+  close.focus(); // modal open → focus lands on its dismiss control
 }
 function niceTicks(min, max, count) {
   const span = max - min || 1;
@@ -721,9 +823,13 @@ function niceTicks(min, max, count) {
 }
 function drawEquity() {
   const svg = $("equity-svg");
-  // 1 SVG unit = 1 CSS px: a fixed 800-wide viewBox stretched to container
-  // width distorted text, dots and stroke widths
-  const W = Math.max(320, Math.round($("equity-wrap").clientWidth) || 800), H = 240, L = 56, R = 14, T = 14, B = 26;
+  // 1 SVG unit = 1 CSS px in both axes: the chart fills its flexible panel, so
+  // measure the wrap — a fixed viewBox stretched to the container distorted
+  // text, dots and stroke widths
+  const rect = $("equity-wrap").getBoundingClientRect();
+  const W = Math.max(320, Math.round(rect.width) || 800);
+  const H = Math.max(150, Math.round(rect.height) || 240);
+  const L = 56, R = 14, T = 14, B = 26;
   svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
   svg.replaceChildren();
   if (history.length < 2) {
@@ -826,7 +932,7 @@ applyTheme();
 refreshStatus(); refreshHistory();
 setInterval(refreshStatus, 10_000);
 setInterval(refreshHistory, 15_000);
-addEventListener("resize", () => drawEquity()); // re-fit viewBox 1:1 to the new width
+addEventListener("resize", () => drawEquity()); // re-fit viewBox 1:1 to the new panel size
 
 // 1s local ticker — keeps "last scan" visibly alive between polls
 function tick() {
@@ -839,7 +945,7 @@ function tick() {
     const ago = sc.lastScreenAt ? Math.max(0, Math.round((Date.now() - new Date(sc.lastScreenAt).getTime()) / 1000)) : null;
     $("scan-foot").textContent = ago == null
       ? "no market scan yet"
-      : `last market scan ${ago}s ago · rejected tokens re-screen every 5 min · data refreshes every 10 s`;
+      : `last scan ${ago}s ago · rejected re-screen every 5 min`;
     $("live-text").textContent = `live · ${ago == null ? "—" : ago + "s since scan"}`;
   }
 }
