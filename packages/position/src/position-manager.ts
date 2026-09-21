@@ -44,7 +44,7 @@ export class PositionManager {
   constructor(
     private readonly executionRouter: ExecutionRouter,
     private readonly logger: Logger,
-    private readonly maxPositionAgeMs = 4 * 60 * 60 * 1000, // 4h time stop
+    private readonly maxPositionAgeMs = 2 * 60 * 60 * 1000, // 2h time stop — no profit thesis after this, exit
   ) {}
 
   /** Open a new position from a confirmed execution result. */

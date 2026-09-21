@@ -61,7 +61,7 @@ describe("runBacktest", () => {
 
     expect(r.trades.length).toBeGreaterThanOrEqual(1);
     const t = r.trades[0]!;
-    expect(t.returnPct).toBeGreaterThan(15); // TP1 +20% minus 2× slippage
+    expect(t.returnPct).toBeGreaterThan(4); // TP1 +5% minus slippage (policy: take profit early)
     expect(t.reason).toMatch(/Take profit 1/);
     expect(r.winRate).toBe(1);
   });
@@ -75,8 +75,9 @@ describe("runBacktest", () => {
   });
 
   it("exits via hard stop on an immediate dump", () => {
-    // entry at row0 (~1.0), stop = 0.85, next row crashes through it
-    const prices = [1, 1.05, 0.8, 0.7, 0.6, 0.5];
+    // entry at row0 (~1.0), stop = 0.90 (-10% policy), next row crashes through it
+    // (no +5% excursion first — that would take profit per the short-hold policy)
+    const prices = [1, 0.8, 0.7, 0.6, 0.5];
     const r = runBacktest([series("DUMP", prices)], opts);
     expect(r.trades.length).toBeGreaterThanOrEqual(1);
     expect(r.trades[0]!.reason).toMatch(/Hard stop loss/);
