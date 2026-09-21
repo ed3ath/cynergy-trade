@@ -124,6 +124,60 @@ export class PositionManager {
     return this.checkExitConditions(position, input);
   }
 
+  /** One-way ratchet: only ever TIGHTENS risk. stopLoss can only move UP,
+   *  take-profits and trailing stop can only move DOWN (closer). Widening
+   *  requests are clamped to the current value and reported in `clamped`.
+   *  The emergency tier (hard stop vs live price, security, liquidity) is
+   *  computed from live inputs each tick — untouchable by this method. */
+  tightenExits(
+    positionId: string,
+    opts: { stopLoss?: number; takeProfit1?: number; takeProfit2?: number; trailingStopPct?: number },
+  ): { applied: { stopLoss?: number; takeProfit1?: number; takeProfit2?: number; trailingStopPct?: number }; clamped: string[] } {
+    const position = this.positions.get(positionId);
+    if (!position || position.status !== "OPEN") return { applied: {}, clamped: ["unknown-position"] };
+
+    const applied: { stopLoss?: number; takeProfit1?: number; takeProfit2?: number; trailingStopPct?: number } = {};
+    const clamped: string[] = [];
+    const num = (v: number | undefined): v is number => typeof v === "number" && Number.isFinite(v) && v > 0;
+
+    if (num(opts.stopLoss)) {
+      if (opts.stopLoss > position.stopLoss) {
+        position.stopLoss = opts.stopLoss;
+        applied.stopLoss = opts.stopLoss;
+      } else {
+        clamped.push(`stopLoss<=current(${position.stopLoss})`);
+      }
+    }
+    if (num(opts.takeProfit1)) {
+      if (position.takeProfit1 === undefined || opts.takeProfit1 < position.takeProfit1) {
+        position.takeProfit1 = opts.takeProfit1;
+        applied.takeProfit1 = opts.takeProfit1;
+      } else {
+        clamped.push(`takeProfit1>=current(${position.takeProfit1})`);
+      }
+    }
+    if (num(opts.takeProfit2)) {
+      if (position.takeProfit2 === undefined || opts.takeProfit2 < position.takeProfit2) {
+        position.takeProfit2 = opts.takeProfit2;
+        applied.takeProfit2 = opts.takeProfit2;
+      } else {
+        clamped.push(`takeProfit2>=current(${position.takeProfit2})`);
+      }
+    }
+    if (num(opts.trailingStopPct)) {
+      if (position.trailingStopPct === undefined || opts.trailingStopPct < position.trailingStopPct) {
+        position.trailingStopPct = opts.trailingStopPct;
+        applied.trailingStopPct = opts.trailingStopPct;
+      } else {
+        clamped.push(`trailingStopPct>=current(${position.trailingStopPct})`);
+      }
+    }
+
+    if (Object.keys(applied).length > 0) position.updatedAt = new Date();
+    this.logger.info("Exits tightened", { positionId, applied, clamped });
+    return { applied, clamped };
+  }
+
   private checkExitConditions(position: Position, input: PositionMonitorInput): ExitSignal | null {
     const price = position.currentPrice;
 

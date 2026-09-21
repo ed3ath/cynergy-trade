@@ -11,7 +11,7 @@ TypeScript monorepo, modular packages, deterministic risk firewall around all ca
 
 Multi-chain model: one runtime per chain (providers, scanner, execution router, positions,
 equity book, regime sampler). Shared: journal, emergency controller, idempotency guard,
-risk engine, alerter, AI veto, performance trackers. `STARTING_CAPITAL_USD` splits evenly
+risk engine, alerter, AI agents, performance trackers. `STARTING_CAPITAL_USD` splits evenly
 across active chains (`base_capital_usd:<chain>` system-state keys). Risk limits apply
 per-chain book; a daily-loss breach on any chain stops new entries globally (fail-safe).
 
@@ -45,6 +45,29 @@ DISCOVERY → SCANNER → STRATEGY ENSEMBLE → RISK ENGINE → EXECUTION → PO
 8. **Execution** — PAPER (synthetic), SHADOW (real quote, no tx), LIVE (full pipeline with simulation)
 9. **Position mgmt** — exit hierarchy: hard stop → security deterioration → liquidity collapse → trailing → TP → time stop
 10. **Performance** — outcomes feed strategy multipliers with shrinkage for small samples
+
+## AI agent (`AI_AUTONOMY`)
+
+Optional LLM against any OpenAI-compatible `/chat/completions` endpoint. One shared
+daily USD budget (`AI_MAX_COST_PER_DAY_USD`) across both agents (`apps/trader/src/ai-budget.ts`).
+
+- `off` — agent dead
+- `veto` (default) — `AiVetoAgent` (`apps/trader/src/ai-agent.ts`): one-shot APPROVE/REJECT second
+  opinion on strategy candidates, cached per token, UNKNOWN on any failure (never blocks trading)
+- `auto` — `AiTraderAgent` (`apps/trader/src/ai-trader-agent.ts`): every `AI_CYCLE_SEC` the host
+  builds a snapshot (portfolio, open positions, top scanner candidates, recent trades); the agent
+  replies with STRICT-JSON actions, executed only through host guards:
+  - `ENTER` (token of its choice — host fetches fresh market/liquidity/security, any fetch
+    failure skips the action) → routed through `executeEntry`, i.e. the **same risk engine +
+    journal as strategies** under `strategyId: "ai-autonomous"`. AI never sets absolute size;
+    its 0–1 confidence only feeds the sizing multiplier.
+  - `EXIT` — any position, full-size sell through the normal exit path (`executeExit`)
+  - `TIGHTEN` — `PositionManager.tightenExits`, a one-way ratchet: stop only moves up,
+    TP/trailing only move down. The emergency tier (hard stop, security, liquidity collapse)
+    is computed from live inputs each tick — structurally unreachable by AI.
+  - Guards: per-cycle action cap, per-token cooldown, AI-open-position cap, kill switch /
+    `stopNewEntries` (blocks ENTERs only — exits always allowed). Cost cap or timeout →
+    empty cycle, never a thrown error, never blocks the 10s deterministic loop.
 
 ## Safety model
 
