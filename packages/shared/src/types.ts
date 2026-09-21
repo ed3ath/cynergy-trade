@@ -1,5 +1,8 @@
 // ─── Chain ────────────────────────────────────────────────────────────────────
-export type Chain = "solana" | "ton";
+/** EVM family = cheap-gas chains (bsc/base/polygon/arbitrum) — all ride the
+ *  same GeckoTerminal/DexScreener/GoPlus adapters, parameterized by network. */
+export const CHAIN_VALUES = ["solana", "ton", "bsc", "base", "polygon", "arbitrum"] as const;
+export type Chain = (typeof CHAIN_VALUES)[number];
 
 // ─── Token lifecycle ──────────────────────────────────────────────────────────
 export type TokenLifecycleStatus =

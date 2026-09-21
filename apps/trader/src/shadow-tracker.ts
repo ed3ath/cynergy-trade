@@ -51,6 +51,7 @@ export class ShadowTracker {
     if (this.entries.length > 5_000) this.entries.splice(0, 1_000); // bound memory
     await this.journal?.insertShadowDecision({
       tokenAddress: decision.tokenAddress,
+      chain: this.chain,
       strategyId: decision.strategyId,
       decisionPrice: decision.decisionPrice,
       confidence: decision.confidence,
@@ -65,14 +66,14 @@ export class ShadowTracker {
     // survive restarts and /metrics reflects all history, not just this boot.
     if (this.journal) {
       try {
-        const due = await this.journal.getDueShadowDecisions(this.defaultHorizonMin, 10);
+        const due = await this.journal.getDueShadowDecisions(this.defaultHorizonMin, 10, this.chain);
         for (const d of due) {
           const outcome = await this.fetchPrice(d.tokenAddress);
           if (outcome === null) continue;
           const returnPct = ((outcome - d.decisionPrice) / d.decisionPrice) * 100;
           await this.journal.updateShadowOutcome(d.id, outcome, returnPct);
         }
-        const s = await this.journal.getShadowStats();
+        const s = await this.journal.getShadowStats(this.chain);
         this.stats = {
           signals: s.total,
           evaluated: s.evaluated,

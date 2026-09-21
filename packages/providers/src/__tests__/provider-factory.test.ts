@@ -38,4 +38,25 @@ describe("createProviderRegistry chain selection", () => {
     expect(r.quote).toBeInstanceOf(JupiterQuoteProvider);
     expect(r.holders.name).toMatch(/^mock/); // no birdeye key
   });
+
+  it.each(["bsc", "base", "polygon", "arbitrum"] as const)(
+    "chain=%s → EVM registry: GT discovery, DexScreener market, GoPlus security, mock quote/execution",
+    (chain) => {
+      const r = createProviderRegistry(cfg, chain);
+
+      expect(r.discovery.name).toBe("geckoterminal-discovery");
+      expect(r.marketData.name).toBe("dexscreener");
+      expect(r.security.name).toBe("goplus-evm");
+      expect(r.holders.name).toBe("goplus-evm-holders");
+      expect(r.quote.name).toMatch(/^mock/); // PAPER-only chain
+      expect(r.execution.name).toMatch(/^mock/);
+      expect(r.monitoring.name).toMatch(/^mock/);
+    },
+  );
+
+  it("chain=bsc with goplus disabled → mock security/holders (UNKNOWN-safe)", () => {
+    const r = createProviderRegistry(ProvidersConfigSchema.parse({ goplus: { enabled: false } }), "bsc");
+    expect(r.security.name).toMatch(/^mock/);
+    expect(r.holders.name).toMatch(/^mock/);
+  });
 });

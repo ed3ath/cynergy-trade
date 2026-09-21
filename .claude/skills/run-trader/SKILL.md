@@ -12,7 +12,9 @@ pnpm exec tsx apps/trader/src/index.ts              # paper mode, mock providers
 ```
 
 Env (from root `.env` — the only env file; the daemon loads it too): `TRADING_MODE`
-(PAPER|SHADOW|LIVE, default PAPER), `TRADING_CHAIN` (solana|ton), `HELIUS_API_KEY`,
+(PAPER|SHADOW|LIVE, default PAPER), `TRADING_CHAIN` (comma list of solana|ton|bsc|base|
+polygon|arbitrum — chains trade simultaneously, capital splits evenly; EVM chains are
+PAPER-only), `HELIUS_API_KEY`,
 `BIRDEYE_API_KEY` (real data when set), `AI_ENABLED` (LLM veto agent, optional),
 `MONITOR_TOKEN` (required for emergency POSTs), `SERVER_PORT` (default 3000 — must
 match the watchdog's `MONITOR_PORT`).

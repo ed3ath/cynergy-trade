@@ -51,3 +51,16 @@ pools/discovery): see `tests/integration/ton.live.test.ts` + `ston-quote.live.te
 for known-good addresses and params, and `packages/providers/src/ton/` for the
 verified shapes. TON addresses are NOT draggable from Solana intuition — always
 probe with the jetton masters used in those tests.
+
+## EVM (bsc/base/polygon/arbitrum) — verified 2026-09-21
+
+- GoPlus EVM: `GET api.gopluslabs.io/api/v1/token_security/{chain_id}?contract_addresses=<addr>`
+  (chain_id: bsc=56, base=8453, polygon=137, arbitrum=42161) — keyless. Flags are FLAT
+  `"0"|"1"` strings (NOT Solana's `{authority,status}` wrappers). `holders` = top-10 with
+  `percent` as a decimal fraction; `owner_percent`/`creator_percent` likewise.
+- GeckoTerminal: same API as TON, network slug swapped (`/api/v2/networks/bsc/new_pools`).
+  Token ids are `<network>_<lowercase addr>`.
+- DexScreener: same `/latest/dex/tokens/<addr>` endpoint, `chainId` filter = bsc/base/
+  polygon/arbitrum.
+- Known-good asset: WBNB `0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c`.
+  See `tests/integration/evm.live.test.ts` + `packages/providers/src/evm/`.

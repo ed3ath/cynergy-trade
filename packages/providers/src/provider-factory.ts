@@ -30,9 +30,12 @@ import { TonApiSecurityProvider } from "./ton/tonapi-security.js";
 import { TonApiHoldersProvider } from "./ton/tonapi-holders.js";
 import { GeckoTerminalDiscoveryProvider } from "./ton/geckoterminal-discovery.js";
 import { StonQuoteProvider } from "./ton/ston-quote.js";
+import { EVM_CHAINS, evmSkipBaseIds, isEvmChain } from "./evm/chains.js";
+import { GoPlusEvmHoldersProvider, GoPlusEvmSecurityProvider } from "./evm/goplus-evm.js";
 
 export function createProviderRegistry(config: ProvidersConfig, activeChain: Chain = "solana"): ProviderRegistry {
   if (activeChain === "ton") return createTonRegistry(config);
+  if (isEvmChain(activeChain)) return createEvmRegistry(config, activeChain);
   const heliusKey = config.helius.apiKey;
   const birdeyeKey = config.birdeye.apiKey;
   const goplusEnabled = config.goplus.enabled;
@@ -139,6 +142,43 @@ function createTonRegistry(config: ProvidersConfig): ProviderRegistry {
     quote: config.tonapi.enabled
       ? new StonQuoteProvider(tonapi)
       : new MockSwapQuoteProvider(),
+    execution: new MockTradeExecutionProvider(),
+    monitoring: new MockTransactionMonitoringProvider(),
+  };
+}
+
+/**
+ * EVM registry (bsc/base/polygon/arbitrum) — PAPER only (boot-guarded in the
+ * trader: no EVM quote aggregator or signing path exists yet). All free,
+ * no-key APIs:
+ *   discovery: GeckoTerminal new pools · market/liquidity: DexScreener pairs
+ *   security + holders: GoPlus EVM (same endpoint, two views)
+ * GT rate budget: every chain adds 2/min + 0.5/min to the shared per-IP 30/min.
+ * ponytail: wire a 0x/1inch quote provider for SHADOW, viem signing for LIVE.
+ */
+function createEvmRegistry(config: ProvidersConfig, chain: "bsc" | "base" | "polygon" | "arbitrum"): ProviderRegistry {
+  const meta = EVM_CHAINS[chain];
+  const dexscreener = new DexScreenerProvider("https://api.dexscreener.com", 5_000, chain);
+  const goplus = config.goplus.enabled;
+
+  return {
+    discovery: config.geckoterminal.enabled
+      ? new GeckoTerminalDiscoveryProvider("https://api.geckoterminal.com", {
+        network: meta.network,
+        chain,
+        skipBaseTokenIds: evmSkipBaseIds(meta),
+      })
+      : new MockDiscoveryProvider(chain),
+    marketData: dexscreener,
+    liquidity: dexscreener,
+    security: goplus
+      ? new GoPlusEvmSecurityProvider(meta.goPlusChainId)
+      : new MockSecurityProvider(),
+    holders: goplus
+      ? new GoPlusEvmHoldersProvider(meta.goPlusChainId)
+      : new MockHolderAnalyticsProvider(),
+    chain: new MockChainDataProvider(),
+    quote: new MockSwapQuoteProvider(),
     execution: new MockTradeExecutionProvider(),
     monitoring: new MockTransactionMonitoringProvider(),
   };

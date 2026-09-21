@@ -8,6 +8,10 @@ State as of 2026-09-16. See `docs/architecture.md` for how it works.
 
 - TON paper trading 24/7 (PAPER-only by boot guard), hot-pool + new-pool
   discovery, dashboard at `:3000` (live SSE, market table, drill-down, equity)
+- Multi-chain runtime (2026-09-21): `TRADING_CHAIN` takes comma lists —
+  solana/ton plus keyless EVM chains (bsc/base/polygon/arbitrum, PAPER-only,
+  GeckoTerminal+DexScreener+GoPlus). Per-chain equity books, even capital
+  split. EVM SHADOW needs a quote aggregator (0x/1inch) — not wired yet.
 - Snapshot dataset accumulating in `token_market_snapshots` since 2026-09-12 —
   this is backtester fuel, every hour of runtime pays into Phase B
 
