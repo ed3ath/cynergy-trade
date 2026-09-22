@@ -139,7 +139,7 @@
      modal and cell titles keep the full data). ──────────────────────────── */
   main.grid {
     flex: 1; min-height: 0; display: grid; gap: 8px;
-    grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr) minmax(0, 1fr);
+    grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr) minmax(0, 0.9fr);
     grid-template-rows: minmax(0, 1fr) minmax(0, 1.1fr) minmax(0, 1.7fr);
     grid-template-areas:
       "equity  activity console"
@@ -223,8 +223,9 @@
   /* column triage: hide the least-critical columns as the viewport narrows;
      their data survives in the row drill-down modal and cell titles */
   @media (max-width: 1399px) { .col-opened { display: none; } }           /* book: age → Holding title */
+  @media (max-width: 1319px) { .col-closed { display: none; } }           /* trades: age → Exit title */
   @media (max-width: 1239px) { .col-v5, .col-v1h, .col-hold { display: none; } } /* market: vols+holders */
-  @media (max-width: 1199px) { .col-entry { display: none; } }            /* trades: entry → title */
+  @media (max-width: 1239px) { .col-entry { display: none; } }            /* trades: entry → title */
   @media (max-width: 999px)  { .col-mc, .col-upd { display: none; } }     /* market: cap+staleness */
   #market tr[data-token] { cursor: pointer; }
   #market tr[data-token]:hover, #market tr[data-token]:focus { background: var(--wash); outline: none; }
@@ -733,19 +734,22 @@ function renderTrades(trades) {
   const tbl = h("table");
   tbl.append(h("tr", {},
     h("th", { text: "Token" }),
+    h("th", { class: "num", text: "Amount" }),
     h("th", { class: "num col-entry", text: "Entry" }),
-    h("th", { class: "num", text: "PnL $" }),
-    h("th", { class: "num", text: "PnL %" }), h("th", { text: "Exit" }), h("th", { text: "Closed" })));
+    h("th", { class: "num", text: "PnL" }),
+    h("th", { text: "Exit" }), h("th", { class: "col-closed", text: "Closed" })));
   for (const t of trades) {
     const sym = symByToken.get(t.tokenAddress)?.symbol;
     tbl.append(h("tr", {},
       tokenCell(t.tokenAddress, sym ? sym + " · " + t.tokenAddress : undefined, t.chain, sym),
-      h("td", { class: "num mono col-entry", text: fmtPrice(t.entryPrice),
-        title: `entry ${fmtPrice(t.entryPrice)} · size ${fmtUsd(t.sizeUsd)} · ${fmtTokens(t.sizeTokens)}${sym ? " " + sym : ""} tokens` }),
-      h("td", { class: "num", text: fmtUsd(t.pnlUsd), style: `color: var(--${t.pnlUsd >= 0 ? "good" : "critical"})` }),
-      h("td", { class: "num", text: fmtPct(t.pnlPct), style: `color: var(--${t.pnlPct >= 0 ? "good" : "critical"})` }),
-      h("td", { text: t.exitReason ?? "—" }),
-      h("td", { text: t.closedAt ? relTime(t.closedAt) : "—" })));
+      h("td", { class: "num mono", text: fmtTokens(t.sizeTokens) + (sym ? " " + sym : ""),
+        title: `size at entry ${fmtUsd(t.sizeUsd)}` }),
+      h("td", { class: "num col-entry", text: fmtPrice(t.entryPrice), title: `entry ${fmtPrice(t.entryPrice)}` }),
+      // one merged cell keeps both PnL figures visible at every width
+      h("td", { class: "num", text: `${fmtUsd(t.pnlUsd)} · ${fmtPct(t.pnlPct)}`,
+        style: `color: var(--${t.pnlUsd >= 0 ? "good" : "critical"})` }),
+      h("td", { text: t.exitReason ?? "—", title: `closed ${t.closedAt ? relTime(t.closedAt) : "—"}` }),
+      h("td", { class: "col-closed", text: t.closedAt ? relTime(t.closedAt) : "—" })));
   }
   el.replaceChildren(tbl);
 }
