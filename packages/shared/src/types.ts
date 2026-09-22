@@ -113,6 +113,9 @@ export interface LiquiditySnapshot {
   poolAgeMs: number;
   baseToken: string;
   quoteToken: string;
+  /** Display-only passthrough (DexScreener baseToken) — not persisted. */
+  baseTokenSymbol?: string;
+  baseTokenName?: string;
   dex: string;
   estimatedSlippageBps50: number;  // bps slippage for $50 trade
   estimatedSlippageBps500: number;

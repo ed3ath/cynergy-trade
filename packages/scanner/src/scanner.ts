@@ -58,6 +58,9 @@ export interface SnapshotStore {
 export interface MarketFeedRow {
   token: string;
   chain: TokenDiscoveredEvent["chain"];
+  /** Display symbol/name when the liquidity provider exposed them, else null. */
+  symbol: string | null;
+  name: string | null;
   status: string;
   score: number;
   priceUsd: number | null;
@@ -298,6 +301,8 @@ export class Scanner {
     return {
       token: c.tokenAddress,
       chain: c.chain,
+      symbol: c.liquidity?.baseTokenSymbol ?? null,
+      name: c.liquidity?.baseTokenName ?? null,
       status: c.status,
       score: Math.round(c.scores.opportunity),
       priceUsd: c.market?.priceUsd ?? null,

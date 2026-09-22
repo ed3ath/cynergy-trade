@@ -180,6 +180,8 @@
   .mono { font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
   td a { color: var(--series-1); text-decoration: none; }
   td a:hover { text-decoration: underline; }
+  .chain-ic { display: inline-flex; align-items: center; margin-right: 5px; vertical-align: -2px; flex: none; }
+  .chain-ic svg { width: 13px; height: 13px; display: block; }
   .refreshing { opacity: .55; transition: opacity .2s; }
   .empty { color: var(--muted); padding: 6px 8px; }
   .pill {
@@ -373,12 +375,45 @@ const fmtAge = (iso) => {
 };
 // TON addresses are 48-char base64url starting EQ/UQ; anything else is Solana base58
 const isTonAddr = (addr) => /^(EQ|UQ)[A-Za-z0-9_-]{46}$/.test(addr);
-const explorerUrl = (addr) => isTonAddr(addr)
-  ? "https://tonviewer.com/" + addr
-  : "https://solscan.io/token/" + addr;
-const tokenCell = (addr, title) => h("td", {},
-  h("a", { class: "mono", href: explorerUrl(addr), target: "_blank", rel: "noopener", title: title ?? addr },
-    addr.slice(0, 6) + "…" + addr.slice(-4)));
+const EXPLORER = {
+  solana: (a) => "https://solscan.io/token/" + a,
+  ton: (a) => "https://tonviewer.com/" + a,
+  bsc: (a) => "https://bscscan.com/token/" + a,
+  base: (a) => "https://basescan.org/token/" + a,
+  polygon: (a) => "https://polygonscan.com/token/" + a,
+  arbitrum: (a) => "https://arbiscan.io/token/" + a,
+};
+// no chain on the payload (activity rows) → address-shape heuristic
+const explorerUrl = (addr, chain) =>
+  (EXPLORER[chain] ?? (isTonAddr(addr) ? EXPLORER.ton : EXPLORER.solana))(addr);
+// Chain badge glyphs (simplified brand marks, colored per chain; tooltip carries the name)
+const CHAINS = {
+  solana: { color: "#9945FF", label: "Solana",
+    svg: '<path d="M5.2 7.1l2-2h11.6l-2 2zM7.2 13.1h11.6l-2 2H5.2zM5.2 19.1l2-2h11.6l-2 2z" fill="currentColor"/>' },
+  ton: { color: "#0098EA", label: "TON",
+    svg: '<path d="M8.7 3h6.6l5.1 5.4L12 21.5 3.6 8.4z" fill="currentColor"/>' },
+  bsc: { color: "#F0B90B", label: "BNB Chain",
+    svg: '<path d="M12 8.1l3.4 3.4L12 14.9l-3.4-3.4zM12 2.8l1.9 1.9L12 6.6l-1.9-1.9zM12 17.4l1.9 1.9L12 21.2l-1.9-1.9zM6.1 10.8L8 12.7l-1.9 1.9-1.9-1.9zM17.9 10.8l1.9 1.9-1.9 1.9-1.9-1.9z" fill="currentColor"/>' },
+  base: { color: "#0052FF", label: "Base",
+    svg: '<circle cx="12" cy="12" r="9.2" fill="currentColor"/><path d="M2.8 10.9h8.8v2.2H2.8z" fill="var(--surface)"/>' },
+  polygon: { color: "#8247E5", label: "Polygon",
+    svg: '<path d="M12 2.6l8.2 4.7v9.4L12 21.4l-8.2-4.7V7.3z" fill="currentColor"/><path d="M12 8.2l3.4 1.9v3.8L12 15.8l-3.4-1.9v-3.8z" fill="var(--surface)"/>' },
+  arbitrum: { color: "#12AAFF", label: "Arbitrum",
+    svg: '<path d="M12 2.8l8.8 16.4h-4.9L12 10.9l-3.9 8.3H3.2z" fill="currentColor"/>' },
+};
+function chainIcon(chain) {
+  const c = CHAINS[chain];
+  const span = h("span", { class: "chain-ic", title: c ? c.label : String(chain), style: `color: ${c ? c.color : "var(--muted)"}` });
+  span.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true">${c ? c.svg
+    : '<circle cx="12" cy="12" r="8.5" fill="none" stroke="currentColor" stroke-width="2.4"/><circle cx="12" cy="12" r="2.6" fill="currentColor"/>'}</svg>`;
+  return span;
+}
+// token → { symbol, name } from the live market feed — positions/trades borrow it
+let symByToken = new Map();
+const tokenCell = (addr, title, chain, symbol) => h("td", {},
+  ...(chain ? [chainIcon(chain)] : []),
+  h("a", { class: "mono", href: explorerUrl(addr, chain), target: "_blank", rel: "noopener", title: title ?? addr },
+    symbol || addr.slice(0, 6) + "…" + addr.slice(-4)));
 const cssVar = (name) => getComputedStyle(document.body).getPropertyValue(name).trim();
 
 // SVG children MUST be created in the SVG namespace — document.createElement

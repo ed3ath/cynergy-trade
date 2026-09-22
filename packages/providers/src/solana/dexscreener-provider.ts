@@ -118,6 +118,9 @@ export class DexScreenerProvider extends AbstractProvider
       poolAgeMs: p.pairCreatedAt ? Date.now() - p.pairCreatedAt : 0,
       baseToken: p.baseToken.address,
       quoteToken: p.quoteToken.address ?? "",
+      // display-only passthrough (verified live 2026-09-22: present on pairs, absent on empty)
+      ...(p.baseToken.symbol ? { baseTokenSymbol: p.baseToken.symbol } : {}),
+      ...(p.baseToken.name ? { baseTokenName: p.baseToken.name } : {}),
       dex: p.dexId,
       estimatedSlippageBps50: 0,
       estimatedSlippageBps500: 0,

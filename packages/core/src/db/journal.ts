@@ -298,8 +298,10 @@ export class JournalRepository {
     Array<{
       id: string;
       tokenAddress: string;
+      chain: Chain;
       entryPrice: number;
       sizeUsd: number;
+      sizeTokens: string | null;
       pnlUsd: number;
       pnlPct: number;
       exitReason: string | null;
@@ -310,16 +312,18 @@ export class JournalRepository {
     const { rows } = await this.db.query<{
       id: string;
       token_address: string;
+      chain: string;
       entry_price: string;
       size_usd: string;
+      size_tokens: string | null;
       realized_pnl_usd: string;
       unrealized_pnl_pct: string | null;
       exit_reason: string | null;
       opened_at: Date;
       closed_at: Date | null;
     }>(
-      `SELECT id, token_address, entry_price, size_usd, realized_pnl_usd,
-              unrealized_pnl_pct, exit_reason, opened_at, closed_at
+      `SELECT id, token_address, chain, entry_price, size_usd, size_tokens,
+              realized_pnl_usd, unrealized_pnl_pct, exit_reason, opened_at, closed_at
        FROM positions
        WHERE status = 'CLOSED' AND mode = $1 AND chain = $2
        ORDER BY closed_at DESC NULLS LAST
@@ -329,8 +333,10 @@ export class JournalRepository {
     return rows.map((r) => ({
       id: r.id,
       tokenAddress: r.token_address,
+      chain: r.chain as Chain,
       entryPrice: parseFloat(r.entry_price),
       sizeUsd: parseFloat(r.size_usd),
+      sizeTokens: r.size_tokens,
       pnlUsd: parseFloat(r.realized_pnl_usd),
       pnlPct: r.unrealized_pnl_pct !== null ? parseFloat(r.unrealized_pnl_pct) : 0,
       exitReason: r.exit_reason,
