@@ -55,13 +55,13 @@ const opts = { marketConfig, freshnessConfig };
 
 describe("runBacktest", () => {
   it("enters on momentum, exits on TP1 (first take-profit level) with positive return", () => {
-    // 1.0 → +3.5%/min: entry row0(+slip), TP1 = entry*1.2 hit first
+    // 1.0 → +3.5%/min: entry row0(+slip), full-exit TP = entry*1.03 hit first
     const prices = Array.from({ length: 30 }, (_, i) => 1 + i * 0.035);
     const r = runBacktest([series("RISE", prices)], opts);
 
     expect(r.trades.length).toBeGreaterThanOrEqual(1);
     const t = r.trades[0]!;
-    expect(t.returnPct).toBeGreaterThan(4); // TP1 +5% minus slippage (policy: take profit early)
+    expect(t.returnPct).toBeGreaterThan(2); // +3% full-exit minus slippage (policy: take profit early, 2026-09-22)
     expect(t.reason).toMatch(/Take profit 1/);
     expect(r.winRate).toBe(1);
   });
