@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { AiVetoAgent, type AiCandidate } from "../ai-agent.js";
+import { AiVetoAgent, parseChatCompletion, type AiCandidate } from "../ai-agent.js";
 import { createLogger, type AIConfig } from "@autonomous-trader/shared";
 
 function candidate(): AiCandidate {
@@ -213,5 +213,50 @@ describe("AiVetoAgent", () => {
       .mockImplementation(async () => toolCallResponse("getMarketSnapshot", '{"token":"TokenXXX"}'));
     const agent = new AiVetoAgent(cfg(), createLogger({ t: "test" }), { getMarketSnapshot: vi.fn().mockResolvedValue({ priceUsd: 1 }) });
     expect((await agent.veto(candidate())).verdict).toBe("UNKNOWN");
+  });
+});
+
+describe("parseChatCompletion", () => {
+  it("parses plain JSON bodies", () => {
+    const r = parseChatCompletion('{"choices":[{"message":{"content":"hi"}}],"usage":{"prompt_tokens":1,"completion_tokens":2}}');
+    expect(r.choices?.[0]?.message?.content).toBe("hi");
+    expect(r.usage?.completion_tokens).toBe(2);
+  });
+
+  it("strips a trailing SSE terminator appended to a JSON body", () => {
+    const body = '{"choices":[{"message":{"content":"{\\"verdict\\":\\"REJECT\\"}"}}]}\n\ndata: [DONE]\n\n';
+    expect(parseChatCompletion(body).choices?.[0]?.message?.content).toBe('{"verdict":"REJECT"}');
+  });
+
+  it("folds an SSE chunk stream into one message with usage", () => {
+    const stream = [
+      'data: {"choices":[{"index":0,"delta":{"role":"assistant"}}]}',
+      'data: {"choices":[{"index":0,"delta":{"content":"{\\"ver"}}]}',
+      'data: {"choices":[{"index":0,"delta":{"content":"dict\\":\\"APPROVE\\"}"}}]}',
+      'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":9,"completion_tokens":7}}',
+      'data: [DONE]',
+    ].join("\n\n");
+    const r = parseChatCompletion(stream);
+    expect(r.choices?.[0]?.message?.content).toBe('{"verdict":"APPROVE"}');
+    expect(r.usage?.prompt_tokens).toBe(9);
+  });
+
+  it("merges streamed tool_calls by index", () => {
+    const stream = [
+      'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"getMarketSnapshot","arguments":""}}]}}]}',
+      'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\\"token\\":\\"A\\"}"}}]}}]}',
+      'data: [DONE]',
+    ].join("\n\n");
+    const tc = parseChatCompletion(stream).choices?.[0]?.message?.tool_calls;
+    expect(tc?.[0]).toMatchObject({ id: "call_1" });
+    expect(tc?.[0]?.function).toMatchObject({ name: "getMarketSnapshot", arguments: '{"token":"A"}' });
+  });
+
+  it("yields empty content for a stream of unparseable chunks", () => {
+    expect(parseChatCompletion("data: not-json\n\ndata: [DONE]").choices?.[0]?.message?.content).toBe("");
+  });
+
+  it("throws on an unparseable JSON body", () => {
+    expect(() => parseChatCompletion("{bad json")).toThrow();
   });
 });

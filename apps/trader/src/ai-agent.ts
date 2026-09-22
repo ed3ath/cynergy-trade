@@ -86,6 +86,57 @@ export interface ChatResponse {
   usage?: { prompt_tokens?: number; completion_tokens?: number };
 }
 
+/**
+ * Parse an OpenAI-compatible chat-completions body. Tolerates two gateway
+ * quirks seen in the wild (local multi-model routers): `data: [DONE]`
+ * appended after a plain JSON body, and SSE chunk streams returned even
+ * when `stream` was not requested. Throws when nothing parseable remains —
+ * callers map that to UNKNOWN/empty per the failure discipline.
+ */
+export function parseChatCompletion(text: string): ChatResponse {
+  const trimmed = text.trim();
+  if (trimmed.startsWith("{")) {
+    // some gateways append the SSE terminator to non-stream JSON bodies
+    const end = trimmed.lastIndexOf("}");
+    return JSON.parse(end > 0 ? trimmed.slice(0, end + 1) : trimmed) as ChatResponse;
+  }
+  // SSE stream: fold deltas into one completion
+  const msg: ChatMessage = { role: "assistant", content: "" };
+  const toolCalls: { id: string; type: "function"; function: { name: string; arguments: string } }[] = [];
+  let usage: ChatResponse["usage"];
+  for (const line of trimmed.split(/\r?\n/)) {
+    if (!line.startsWith("data:")) continue;
+    const payload = line.slice(5).trim();
+    if (payload === "" || payload === "[DONE]") continue;
+    let chunk: {
+      choices?: { delta?: { content?: string | null; tool_calls?: { index?: number; id?: string; function?: { name?: string; arguments?: string } }[] } }[];
+      usage?: ChatResponse["usage"];
+    };
+    try {
+      chunk = JSON.parse(payload);
+    } catch {
+      continue;
+    }
+    if (chunk.usage) usage = chunk.usage;
+    const delta = chunk.choices?.[0]?.delta;
+    if (!delta) continue;
+    if (typeof delta.content === "string") msg.content = (msg.content ?? "") + delta.content;
+    for (const tc of delta.tool_calls ?? []) {
+      const i = tc.index ?? toolCalls.length;
+      const slot = toolCalls[i] ?? { id: "", type: "function" as const, function: { name: "", arguments: "" } };
+      if (tc.id) slot.id = tc.id;
+      if (tc.function?.name) slot.function.name += tc.function.name;
+      if (tc.function?.arguments) slot.function.arguments += tc.function.arguments;
+      toolCalls[i] = slot;
+    }
+  }
+  const filled = toolCalls.filter((tc) => tc.function.name.length > 0);
+  if (filled.length > 0) msg.tool_calls = filled;
+  const response: ChatResponse = { choices: [{ message: msg }] };
+  if (usage) response.usage = usage;
+  return response;
+}
+
 export interface ToolDef {
   type: "function";
   function: { name: keyof AiToolContext; description: string; parameters: Record<string, unknown> };
@@ -216,7 +267,9 @@ export class AiVetoAgent {
         body: JSON.stringify({
           model: this.cfg.model,
           temperature: 0,
-          max_tokens: 200,
+          // reasoning models spend tokens on thinking before the JSON —
+          // 200 truncated every verdict to empty content (finish_reason length)
+          max_tokens: 2000,
           messages,
           ...this.toolField(),
         }),
@@ -225,7 +278,7 @@ export class AiVetoAgent {
         this.log.warn("AI veto call failed", { status: res.status, token });
         throw new Error(`HTTP ${res.status}`);
       }
-      return (await res.json()) as ChatResponse;
+      return parseChatCompletion(await res.text());
     } finally {
       clearTimeout(timer);
     }

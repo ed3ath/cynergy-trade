@@ -14,7 +14,7 @@
  */
 import { CHAIN_VALUES, type AIConfig, type Chain, type Logger } from "@autonomous-trader/shared";
 import type { AiCandidate, AiToolContext, ChatMessage, ChatResponse } from "./ai-agent.js";
-import { TOOL_DEFS, type ToolDef } from "./ai-agent.js";
+import { TOOL_DEFS, type ToolDef, parseChatCompletion } from "./ai-agent.js";
 import { AiBudget } from "./ai-budget.js";
 
 export interface AiAction {
@@ -213,7 +213,8 @@ export class AiTraderAgent {
         body: JSON.stringify({
           model: this.cfg.model,
           temperature: 0,
-          max_tokens: 600,
+          // reasoning models spend tokens on thinking before the actions JSON
+          max_tokens: 4000,
           messages,
           ...this.toolField(),
         }),
@@ -222,7 +223,7 @@ export class AiTraderAgent {
         this.log.warn("AI trader call failed", { status: res.status });
         throw new Error(`HTTP ${res.status}`);
       }
-      return (await res.json()) as ChatResponse;
+      return parseChatCompletion(await res.text());
     } finally {
       clearTimeout(timer);
     }
