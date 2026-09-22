@@ -12,6 +12,7 @@
  * 7. Momentum failure
  */
 import {
+  copytradeProfileFor,
   generatePositionId,
   type Position,
   type ExecutionResult,
@@ -47,7 +48,9 @@ export class PositionManager {
     private readonly maxPositionAgeMs = 2 * 60 * 60 * 1000, // 2h time stop — no profit thesis after this, exit
   ) {}
 
-  /** Open a new position from a confirmed execution result. */
+  /** Open a new position from a confirmed execution result. Multiple
+   *  concurrent positions per token are allowed — they key by generated id
+   *  and stay separated by strategyId (copytrade-scalp vs core etc.). */
   openPosition(
     result: ExecutionResult,
     intent: TradeIntent,
@@ -55,6 +58,7 @@ export class PositionManager {
     takeProfit1?: number,
     takeProfit2?: number,
     trailingStopPct?: number,
+    timeStopMs?: number,
   ): Position {
     const id = generatePositionId();
     const entryPrice = result.executedPrice;
@@ -81,6 +85,7 @@ export class PositionManager {
     if (takeProfit1 !== undefined)    position.takeProfit1      = takeProfit1;
     if (takeProfit2 !== undefined)    position.takeProfit2      = takeProfit2;
     if (trailingStopPct !== undefined) position.trailingStopPct = trailingStopPct;
+    if (timeStopMs !== undefined)     position.timeStopMs       = timeStopMs;
     if (result.txSignature)           position.entryTxSignature = result.txSignature;
 
     const sm = new PositionStateMachine("OPEN");
@@ -242,7 +247,12 @@ export class PositionManager {
 
     // ── 6. Time stop ──────────────────────────────────────────────────────────
     const ageMs = input.timestampMs - position.openedAt.getTime();
-    if (ageMs >= this.maxPositionAgeMs) {
+    // copy-trade scalps run a much shorter clock; strategyId fallback covers
+    // positions restored from the journal (in-memory timeStopMs is lost)
+    const maxAgeMs = position.timeStopMs
+      ?? copytradeProfileFor(position.strategyId)?.timeStopMs
+      ?? this.maxPositionAgeMs;
+    if (ageMs >= maxAgeMs) {
       return {
         reason: `Time stop: position held ${(ageMs / 3_600_000).toFixed(1)}h`,
         urgency: "NORMAL",

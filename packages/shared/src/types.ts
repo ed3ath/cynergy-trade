@@ -289,6 +289,10 @@ export interface Position {
   drawdownFromPeakPct: number;
   entryTxSignature?: string;
   exitReason?: string;
+  /** Per-position time stop (ms) — copy-trade scalp/short-term profiles.
+   *  Not persisted (no DB column): restored positions fall back to the
+   *  strategyId→profile lookup, then the 2h manager default. */
+  timeStopMs?: number;
   openedAt: Date;
   updatedAt: Date;
 }

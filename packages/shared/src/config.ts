@@ -122,6 +122,36 @@ export const AIConfigSchema = z.object({
 });
 export type AIConfig = z.infer<typeof AIConfigSchema>;
 
+// ─── Copy-trade config ────────────────────────────────────────────────────────
+/** Copy-trade from tracked wallets (`COPYTRADE_ENABLED`, `COPYTRADE_WALLETS`).
+ *  The AI layer analyzes each tracked buy before entry: veto mode gates the
+ *  deterministic copy with the veto agent; auto mode feeds the signal to the
+ *  autonomous trader, which ENTERs/TIGHTENs/EXITs through the same guards.
+ *  Requires AI_ENABLED=true (the "analyze" step is the AI's job).
+ *  ponytail: wallets are curated by the operator (pick high-PNL traders from
+ *  tonviewer/DEX explorers) — auto-discovery needs a trader-PNL leaderboard
+ *  API, which TON has none of free; add a discovery provider (e.g. GMGN for
+ *  solana, verify with verify-provider-api) when going multi-chain live. */
+export const CopyTradeConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  /** Followed wallets: "addr:label,addr2" — address may be EQ… or 0:hex raw. */
+  wallets: z.array(z.object({
+    address: z.string().min(1),
+    label: z.string().optional(),
+  })).default([]),
+  /** Default profile for entries when the AI doesn't pick one. */
+  profile: z.enum(["scalp", "shortterm"]).default("shortterm"),
+  /** Wallet-activity poll interval (seconds) — TonAPI free tier is ~1 rps shared. */
+  pollSec: z.number().int().positive().default(30),
+  /** Max concurrent copy positions per token (scalp + shortterm can stack). */
+  maxSlotsPerToken: z.number().int().positive().default(2),
+  /** Max total copy positions across chains. */
+  maxPositions: z.number().int().positive().default(3),
+  /** Swaps older than this are not worth copying (seconds). */
+  maxSignalAgeSec: z.number().int().positive().default(600),
+});
+export type CopyTradeConfig = z.infer<typeof CopyTradeConfigSchema>;
+
 // ─── Root config ──────────────────────────────────────────────────────────────
 export const AppConfigSchema = z.object({
   trading: z.object({
@@ -140,6 +170,7 @@ export const AppConfigSchema = z.object({
   providers: ProvidersConfigSchema.default({}),
   execution: ExecutionConfigSchema.default({}),
   ai: AIConfigSchema.default({}),
+  copytrade: CopyTradeConfigSchema.default({}),
   database: z.object({
     url: z.string().default("postgresql://trader:trader@localhost:5432/trader"),
     poolMin: z.number().int().positive().default(2),
@@ -222,6 +253,23 @@ export function loadConfig(overrides: Partial<Record<string, unknown>> = {}): Ap
       maxOpenPositions: parseInt(process.env["AI_MAX_OPEN_POSITIONS"] ?? "3", 10),
       tokenCooldownSec: parseInt(process.env["AI_TOKEN_COOLDOWN_SEC"] ?? "600", 10),
       liveEnabled: process.env["AI_LIVE_ENABLED"] !== "false",
+    },
+    copytrade: {
+      enabled: process.env["COPYTRADE_ENABLED"] === "true",
+      wallets: (process.env["COPYTRADE_WALLETS"] ?? "")
+        .split(",").map((s) => s.trim()).filter((s) => s.length > 0)
+        .map((entry) => {
+          // raw "wc:hex" form carries its own colon before any ":label"
+          const raw = entry.match(/^(-?\d+:[0-9a-fA-F]+)(?::(.+))?$/);
+          if (raw) return raw[2] !== undefined ? { address: raw[1], label: raw[2] } : { address: raw[1] };
+          const i = entry.indexOf(":");
+          return i > 0 ? { address: entry.slice(0, i), label: entry.slice(i + 1) } : { address: entry };
+        }),
+      profile: (process.env["COPYTRADE_PROFILE"] ?? "shortterm") as "scalp" | "shortterm",
+      pollSec: parseInt(process.env["COPYTRADE_POLL_SEC"] ?? "30", 10),
+      maxSlotsPerToken: parseInt(process.env["COPYTRADE_MAX_SLOTS_PER_TOKEN"] ?? "2", 10),
+      maxPositions: parseInt(process.env["COPYTRADE_MAX_POSITIONS"] ?? "3", 10),
+      maxSignalAgeSec: parseInt(process.env["COPYTRADE_MAX_SIGNAL_AGE_SEC"] ?? "600", 10),
     },
     database: {
       url: process.env["DATABASE_URL"] ?? "postgresql://trader:trader@localhost:5432/trader",

@@ -32,7 +32,8 @@ export interface AiVerdict {
 }
 
 /** Narrow structural view of a TokenCandidate — keeps this module decoupled
- *  from the scanner package (type-only compatibility). */
+ *  from the scanner package (type-only compatibility). Scanner candidates
+ *  carry scores; copy-trade candidates carry signalContext instead. */
 export interface AiCandidate {
   tokenAddress: string;
   chain: Chain;
@@ -40,7 +41,10 @@ export interface AiCandidate {
   liquidity?: { liquidityUsd: number; poolAgeMs: number; estimatedSlippageBps500: number; liquidityChange5m: number };
   holders?: { totalHolders: number; top10Pct: number; creatorPct: number; insiderPct: number; sniperPct: number; bundlerPct: number };
   security?: { status: string; score: number; reasons: { message: string }[] };
-  scores: { opportunity: number; security: number; momentum: number; risk: number };
+  scores?: { opportunity: number; security: number; momentum: number; risk: number };
+  /** Where this candidate came from, when not a scanner candidate —
+   *  e.g. "copy-trade BUY by tracked wallet X". */
+  signalContext?: string;
 }
 
 /** Read-only data tools the agent may call. All optional — only the ones the
@@ -279,10 +283,11 @@ export class AiVetoAgent {
   }
 
   private payload(c: AiCandidate): Record<string, unknown> {
-    const m = c.market, l = c.liquidity, h = c.holders, s = c.security;
+    const m = c.market, l = c.liquidity, h = c.holders, s = c.security, sc = c.scores;
     return {
       token: c.tokenAddress,
       chain: c.chain,
+      signalContext: c.signalContext,
       priceUsd: m?.priceUsd,
       marketCapUsd: m?.marketCapUsd,
       volumeUsd: { m5: m?.volumeUsd5m, h1: m?.volumeUsd1h },
@@ -291,7 +296,7 @@ export class AiVetoAgent {
       liquidity: l ? { usd: l.liquidityUsd, poolAgeMin: Math.round(l.poolAgeMs / 60_000), slippageBps500: l.estimatedSlippageBps500, change5mPct: l.liquidityChange5m } : undefined,
       holders: h ? { total: h.totalHolders, top10Pct: h.top10Pct, creatorPct: h.creatorPct, insiderPct: h.insiderPct, sniperPct: h.sniperPct, bundlerPct: h.bundlerPct } : undefined,
       security: s ? { status: s.status, score: s.score, reasons: s.reasons.map((r) => r.message) } : undefined,
-      strategyScores: { opportunity: c.scores.opportunity, security: c.scores.security, momentum: c.scores.momentum, risk: c.scores.risk },
+      strategyScores: sc ? { opportunity: sc.opportunity, security: sc.security, momentum: sc.momentum, risk: sc.risk } : undefined,
     };
   }
 }
