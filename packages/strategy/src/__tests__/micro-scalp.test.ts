@@ -52,7 +52,7 @@ describe("MicroScalpStrategy", () => {
     expect(d.decision).toBe("ENTER");
     expect(d.confidence).toBeGreaterThan(0.3);
     expect(d.suggestedStopLoss).toBeCloseTo(0.001 * 0.93, 9);
-    expect(d.suggestedTakeProfit1).toBeCloseTo(0.001 * 1.04, 9);
+    expect(d.suggestedTakeProfit1).toBeCloseTo(0.001 * 1.03, 9);
     expect(d.suggestedTrailingStopPct).toBe(6);
   });
 

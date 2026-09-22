@@ -124,9 +124,9 @@ export class FreshMomentumStrategy implements TradingStrategy {
     // Policy: always take profit, never hold long. First TP hit exits the full
     // position (execution sells position.sizeUsd on any exit signal), so TP1 is
     // the effective full take-profit. Geometry roughly matches Micro Scalp
-    // (-7/+4/+10) — momentum gets slightly more room.
+    // (-7/+3/+10) — momentum gets slightly more room.
     const stopLoss = price * 0.90;      // -10% hard stop — loss prevention over ride-through
-    const takeProfit1 = price * 1.05;   // +5% take profit (full exit)
+    const takeProfit1 = price * 1.03;   // +3% take profit (full exit)
     const takeProfit2 = price * 1.10;   // +10% backstop target
 
     invalidation.push(

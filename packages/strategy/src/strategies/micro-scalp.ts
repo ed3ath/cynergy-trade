@@ -3,7 +3,7 @@
  *
  * Short-horizon momentum burst: catch a 1-minute price+volume impulse on an
  * already-screened token, ride it a few percent, exit fast on tight levels
- * (-7% stop, +4%/+10% TP ladder, 6% trail). Complements Fresh Momentum,
+ * (-7% stop, +3%/+10% TP, 6% trail). Complements Fresh Momentum,
  * which needs sustained multi-window momentum — this fires on the burst itself.
  *
  * Two data paths (same pattern as fresh-momentum):
@@ -130,7 +130,7 @@ export class MicroScalpStrategy implements TradingStrategy {
       ],
       suggestedEntryPrice: price,
       suggestedStopLoss: price * 0.93,      // -7% hard stop
-      suggestedTakeProfit1: price * 1.04,   // +4% first partial
+      suggestedTakeProfit1: price * 1.03,   // +3% take profit (full exit)
       suggestedTakeProfit2: price * 1.10,   // +10% second partial
       suggestedTrailingStopPct: 6,          // 6% trail from peak
       evaluatedAt: new Date(),
