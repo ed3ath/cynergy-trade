@@ -2,7 +2,7 @@
 
 Where this is going, in dependency order. Dates are triggers ("when X"), not
 calendar promises — the bot runs 24/7 and the data decides the pace.
-State as of 2026-09-16. See `docs/architecture.md` for how it works.
+State as of 2026-09-22. See `docs/architecture.md` for how it works.
 
 ## Now — running
 
@@ -14,11 +14,24 @@ State as of 2026-09-16. See `docs/architecture.md` for how it works.
   split. EVM SHADOW needs a quote aggregator (0x/1inch) — not wired yet.
 - Snapshot dataset accumulating in `token_market_snapshots` since 2026-09-12 —
   this is backtester fuel, every hour of runtime pays into Phase B
+- Running config since 2026-09-22: `TRADING_CHAIN=ton` only (Solana run
+  stopped 2026-09-16; EVM chains not enabled in `.env`)
 
 ## Phase A — Prove the edge (passive, costs nothing)
 
 Let the paper run answer: **does FreshMomentum have positive expectancy on
 TON at all?**
+
+Progress audit 2026-09-22 (all numbers TON unless noted):
+
+- A1: 10/30 closed paper trades, total +$18.17 (avg +$1.82/trade, 2 open).
+  Pace ~1.7 trades/day → gate in ~2 weeks. Positive so far, sample too small.
+- A2: 4/30 evaluated shadow signals (TON; plus 7 historical from the stopped
+  Solana run). Pace ~2.5/day → gate in ~2 weeks.
+- A3: **not Phase-B-ready.** TON: 18 tokens / 3,858 snapshots since 2026-09-16,
+  13 tokens with ≥20 samples vs the ≥50-token bar (~640 rows/day; new-token
+  inflow is the constraint, not samples per token). Stale Solana set:
+  383 tokens but only 2 with ≥20 samples, nothing since 2026-09-16.
 
 | # | Item | Done when |
 |---|---|---|
@@ -42,7 +55,7 @@ Replay recorded snapshots; stop tuning strategy parameters on vibes.
    data 2026-09-20: 2 trades / 8 tokens, +9.79%/trade. Holders/security are
    neutral placeholders (ponytail) until those gates need to bite.
 2. FreshMomentum parameter sweep on recorded data — **gated on A3 data bar**
-   (≥50 tokens × ≥20 samples; ~9 now)
+   (≥50 tokens × ≥20 samples; 13 as of 2026-09-22)
 3. Regime conditioning (does the edge exist only in RISK_ON?)
 4. Every strategy change after this point ships with a backtest delta
 
