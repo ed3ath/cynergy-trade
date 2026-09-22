@@ -41,6 +41,9 @@ export interface AiAction {
 export interface AiTraderCycleResult {
   actions: AiAction[];
   summary: string;
+  /** Refined lessons-learned-from-losses. Host persists these and feeds them
+   *  back every cycle — the agent's long-term memory. */
+  lessons?: string[];
 }
 
 /** Pure data built by the host — no live references, no I/O. */
@@ -64,7 +67,28 @@ export interface AiTraderSnapshot {
     ageMin: number;
   }[];
   candidates: AiCandidate[];
-  recentTrades: { token: string; pnlUsd: number; pnlPct: number }[];
+  recentTrades: {
+    token: string;
+    chain: Chain;
+    strategyId: string;
+    pnlUsd: number;
+    pnlPct: number;
+    exitReason: string | null;
+    heldMin: number;
+  }[];
+  /** Aggregate over the last 200 closed trades — what keeps you honest. */
+  lossStats?: {
+    sampleSize: number;
+    winRatePct: number;
+    avgWinPct: number;
+    avgLossPct: number;
+    expectancyPct: number;
+    lossReasons: { reason: string; count: number; avgPnlPct: number }[];
+    weakStrategies: { strategyId: string; trades: number; winRatePct: number }[];
+    repeatLoserTokens: string[];
+  };
+  /** Your own persisted lessons from past losses — read, apply, refine. */
+  lessons?: string[];
   /** Recent swaps by tracked high-PNL wallets (copy-trade feed), newest last.
    *  BUYs are candidate entries for the agent's own analysis; SELLs of held
    *  tokens are take-profit hints. */
@@ -81,6 +105,7 @@ export interface AiTraderSnapshot {
 const MAX_TOOL_ROUNDS = 3;        // ponytail: raise if the agent needs deeper research
 const TOOL_RESULT_MAX_CHARS = 4_000;
 const TEXT_MAX = 300;
+const LESSON_MAX = 200;
 const STOP_LOSS_PCT: [number, number] = [1, 50];
 const TAKE_PROFIT_PCT: [number, number] = [1, 200];
 const TRAILING_PCT: [number, number] = [1, 50];
@@ -88,23 +113,33 @@ const TRAILING_PCT: [number, number] = [1, 50];
 const SYSTEM_PROMPT =
   "You are an autonomous micro-cap token trader on Solana/TON/EVM chains. " +
   "Each cycle you receive a portfolio snapshot: capital, open positions with live PnL, " +
-  "top scanner candidates with quantitative scores, recent closed trades, and — when " +
-  "copy-trade is on — recent swaps by tracked high-PNL wallets. " +
+  "top scanner candidates with quantitative scores, recent closed trades with exit reasons, " +
+  "lossStats (aggregate over your last 200 closed trades), lessons (your own persisted " +
+  "memory of what past losses taught you), and — when copy-trade is on — recent swaps by " +
+  "tracked high-PNL wallets. " +
   "You may call the provided read-only data tools to refresh data on any token before acting. " +
   "You respond with a list of actions, executed only after the deterministic risk engine approves them. " +
-  "Rules: never ENTER a token you already hold (copy-trade slots excepted — you may add ONE extra, " +
-  "smaller position on a held token when copying a tracked wallet's fresh BUY); every ENTER needs a " +
+  "Rules: never ENTER a token your own ai-autonomous slot already holds — core-strategy positions " +
+  "on it are fine, each strategy holds its own slot (copy-trade slots excepted too: you may add ONE " +
+  "extra, smaller position when copying a tracked wallet's fresh BUY); every ENTER needs a " +
   "concrete evidence-based thesis — a tracked wallet's BUY is a lead to verify (tools), not a reason " +
   "by itself, and their SELL of a token you hold is a take-profit hint; you may EXIT any position or " +
   "TIGHTEN its exits (raise stop, lower take-profit/trailing) but you can " +
   "never loosen risk; prefer fewer, higher-conviction actions; an empty action list is a valid answer. " +
+  "LEARNING — the goal is >=80% win rate with positive net PnL. Exits are asymmetric (take-profit " +
+  "near +3%, hard stop -10%), so one loss erases roughly three wins: refuse marginal entries that " +
+  "match your loss lessons, and use EXIT/TIGHTEN early on positions resembling past losers. " +
+  "Every cycle, apply your lessons; when recentTrades/lossStats reveal a new loss pattern, or a " +
+  "lesson no longer holds, return an updated lessons array (max 10, each one short actionable rule " +
+  "with its evidence, replacing stale ones). Omit lessons when nothing changed. " +
   "Respond with STRICT JSON only, no markdown fences: " +
   '{"actions":[{"type":"ENTER","tokenAddress":"...","chain":"solana|ton|bsc|base|polygon|arbitrum",' +
   '"confidence":0.0,"rationale":"one short sentence","profile":"scalp|shortterm",' +
   '"suggestedStopLossPct":10,"suggestedTakeProfitPct":5},' +
   '{"type":"EXIT","tokenAddress":"...","chain":"...","positionId":"...","rationale":"..."},' +
   '{"type":"TIGHTEN","tokenAddress":"...","chain":"...","positionId":"...","tightenStopLossPct":5,' +
-  '"tightenTp1Pct":3,"tightenTrailingPct":8}],"summary":"one sentence market read"}';
+  '"tightenTp1Pct":3,"tightenTrailingPct":8}],"summary":"one sentence market read",' +
+  '"lessons":["short actionable rule learned from a loss"]}';
 
 export class AiTraderAgent {
   constructor(
@@ -231,7 +266,7 @@ export class AiTraderAgent {
     if (!content) return null;
     const match = content.match(/\{[\s\S]*\}/); // first-to-last {...} block
     if (!match) return null;
-    let parsed: { actions?: unknown; summary?: unknown };
+    let parsed: { actions?: unknown; summary?: unknown; lessons?: unknown };
     try {
       parsed = JSON.parse(match[0]);
     } catch {
@@ -245,10 +280,18 @@ export class AiTraderAgent {
       if (a) actions.push(a);
       if (actions.length >= this.cfg.maxActionsPerCycle) break;
     }
-    return {
+    const result: AiTraderCycleResult = {
       actions,
       summary: typeof parsed.summary === "string" ? parsed.summary.slice(0, TEXT_MAX) : "",
     };
+    if (Array.isArray(parsed.lessons)) {
+      const lessons = parsed.lessons
+        .filter((l): l is string => typeof l === "string" && l.trim().length > 0)
+        .map((l) => l.trim().slice(0, LESSON_MAX))
+        .slice(0, 10);
+      if (lessons.length > 0) result.lessons = lessons;
+    }
+    return result;
   }
 
   private parseAction(raw: unknown): AiAction | null {

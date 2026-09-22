@@ -67,6 +67,7 @@ import {
   type ExecutionRouter,
 } from "@autonomous-trader/execution";
 import { PositionManager, type ExitSignal } from "@autonomous-trader/position";
+import { summarizeClosedTrades } from "./loss-stats.js";
 
 // ─── Bootstrap ────────────────────────────────────────────────────────────────
 import { join } from "node:path";
@@ -477,6 +478,25 @@ if (aiTrader) {
   });
 }
 
+// ── AI loss memory — lessons persisted in the journal, fed back every cycle.
+// The agent owns the content; the host only sanitizes, stores, replays it.
+// ponytail: upgrade to per-chain lessons + embedding retrieval when the flat
+// list (max 10) stops fitting the loss patterns the agent needs to recall.
+const AI_LESSONS_KEY = "ai:loss-lessons";
+let aiLessons: string[] = [];
+if (db && aiTrader) {
+  try {
+    const raw = await journal.getSystemState(AI_LESSONS_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as unknown;
+      if (Array.isArray(parsed)) {
+        aiLessons = parsed.filter((l): l is string => typeof l === "string").slice(0, 10);
+      }
+    }
+  } catch { /* fresh start on corrupt state */ }
+  if (aiLessons.length > 0) log.info("AI loss lessons restored", { count: aiLessons.length });
+}
+
 // ─── Copy-trade tracker (COPYTRADE_WALLETS) ───────────────────────────────────
 // TON-only (TonApiClient wallet feed). Runs whenever wallets are configured —
 // observe mode records every tracked-wallet swap (JSONL + Activity + dashboard
@@ -697,15 +717,15 @@ async function decisionCycle(rt: ChainRuntime): Promise<void> {
 
   for (const candidate of candidates.slice(0, 5)) { // cap per cycle
     try {
-      // Never re-enter a token core strategies already hold — re-entry goes
-      // through the scanner's CLOSED→WATCHLIST cooldown path after the
-      // position exits. Without this, a restart re-seed re-promotes held
-      // tokens and pyramids. Copy-trade slots don't block: scalp/shortterm
-      // positions may stack with a core position on the same token (aggregate
+      // One position per (token, strategy) — different strategies may hold
+      // the same token concurrently, each in its own slot (aggregate token
       // exposure still capped by the risk engine's maxTokenExposureUsd gate).
-      if (rt.positions.getOpenPositions().some(
-        (p) => p.tokenAddress === candidate.tokenAddress && !copytradeProfileFor(p.strategyId),
-      )) continue;
+      // Same-strategy re-entry goes through the scanner's CLOSED→WATCHLIST
+      // cooldown path after the position exits; the per-strategy check also
+      // stops a restart re-seed from re-promoting into a pyramid.
+      const heldStrategies = new Set(rt.positions.getOpenPositions()
+        .filter((p) => p.tokenAddress === candidate.tokenAddress)
+        .map((p) => p.strategyId));
 
       const strategyCtx: StrategyContext = {
         candidate,
@@ -720,7 +740,9 @@ async function decisionCycle(rt: ChainRuntime): Promise<void> {
       };
 
       const ensembleResult = strategyEngine.evaluate(strategyCtx);
-      if (!ensembleResult.anyEnter || !ensembleResult.bestDecision) {
+      const enterDecisions = ensembleResult.enterDecisions.filter(
+        (d) => !heldStrategies.has(d.strategyId));
+      if (enterDecisions.length === 0) {
         for (const d of ensembleResult.decisions) {
           const reason = (d.risks.length ? d.risks : d.reasons).join("; ");
           log.info("Strategy did not enter candidate", {
@@ -735,8 +757,6 @@ async function decisionCycle(rt: ChainRuntime): Promise<void> {
         }
         continue;
       }
-
-      const strategyDecision = ensembleResult.bestDecision;
 
       // AI veto — cached per token, UNKNOWN on any failure (never blocks trading)
       if (aiAgent) {
@@ -757,27 +777,33 @@ async function decisionCycle(rt: ChainRuntime): Promise<void> {
       // Shadow-track every ENTER signal at decision price — signal quality
       // evidence independent of risk approval or execution (spec §43)
       if (candidate.market && candidate.market.priceUsd > 0) {
-        await rt.shadow.record({
-          tokenAddress: candidate.tokenAddress,
-          strategyId: strategyDecision.strategyId,
-          decisionPrice: candidate.market.priceUsd,
-          confidence: strategyDecision.confidence,
-          decidedAt: new Date(),
-        });
+        for (const d of enterDecisions) {
+          await rt.shadow.record({
+            tokenAddress: candidate.tokenAddress,
+            strategyId: d.strategyId,
+            decisionPrice: candidate.market.priceUsd,
+            confidence: d.confidence,
+            decidedAt: new Date(),
+          });
+        }
       }
 
-      // Journal the strategy decision with full feature snapshot for reproducibility
-      await journal.recordStrategyDecision(strategyDecision, candidate.features, candidate.chain);
+      // One risk-gated entry per ENTER decision — multiple strategies may open
+      // their own slot on the same token; the risk engine caps the aggregate.
+      for (const strategyDecision of enterDecisions) {
+        // Journal the strategy decision with full feature snapshot for reproducibility
+        await journal.recordStrategyDecision(strategyDecision, candidate.features, candidate.chain);
 
-      const entered = await executeEntry(rt, {
-        tokenAddress: candidate.tokenAddress,
-        chain: candidate.chain,
-        features: candidate.features,
-        decision: strategyDecision,
-        currentPrice: candidate.market?.priceUsd ?? 0.000001,
-        markEntered: true,
-      });
-      if (entered) performanceTrades++;
+        const entered = await executeEntry(rt, {
+          tokenAddress: candidate.tokenAddress,
+          chain: candidate.chain,
+          features: candidate.features,
+          decision: strategyDecision,
+          currentPrice: candidate.market?.priceUsd ?? 0.000001,
+          markEntered: true,
+        });
+        if (entered) performanceTrades++;
+      }
 
     } catch (err) {
       log.error("Decision cycle error for candidate", {
@@ -942,7 +968,9 @@ async function executeEntry(
       weeklyLossUsd: Math.max(0, -rt.portfolio.weeklyPnlUsd),
       currentDrawdownPct: rt.portfolio.currentDrawdownPct,
       existingTokenExposureUsd: rt.positions.getTokenExposureUsd(input.tokenAddress),
-      existingStrategyExposureUsd: 0,
+      existingStrategyExposureUsd: rt.positions.getOpenPositions()
+        .filter((p) => p.strategyId === input.decision.strategyId)
+        .reduce((sum, p) => sum + p.sizeUsd, 0),
     });
 
     // Journal intent + risk decision BEFORE execution (crash-safe audit trail)
@@ -1046,13 +1074,33 @@ async function runAiCycle(): Promise<void> {
     const openPositions = runtimes.flatMap((rt) => rt.positions.getOpenPositions());
     const candidates: AiCandidate[] = runtimes.flatMap((rt) =>
       rt.scanner.getTradeCandidates().slice(0, 5));
-    const recentTrades = db
+    // Closed-trade window: 200 per chain feeds the loss stats, the newest 20
+    // ride along as recentTrades for concrete pattern-matching.
+    const closed = db
       ? (await Promise.all(runtimes.map((rt) =>
-          (journal as JournalRepository).getClosedTrades(config.trading.mode, rt.chain, 10))))
+          (journal as JournalRepository).getClosedTrades(config.trading.mode, rt.chain, 200))))
           .flat()
-          .map((r) => ({ token: r.tokenAddress, pnlUsd: r.pnlUsd, pnlPct: r.pnlPct }))
-          .slice(0, 20)
+          .sort((a, b) => (b.closedAt?.getTime() ?? 0) - (a.closedAt?.getTime() ?? 0))
       : [];
+    const recentTrades = closed.slice(0, 20).map((r) => ({
+      token: r.tokenAddress,
+      chain: r.chain,
+      strategyId: r.strategyId,
+      pnlUsd: Math.round(r.pnlUsd * 100) / 100,
+      pnlPct: r.pnlPct,
+      exitReason: r.exitReason,
+      heldMin: r.closedAt
+        ? Math.max(0, Math.round((r.closedAt.getTime() - r.openedAt.getTime()) / 60_000))
+        : 0,
+    }));
+    const lossStats = summarizeClosedTrades(closed.map((r) => ({
+      token: r.tokenAddress,
+      strategyId: r.strategyId,
+      pnlUsd: r.pnlUsd,
+      pnlPct: r.pnlPct,
+      exitReason: r.exitReason,
+      ...(r.closedAt ? { heldMin: (r.closedAt.getTime() - r.openedAt.getTime()) / 60_000 } : {}),
+    })));
 
     const snapshot: AiTraderSnapshot = {
       portfolio: {
@@ -1076,6 +1124,8 @@ async function runAiCycle(): Promise<void> {
       candidates,
       recentTrades,
     };
+    if (lossStats.sampleSize > 0) snapshot.lossStats = lossStats;
+    if (aiLessons.length > 0) snapshot.lessons = aiLessons;
     const copySignals = copyTracker?.recentActivity(10).map((s) => ({
       token: s.swap.jettonMaster,
       chain: "ton" as const,
@@ -1086,10 +1136,23 @@ async function runAiCycle(): Promise<void> {
     }));
     if (copySignals && copySignals.length > 0) snapshot.copySignals = copySignals;
 
-    const { actions, summary } = await aiTrader.propose(snapshot);
+    const { actions, summary, lessons } = await aiTrader.propose(snapshot);
     log.info("AI trader cycle", { actions: actions.length, summary });
     for (const action of actions) {
       await runAiAction(action, candidates);
+    }
+
+    // Persist refined lessons — the agent's long-term memory across restarts
+    if (lessons && lessons.length > 0 && JSON.stringify(lessons) !== JSON.stringify(aiLessons)) {
+      aiLessons = lessons;
+      if (db) {
+        void journal.setSystemState(AI_LESSONS_KEY, JSON.stringify(lessons))
+          .then(() => log.info("AI loss lessons updated", { count: lessons.length }))
+          .catch((err: unknown) => log.warn("AI lessons persist failed", { error: (err as Error).message }));
+      }
+      activity.publish("info", `ai learned · ${lessons.length} lesson(s) stored`, {
+        data: { lessons: lessons.length },
+      });
     }
   } catch (err) {
     log.warn("AI trader cycle failed", { error: (err as Error).message });
@@ -1109,10 +1172,10 @@ async function runAiAction(action: AiAction, candidates: AiCandidate[]): Promise
     const rt = runtimes.find((r) => r.chain === action.chain);
     if (!rt) return skip(`chain ${action.chain} not trading`);
     if (emergency.isStopNewEntries()) return skip("new entries stopped");
-    // Copy-trade slots don't count as "held": the AI may add ONE extra position
-    // on a token held only under copytrade-* (its own or core positions block).
+    // One slot per (token, strategy): core strategies holding the token don't
+    // block the AI's own slot — only an existing ai-autonomous position does.
     const held = rt.positions.getOpenPositions().filter((p) => p.tokenAddress === action.tokenAddress);
-    if (held.some((p) => !copytradeProfileFor(p.strategyId))) return skip("already held");
+    if (held.some((p) => p.strategyId === AI_STRATEGY_ID)) return skip("ai slot already held");
     if (onCooldown) return skip("token cooldown");
     // Profiles are for copy-trade slots only: honored when the token traces to a
     // fresh (age-filtered) tracked-wallet BUY, not just because the model asked —

@@ -299,6 +299,7 @@ export class JournalRepository {
       id: string;
       tokenAddress: string;
       chain: Chain;
+      strategyId: string;
       entryPrice: number;
       sizeUsd: number;
       sizeTokens: string | null;
@@ -313,6 +314,7 @@ export class JournalRepository {
       id: string;
       token_address: string;
       chain: string;
+      strategy_id: string;
       entry_price: string;
       size_usd: string;
       size_tokens: string | null;
@@ -322,7 +324,7 @@ export class JournalRepository {
       opened_at: Date;
       closed_at: Date | null;
     }>(
-      `SELECT id, token_address, chain, entry_price, size_usd, size_tokens,
+      `SELECT id, token_address, chain, strategy_id, entry_price, size_usd, size_tokens,
               realized_pnl_usd, unrealized_pnl_pct, exit_reason, opened_at, closed_at
        FROM positions
        WHERE status = 'CLOSED' AND mode = $1 AND chain = $2
@@ -334,6 +336,7 @@ export class JournalRepository {
       id: r.id,
       tokenAddress: r.token_address,
       chain: r.chain as Chain,
+      strategyId: r.strategy_id,
       entryPrice: parseFloat(r.entry_price),
       sizeUsd: parseFloat(r.size_usd),
       sizeTokens: r.size_tokens,

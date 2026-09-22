@@ -9,6 +9,10 @@ export interface StrategyEnsembleResult {
   tokenAddress: string;
   decisions: StrategyDecision[];
   bestDecision?: StrategyDecision;
+  /** All ENTER decisions, highest confidence first. Multiple strategies may
+   *  hold the same token concurrently — one position per strategyId, aggregate
+   *  token exposure still capped by the risk engine. */
+  enterDecisions: StrategyDecision[];
   anyEnter: boolean;
   highestConfidence: number;
   evaluatedAt: Date;
@@ -37,6 +41,7 @@ export class StrategyEngine {
       return {
         tokenAddress: ctx.candidate.tokenAddress,
         decisions: [],
+        enterDecisions: [],
         anyEnter: false,
         highestConfidence: 0,
         evaluatedAt: new Date(),
@@ -64,13 +69,16 @@ export class StrategyEngine {
       }
     }
 
-    const enterDecisions = decisions.filter((d) => d.decision === "ENTER");
-    const bestDecision = enterDecisions.sort((a, b) => b.confidence - a.confidence)[0];
+    const enterDecisions = decisions
+      .filter((d) => d.decision === "ENTER")
+      .sort((a, b) => b.confidence - a.confidence);
+    const bestDecision = enterDecisions[0];
     const highestConfidence = bestDecision?.confidence ?? 0;
 
     const result: StrategyEnsembleResult = {
       tokenAddress: ctx.candidate.tokenAddress,
       decisions,
+      enterDecisions,
       anyEnter: enterDecisions.length > 0,
       highestConfidence,
       evaluatedAt: new Date(),
