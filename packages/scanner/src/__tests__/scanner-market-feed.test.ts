@@ -47,6 +47,7 @@ function liqSnap(token: string, liquidityUsd: number): LiquiditySnapshot {
     tokenAddress: token, chain: "ton", poolAddress: "EQpool", liquidityUsd,
     liquidityBase: 0, liquidityQuote: 0, poolAgeMs: 3_600_000,
     baseToken: token, quoteToken: "USDC", dex: "test-dex",
+    baseTokenSymbol: "TST", baseTokenName: "Test Token",
     estimatedSlippageBps50: 0, estimatedSlippageBps500: 0, estimatedSlippageBps5000: 0,
     liquidityChange5m: 0, liquidityChange15m: 0,
     observedAt: new Date(), provider: "test", confidence: 0.9,
@@ -123,6 +124,8 @@ describe("Scanner.getMarketFeed", () => {
     expect(good.marketCapUsd).toBe(100_000);
     expect(good.holders).toBe(100);
     expect(good.dex).toBe("test-dex");
+    expect(good.symbol).toBe("TST");
+    expect(good.name).toBe("Test Token");
     expect(good.rejection).toBeNull();
     expect(good.observedAt).toBeTypeOf("string");
 

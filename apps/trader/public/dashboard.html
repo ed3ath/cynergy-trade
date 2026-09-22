@@ -626,9 +626,10 @@ function renderStatus(status) {
         h("th", { class: "num", text: "Value" }), h("th", { class: "num", text: "PnL %" }),
         h("th", { class: "num", text: "PnL $" }), h("th", { text: "Opened" })));
       for (const x of status.positions) {
+        const sym = symByToken.get(x.tokenAddress)?.symbol;
         tbl.append(h("tr", {},
-          tokenCell(x.tokenAddress),
-          h("td", { class: "num mono", text: fmtTokens(x.sizeTokens), title: "tokens held" }),
+          tokenCell(x.tokenAddress, sym ? sym + " · " + x.tokenAddress : undefined, x.chain, sym),
+          h("td", { class: "num mono", text: fmtTokens(x.sizeTokens) + (sym ? " " + sym : ""), title: "tokens held" }),
           h("td", { class: "num", text: fmtUsd(x.sizeUsd + x.unrealizedPnlUsd), title: `entry ${fmtUsd(x.sizeUsd)}` }),
           h("td", { class: "num", text: fmtPct(x.unrealizedPnlPct), style: `color: var(--${x.unrealizedPnlPct >= 0 ? "good" : "critical"})` }),
           h("td", { class: "num", text: fmtUsd(x.unrealizedPnlUsd) }),
@@ -696,12 +697,15 @@ function renderTrades(trades) {
   }
   const tbl = h("table");
   tbl.append(h("tr", {},
-    h("th", { text: "Token" }), h("th", { class: "num", text: "Entry" }),
-    h("th", { class: "num", text: "Size" }), h("th", { class: "num", text: "PnL $" }),
+    h("th", { text: "Token" }), h("th", { class: "num", text: "Tokens" }),
+    h("th", { class: "num", text: "Entry" }), h("th", { class: "num", text: "Size" }),
+    h("th", { class: "num", text: "PnL $" }),
     h("th", { class: "num", text: "PnL %" }), h("th", { text: "Exit" }), h("th", { text: "Closed" })));
   for (const t of trades) {
+    const sym = symByToken.get(t.tokenAddress)?.symbol;
     tbl.append(h("tr", {},
-      tokenCell(t.tokenAddress),
+      tokenCell(t.tokenAddress, sym ? sym + " · " + t.tokenAddress : undefined, t.chain, sym),
+      h("td", { class: "num mono", text: fmtTokens(t.sizeTokens) + (sym ? " " + sym : ""), title: "tokens traded · size at entry " + fmtUsd(t.sizeUsd) }),
       h("td", { class: "num", text: fmtPrice(t.entryPrice) }),
       h("td", { class: "num", text: fmtUsd(t.sizeUsd) }),
       h("td", { class: "num", text: fmtUsd(t.pnlUsd), style: `color: var(--${t.pnlUsd >= 0 ? "good" : "critical"})` }),
@@ -852,6 +856,7 @@ function renderMarket(rows) {
     el.replaceChildren(h("div", { class: "empty", text: "No tokens tracked yet — waiting for discovery" }));
     return;
   }
+  symByToken = new Map(rows.map((r) => [r.token, r]));
   const pct = (n) => n == null
     ? h("td", { class: "num", text: "—" })
     : h("td", { class: "num", text: fmtPct(n), style: `color: var(--${n >= 0 ? "good" : "critical"})` });
@@ -870,7 +875,9 @@ function renderMarket(rows) {
       onclick: () => showTokenDetail(r.token),
       onkeydown: (e) => { if (e.key === "Enter") showTokenDetail(r.token); },
     },
-      tokenCell(r.token, r.token + (r.dex ? " · " + r.dex : "")),
+      tokenCell(r.token,
+        (r.name ? r.name + " · " : "") + r.token + (r.dex ? " · " + r.dex : ""),
+        r.chain, r.symbol),
       num(fmtPrice(r.priceUsd)),
       pct(r.priceChange5m), pct(r.priceChange1h), pct(r.priceChange24h),
       num(fmtCompact(r.volume5mUsd)), num(fmtCompact(r.volume1hUsd)), num(fmtCompact(r.volume24hUsd)),
@@ -979,10 +986,12 @@ function renderTokenDetail(d, focus = true) {
   }
   el.replaceChildren(
     close,
-    h("div", { style: "display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap" },
-      h("a", { class: "mono", href: explorerUrl(d.token), target: "_blank", rel: "noopener", text: d.token }),
+    h("div", { style: "display: flex; align-items: center; gap: 10px; flex-wrap: wrap" },
+      chainIcon(d.chain),
+      d.symbol ? h("span", { text: d.symbol, style: "font-weight: 600" }) : null,
+      h("a", { class: "mono", href: explorerUrl(d.token, d.chain), target: "_blank", rel: "noopener", text: d.token }),
       h("span", { text: d.status, style: "font-weight: 600" }),
-      h("span", { text: `score ${d.score} · tracked ${relTime(d.firstSeenAt)} · ${hist.length} price points`, style: "color: var(--ink-2)" })),
+      h("span", { text: `score ${d.score}${d.name ? " · " + d.name : ""} · tracked ${relTime(d.firstSeenAt)} · ${hist.length} price points`, style: "color: var(--ink-2)" })),
     hist.length >= 2
       ? h("div", { style: "margin-top: 6px" }, spark, sparkCap)
       : h("div", { class: "empty", text: "no persisted price history yet — the sparkline starts after the first snapshot minute" }),
