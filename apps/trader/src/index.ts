@@ -1083,7 +1083,18 @@ async function runAiAction(action: AiAction, candidates: AiCandidate[]): Promise
     const held = rt.positions.getOpenPositions().filter((p) => p.tokenAddress === action.tokenAddress);
     if (held.some((p) => !copytradeProfileFor(p.strategyId))) return skip("already held");
     if (onCooldown) return skip("token cooldown");
-    const profile = action.profile ? COPYTRADE_PROFILES[action.profile] : null;
+    // Profiles are for copy-trade slots only: honored when the token traces to a
+    // fresh (age-filtered) tracked-wallet BUY, not just because the model asked —
+    // otherwise `profile:"scalp"` on any token would bypass AI_MAX_OPEN_POSITIONS.
+    const nowSec = Date.now() / 1000;
+    const trackedBuys = new Set(
+      (copyTracker?.recentActivity(50) ?? [])
+        .filter((s) => s.swap.side === "BUY" && nowSec - s.swap.timestampSec <= config.copytrade.maxSignalAgeSec)
+        .map((s) => s.swap.jettonMaster),
+    );
+    const profile = action.profile && trackedBuys.has(action.tokenAddress)
+      ? COPYTRADE_PROFILES[action.profile]
+      : null;
     if (profile) {
       const copySlots = held.filter((p) => copytradeProfileFor(p.strategyId)).length;
       if (copySlots >= config.copytrade.maxSlotsPerToken) {

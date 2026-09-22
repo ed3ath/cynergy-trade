@@ -62,7 +62,8 @@ export async function getWalletSwaps(
     for (const action of ev.actions ?? []) {
       const p = action.JettonSwap;
       if (action.type !== "JettonSwap" || !p) continue;
-      if (normalizeTonAddress(p.user_wallet?.address ?? "") !== walletRaw) continue;
+      if (!p.user_wallet?.address) continue; // malformed action — skip, don't kill the wallet's poll
+      if (normalizeTonAddress(p.user_wallet.address) !== walletRaw) continue;
 
       const inIsTon = num(p.ton_in) > 0 || isTonProxy(p.jetton_master_in);
       const outIsTon = num(p.ton_out) > 0 || isTonProxy(p.jetton_master_out);
