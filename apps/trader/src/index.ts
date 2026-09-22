@@ -1521,11 +1521,19 @@ for (const rt of runtimes) await rt.scanner.start();
 log.info("Scanner started — beginning decision loop");
 
 // Seed tokens enter the exact same pipeline as discovered ones (TRADER_SEED_TOKENS).
-// Seeds apply to every active chain — an address that doesn't exist on a chain
-// simply never produces market data and washes out during observation.
+// Seeds apply to every active chain whose address format they match — a TON seed
+// on BSC can never fetch data and would churn "no price" retries until the 4h
+// candidate archive, burning the shared DexScreener per-IP rate budget.
+function seedMatchesChain(addr: string, chain: Chain): boolean {
+  if (chain === "ton") return /^(EQ|UQ)[A-Za-z0-9_-]{46}$/.test(addr);
+  if (isEvmChain(chain)) return /^0x[0-9a-fA-F]{40}$/.test(addr);
+  return true; // solana: base58, no strict check
+}
 if (config.trading.seedTokens.length > 0) {
   for (const rt of runtimes) {
-    for (const t of config.trading.seedTokens) rt.scanner.seedToken(t, rt.chain);
+    for (const t of config.trading.seedTokens) {
+      if (seedMatchesChain(t, rt.chain)) rt.scanner.seedToken(t, rt.chain);
+    }
   }
   log.info("Seeded tokens into scanner", { tokens: config.trading.seedTokens, chains: config.trading.chains });
 }
