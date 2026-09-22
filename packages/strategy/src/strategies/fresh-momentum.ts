@@ -11,12 +11,38 @@
 import type { StrategyDecision } from "@autonomous-trader/shared";
 import type { TradingStrategy, StrategyContext } from "../engine/strategy-interface.js";
 
+/**
+ * Entry-threshold overrides for backtesting sweeps (roadmap B2). Live uses the
+ * defaults — exit geometry is NOT parameterized (owner policy: +3% full exit,
+ * -10% stop, never widened).
+ */
+export interface FreshMomentumParams {
+  /** Positive-signal count required to enter (default 2). */
+  signalCountMin?: number;
+  /** Minimum buy/sell ratio; below → skip (default 1.0). */
+  buySellRatioMin?: number;
+  /** 1h momentum % needed for the no-ratio backfill reason (default 1). */
+  momentumMin1h?: number;
+  /** Minimum opportunity score (default 60). */
+  minOpportunityScore?: number;
+}
+
 export class FreshMomentumStrategy implements TradingStrategy {
   readonly id = "strategy-fresh-momentum";
   readonly version = "1.0.0";
   readonly name = "Fresh Momentum";
   readonly description = "Identifies tokens with organic buying momentum in healthy market structure";
-  readonly minimumOpportunityScore = 60;
+  readonly minimumOpportunityScore: number;
+  private readonly signalCountMin: number;
+  private readonly buySellRatioMin: number;
+  private readonly momentumMin1h: number;
+
+  constructor(params: FreshMomentumParams = {}) {
+    this.minimumOpportunityScore = params.minOpportunityScore ?? 60;
+    this.signalCountMin = params.signalCountMin ?? 2;
+    this.buySellRatioMin = params.buySellRatioMin ?? 1.0;
+    this.momentumMin1h = params.momentumMin1h ?? 1;
+  }
 
   evaluate(ctx: StrategyContext): StrategyDecision {
     const { candidate, marketRegime } = ctx;
@@ -93,7 +119,7 @@ export class FreshMomentumStrategy implements TradingStrategy {
     if (buySellRatio >= 1.5) reasons.push(`Buy/sell ratio: ${buySellRatio.toFixed(2)}`);
     if (buyVolumePct >= 60) reasons.push(`Buy volume: ${buyVolumePct.toFixed(0)}%`);
 
-    if (buySellRatio < 1.0) {
+    if (buySellRatio < this.buySellRatioMin) {
       return this.skip("Sellers dominating", ctx);
     }
 
@@ -103,14 +129,14 @@ export class FreshMomentumStrategy implements TradingStrategy {
     // window; threshold lowered to 1% accordingly. Replace with native 5m/buy counts
     // once a TON provider exposes them.
     if (features["buy_sell_ratio"] == null) {
-      if (priceChange1h >= 1) reasons.push(`1h momentum +${priceChange1h.toFixed(1)}%`);
+      if (priceChange1h >= this.momentumMin1h) reasons.push(`1h momentum +${priceChange1h.toFixed(1)}%`);
       if (holders.totalHolders >= 1000) {
         reasons.push(`Broad holder base: ${holders.totalHolders.toLocaleString("en-US")}`);
       }
     }
 
     // ── Positive signal count ─────────────────────────────────────────────────
-    if (reasons.length < 2) {
+    if (reasons.length < this.signalCountMin) {
       return this.skip("Insufficient positive signals", ctx);
     }
 

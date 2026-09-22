@@ -59,8 +59,12 @@ Replay recorded snapshots; stop tuning strategy parameters on vibes.
    live feature/filter/scoring/strategy/exit code paths. First run on real
    data 2026-09-20: 2 trades / 8 tokens, +9.79%/trade. Holders/security are
    neutral placeholders (ponytail) until those gates need to bite.
-2. FreshMomentum parameter sweep on recorded data — **gated on A3 data bar**
-   (≥50 tokens × ≥20 samples; 13 as of 2026-09-22)
+2. FreshMomentum parameter sweep — ✅ harness shipped 2026-09-23
+   (`pnpm exec tsx packages/backtest/src/sweep.ts` — entry gates only, exits
+   policy-locked; ranks by MEDIAN return, avg is fat-tail fantasy). A3 bar met
+   09-23: 82 tokens ≥20 samples across ton/bsc/base (46/20/16). First run:
+   every combo median-negative (-0.4 to -1.0%), win rate 37–45% — no entry
+   combo shows an edge yet; re-run as data accumulates before any verdict.
 3. Regime conditioning (does the edge exist only in RISK_ON?) — recording
    started 2026-09-23: every regime transition persists to `regime_history`
    (migration 009); the backtest CLI takes `--regime` for fixed-regime runs.

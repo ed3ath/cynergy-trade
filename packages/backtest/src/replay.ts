@@ -27,6 +27,7 @@ import {
   computeSecurityFeatures, mergeFeatures, scoreCandidate, runFilters,
 } from "@autonomous-trader/scanner";
 import { FreshMomentumStrategy } from "@autonomous-trader/strategy";
+import type { FreshMomentumParams } from "@autonomous-trader/strategy";
 import { PositionManager } from "@autonomous-trader/position";
 import type { ExecutionRouter } from "@autonomous-trader/execution";
 
@@ -64,6 +65,8 @@ export interface BacktestOptions {
   marketConfig: MarketConfig;
   freshnessConfig: DataFreshnessConfig;
   regime?: MarketRegime;
+  /** FreshMomentum entry-threshold overrides (B2 sweep). Defaults = live behavior. */
+  strategyParams?: FreshMomentumParams;
   portfolioValueUsd?: number;
   entrySlippageBps?: number;  // default 50 — paper router charges maxSlippage/2
   exitSlippageBps?: number;
@@ -76,7 +79,7 @@ const noopLogger: Logger = {
 };
 
 export function runBacktest(series: TokenSeries[], opts: BacktestOptions): BacktestResult {
-  const strategy = new FreshMomentumStrategy();
+  const strategy = new FreshMomentumStrategy(opts.strategyParams ?? {});
   const entrySlip = (opts.entrySlippageBps ?? 50) / 10_000;
   const exitSlip = (opts.exitSlippageBps ?? 50) / 10_000;
   const portfolioValueUsd = opts.portfolioValueUsd ?? 10_000;
@@ -116,6 +119,10 @@ export function runBacktest(series: TokenSeries[], opts: BacktestOptions): Backt
         candidate.scores = scoreCandidate(candidate);
 
         if (runFilters(candidate, opts.marketConfig).length > 0) continue;
+
+        // Mirror the live engine's score gate (strategy-engine filters on
+        // minimumOpportunityScore before evaluate)
+        if (candidate.scores.opportunity < strategy.minimumOpportunityScore) continue;
 
         const decision = strategy.evaluate({
           candidate,
