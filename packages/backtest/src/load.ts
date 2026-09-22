@@ -105,6 +105,7 @@ function mapMarket(r: MarketRow, chain: Chain): MarketSnapshot {
     priceChange1m: num(r.price_change_1m), priceChange5m: num(r.price_change_5m),
     priceChange15m: num(r.price_change_15m), priceChange1h: num(r.price_change_1h), priceChange24h: num(r.price_change_24h),
     buyCount1m: num(r.buy_count_1m), sellCount1m: num(r.sell_count_1m),
+    buyCount5m: 0, sellCount5m: 0, buyCount1h: 0, sellCount1h: 0, // never persisted — absent = 0
     buyVolumeUsd1m: num(r.buy_volume_usd_1m), sellVolumeUsd1m: num(r.sell_volume_usd_1m),
     uniqueBuyers1m: num(r.unique_buyers_1m), uniqueSellers1m: num(r.unique_sellers_1m),
     tradeCount24h: num(r.trade_count_24h), uniqueTraders24h: 0,
