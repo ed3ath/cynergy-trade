@@ -360,10 +360,12 @@
       <h2>Book</h2>
       <button id="tab-positions" class="on">Positions</button>
       <button id="tab-trades">Trades</button>
+      <button id="tab-traders">Traders</button>
     </div>
     <div class="pbody">
       <div id="positions"></div>
       <div id="trades" hidden></div>
+      <div id="traders" hidden></div>
     </div>
   </section>
 
@@ -688,13 +690,14 @@ function renderStatus(status) {
   }
 }
 
-// Book tabs — both panes stay rendered, only visibility flips
-for (const [tab, pane] of [["tab-positions", "positions"], ["tab-trades", "trades"]]) {
+// Book tabs — panes stay rendered, only visibility flips
+const BOOK_TABS = [["tab-positions", "positions"], ["tab-trades", "trades"], ["tab-traders", "traders"]];
+for (const [tab, pane] of BOOK_TABS) {
   $(tab).addEventListener("click", () => {
-    $("tab-positions").classList.toggle("on", tab === "tab-positions");
-    $("tab-trades").classList.toggle("on", tab === "tab-trades");
-    $("positions").hidden = pane !== "positions";
-    $("trades").hidden = pane !== "trades";
+    for (const [t, p] of BOOK_TABS) {
+      $(t).classList.toggle("on", t === tab);
+      $(p).hidden = p !== pane;
+    }
   });
 }
 
@@ -710,6 +713,7 @@ async function refreshStatus() {
 let history = [];
 let lastTrades = null; // last /trades frame — re-rendered on currency switch
 let lastMarket = null; // last /market frame — same
+let lastCopyTrades = null; // last /copytrade frame — same
 async function refreshHistory() {
   try {
     history = await fetch("/history").then((r) => r.json());
@@ -723,6 +727,10 @@ async function refreshHistory() {
     lastMarket = await fetch("/market").then((r) => r.json());
   } catch { /* keep last frame */ }
   renderMarket(lastMarket);
+  try {
+    lastCopyTrades = await fetch("/copytrade").then((r) => r.json());
+  } catch { /* keep last frame (endpoint absent on older daemon) */ }
+  renderTraders(lastCopyTrades);
   void refreshOpenDetail();
 }
 function renderTrades(trades) {
@@ -753,6 +761,39 @@ function renderTrades(trades) {
   }
   el.replaceChildren(tbl);
 }
+// ── /copytrade → tracked-wallet swap records (Traders tab, TON feed) ────────
+function renderTraders(data) {
+  const el = $("traders");
+  if (!data || data.mode === "off") {
+    el.replaceChildren(h("div", { class: "empty",
+      text: "No tracked wallets — add COPYTRADE_WALLETS to .env (TON addresses, optional :label)" }));
+    return;
+  }
+  if (!data.trades.length) {
+    el.replaceChildren(h("div", { class: "empty", text: "No swaps from the tracked wallets yet" }));
+    return;
+  }
+  const side = (s) => h("td", {},
+    h("span", { class: "pill " + (s === "BUY" ? "pill-good" : "pill-bad"), text: s }));
+  const tbl = h("table");
+  tbl.append(h("tr", {},
+    h("th", { text: "Time" }), h("th", { text: "Wallet" }), h("th", { text: "Side" }),
+    h("th", { text: "Token" }), h("th", { class: "num", text: "Amount" }),
+    h("th", { class: "num", text: "≈ TON" }), h("th", { text: "DEX" })));
+  for (const r of data.trades) {
+    const sym = r.symbol || symByToken.get(r.token)?.symbol;
+    tbl.append(h("tr", {},
+      h("td", { class: "t", text: new Date(r.at).toLocaleTimeString(), title: new Date(r.at).toLocaleString() }),
+      h("td", {}, h("a", { class: "mono", href: explorerUrl(r.wallet, "ton"), target: "_blank", rel: "noopener",
+        title: r.wallet + (r.label ? " · " + r.label : "") }, r.label)),
+      side(r.side),
+      tokenCell(r.token, (sym ? sym + " · " : "") + r.token, "ton", sym),
+      h("td", { class: "num mono", text: fmtTokens(r.amount) + (sym ? " " + sym : "") }),
+      h("td", { class: "num", text: r.tonAmount != null ? r.tonAmount.toFixed(2) : "—" }),
+      h("td", { text: r.dex || "—" })));
+  }
+  el.replaceChildren(tbl);
+}
 // ── /activity → structured decision events (SSE, instant per event) ─────────
 const ACT_CAP = 200;
 const actBuf = [];
@@ -766,12 +807,17 @@ const ACT_KIND = {
   exit:   { label: "EXIT",  cls: "signal" },
   info:   { label: "INFO",  cls: "info"   },
 };
+// token reference for log/activity rows: symbol when the market feed knows the
+// token, else the shortened address. Title always carries the full address.
+const tokRef = (addr) => {
+  const known = symByToken.get(addr);
+  const text = known?.symbol || addr.slice(0, 6) + "…" + addr.slice(-4);
+  return h("a", { class: "mono", href: explorerUrl(addr), target: "_blank", rel: "noopener",
+    title: (known?.name ? known.name + " · " : "") + addr }, text);
+};
 function actRow(e) {
   const k = ACT_KIND[e.kind] ?? ACT_KIND.info;
-  const tok = e.token
-    ? h("a", { class: "mono", href: explorerUrl(e.token), target: "_blank", rel: "noopener" },
-        e.token.slice(0, 6) + "…" + e.token.slice(-4))
-    : null;
+  const tok = e.token ? tokRef(e.token) : null;
   const score = e.data && e.data.score != null ? " · score " + Number(e.data.score).toFixed(0) : "";
   // newest row on top: activity renders descending, live events prepend
   return h("div", { class: "row" + (e.kind === "skip" || e.kind === "cycle" ? " dim" : "") },
@@ -840,7 +886,8 @@ function parseLogLine(line) {
 function logRow(e) {
   const cls = logClass(e);
   let m = e.msg || String(e);
-  if (e.token) m += " " + e.token.slice(0, 6) + "…" + e.token.slice(-4);
+  // symbol beats the shortened address whenever the market feed knows the token
+  if (e.token) m += " " + (symByToken.get(e.token)?.symbol || e.token.slice(0, 6) + "…" + e.token.slice(-4));
   if (e.reason) m += " — " + e.reason;
   else if (e.decision) m += " — " + e.decision;
   return h("div", { class: "row" + (cls === "skip" || cls === "reject" ? " dim" : "") },

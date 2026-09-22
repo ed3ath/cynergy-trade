@@ -28,7 +28,8 @@ export class CopyTradeTracker {
   /** `${eventId}:${side}:${jettonMaster}` → seen. Bounded ring. */
   private readonly seen = new Set<string>();
   private readonly seenOrder: string[] = [];
-  /** Last N swaps across all wallets, newest last — AI snapshot context. */
+  /** Last N swaps across all wallets, newest last — AI snapshot context and
+   *  the dashboard's trader-records tab (observe mode records without trading). */
   private readonly recent: CopyTradeSignal[] = [];
 
   constructor(
@@ -36,6 +37,9 @@ export class CopyTradeTracker {
     private readonly cfg: CopyTradeConfig,
     private readonly log: Logger,
     private readonly now: () => number = Date.now,
+    /** Audit hook — fired once for EVERY fresh swap (BUY and SELL), including
+     *  in observe mode. JSONL/actvity wiring lives in index.ts. */
+    private readonly onRecord?: (s: CopyTradeSignal) => void,
   ) {}
 
   /** Poll all followed wallets. Returns fresh BUY signals (age-filtered). */
@@ -75,7 +79,8 @@ export class CopyTradeTracker {
           swap,
         };
         this.recent.push(signal);
-        if (this.recent.length > 50) this.recent.shift();
+        if (this.recent.length > 200) this.recent.shift();
+        this.onRecord?.(signal);
 
         const ageSec = this.now() / 1000 - swap.timestampSec;
         if (swap.side === "BUY" && ageSec <= this.cfg.maxSignalAgeSec) {

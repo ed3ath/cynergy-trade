@@ -49,6 +49,7 @@ import {
   type RegimeResult,
 } from "@autonomous-trader/core";
 import { readFileSync } from "node:fs";
+import { appendFile } from "node:fs/promises";
 import {
   createProviderRegistry,
   isEvmChain,
@@ -474,30 +475,58 @@ if (aiTrader) {
   });
 }
 
-// ─── Copy-trade tracker (COPYTRADE_ENABLED — AI-gated wallet following) ───────
-// TON-only (TonApiClient wallet feed). veto mode: deterministic copy of tracked
-// BUYs after the veto agent's second opinion. auto mode: signals only feed the
-// AI trader snapshot — the agent ENTERs/TIGHTENs/EXITs through its own guards.
+// ─── Copy-trade tracker (COPYTRADE_WALLETS) ───────────────────────────────────
+// TON-only (TonApiClient wallet feed). Runs whenever wallets are configured —
+// observe mode records every tracked-wallet swap (JSONL + Activity + dashboard
+// Traders tab) without trading. Acting on BUYs still needs COPYTRADE_ENABLED
+// plus AI veto mode (deterministic copy after the veto agent's opinion); in
+// auto mode signals only feed the AI trader snapshot.
 const { CopyTradeTracker } = await import("./copytrade-tracker.js");
 const tonRt = runtimes.find((r) => r.chain === "ton");
-const copyTracker = config.copytrade.enabled
-    && config.ai.enabled && config.ai.autonomy !== "off"
-    && config.copytrade.wallets.length > 0 && tonRt?.providers.tonApiClient
+// append-only audit trail — survives restarts, unlike the in-memory ring
+const copytradeLogPath = join(
+  fileURLToPath(new URL(".", import.meta.url)), "../../../logs/copytrade-trades.jsonl",
+);
+const copyTradeCanAct = config.copytrade.enabled && config.ai.enabled
+  && config.ai.autonomy !== "off" && config.ai.autonomy !== "auto";
+const copyTracker = config.copytrade.wallets.length > 0 && tonRt?.providers.tonApiClient
   ? new CopyTradeTracker(
       tonRt.providers.tonApiClient,
       config.copytrade,
       log.child({ component: "copytrade" }),
+      Date.now,
+      (s) => {
+        // fire-and-forget: recording must never block or kill the poll loop
+        void appendFile(copytradeLogPath, JSON.stringify({
+          at: new Date(s.swap.timestampSec * 1000).toISOString(),
+          wallet: s.wallet, label: s.label,
+          side: s.swap.side, token: s.swap.jettonMaster, symbol: s.swap.symbol,
+          amount: s.swap.jettonAmount, tonAmount: s.swap.tonAmount,
+          dex: s.swap.dex, eventId: s.swap.eventId,
+        }) + "\n").catch((err) => log.warn("copytrade jsonl append failed", { error: (err as Error).message }));
+        const size = s.swap.jettonAmount >= 1000
+          ? s.swap.jettonAmount.toPrecision(3) : String(Math.round(s.swap.jettonAmount * 100) / 100);
+        activity.publish(
+          "info",
+          `${s.label} ${s.swap.side} ${size} ${s.swap.symbol || "jetton"}`
+            + (s.swap.tonAmount ? ` (≈${s.swap.tonAmount.toFixed(2)} TON)` : "")
+            + (s.swap.dex ? ` via ${s.swap.dex}` : ""),
+          { token: s.swap.jettonMaster },
+        );
+      },
     )
   : null;
 if (config.copytrade.enabled && !copyTracker) {
-  log.warn("copy-trade requested but inactive — needs AI_ENABLED=true, AI_AUTONOMY=veto|auto, TRADING_CHAIN with ton, COPYTRADE_WALLETS, tonapi enabled");
+  log.warn("copy-trade requested but inactive — needs TRADING_CHAIN with ton, COPYTRADE_WALLETS, tonapi enabled");
+}
+if (config.copytrade.enabled && copyTracker && !copyTradeCanAct) {
+  log.warn("copy-trade observe-only — trading needs AI_ENABLED=true, AI_AUTONOMY=veto (auto: agent decides)");
 }
 if (copyTracker) {
-  log.info("Copy-trade tracker enabled", {
+  log.info("Copy-trade wallet tracker running", {
     wallets: config.copytrade.wallets.length,
-    profile: config.copytrade.profile,
+    mode: copyTradeCanAct ? "trade" : "observe",
     pollSec: config.copytrade.pollSec,
-    autonomy: config.ai.autonomy,
   });
 }
 
@@ -1220,8 +1249,9 @@ const copyTicksPerPoll = Math.max(1, Math.round(config.copytrade.pollSec / 10));
  *  BUY is copied deterministically after the veto agent's second opinion. */
 async function runCopyCycle(): Promise<void> {
   if (!copyTracker) return;
+  // poll always runs — observe mode records swaps even when trading is off
   const signals = await copyTracker.poll();
-  if (config.ai.autonomy === "auto") return;
+  if (!copyTradeCanAct) return; // observe-only, or auto mode (agent decides)
   if (emergency.isStopNewEntries()) return;
   for (const signal of signals) await runCopyEntry(signal);
 }
@@ -1513,6 +1543,20 @@ const httpServerOpts: Parameters<typeof startHttpServer>[0] = {
     return { ...detail, history };
   },
   dashboardHtml: loadDashboardHtml(),
+  // trader records: recent tracked-wallet swaps, newest first (observe or trade)
+  getCopyTrades: () => ({
+    mode: copyTracker ? (copyTradeCanAct ? "trade" : "observe") : "off",
+    wallets: config.copytrade.wallets.map((w) => ({ address: w.address, label: w.label })),
+    trades: copyTracker
+      ? copyTracker.recentActivity(200).slice().reverse().map((s) => ({
+        at: s.swap.timestampSec * 1000,
+        wallet: s.wallet, label: s.label,
+        side: s.swap.side, token: s.swap.jettonMaster, symbol: s.swap.symbol,
+        amount: s.swap.jettonAmount, tonAmount: s.swap.tonAmount ?? null,
+        dex: s.swap.dex,
+      }))
+      : [],
+  }),
   logTailer,
   activityBus: activity,
 };

@@ -89,4 +89,33 @@ describe("CopyTradeTracker", () => {
     const t = new CopyTradeTracker(failing, cfg, createLogger({}));
     await expect(t.poll()).resolves.toHaveLength(0);
   });
+
+  it("onRecord fires for every fresh swap — BUYs and SELLs, even stale ones", async () => {
+    const now = 5_000_000;
+    const sell: TonAccountEvent = {
+      event_id: "s1", timestamp: now / 1000 - 30, lt: 150, is_scam: false, in_progress: false,
+      actions: [{
+        type: "JettonSwap",
+        JettonSwap: {
+          dex: "dedust",
+          amount_in: 2_000_000_000, amount_out: "",
+          ton_out: 20_000_000_000,
+          user_wallet: { address: WALLET },
+          jetton_master_in: { address: TOKEN_RAW, symbol: "UTYA", decimals: 9 },
+        },
+      }],
+    };
+    const recorded: string[] = [];
+    const t = new CopyTradeTracker(
+      makeClient([]), cfg, createLogger({}), () => now,
+      (s) => recorded.push(`${s.swap.side}:${s.swap.symbol}`),
+    );
+    await t.poll(); // baseline
+
+    const staleBuy = swapEvent("b1", 140, now / 1000 - 3_600); // stale → no signal, still recorded
+    (t as unknown as { client: TonApiClient }).client = makeClient([staleBuy, sell]);
+    expect(await t.poll()).toHaveLength(0); // SELL + stale BUY emit no trade signals
+    expect(recorded).toEqual(["BUY:UTYA", "SELL:UTYA"]);
+    expect(t.recentActivity()).toHaveLength(2);
+  });
 });
