@@ -153,6 +153,11 @@ describe("GoPlusEvmHoldersProvider", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1); // was 3 with withRetry — burns budget
     expect(r.totalHolders).toBe(0);
     expect(r.confidence).toBe(0.1);
+
+    // circuit breaker open: a different token makes NO HTTP call while cooling down
+    const cooling = await p.getHolderSnapshot("0xdead", "bsc").catch(() => null);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(cooling?.totalHolders ?? 0).toBe(0);
   });
 
   it("security + holders for the same token share one HTTP call (in-flight dedupe)", async () => {

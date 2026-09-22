@@ -52,9 +52,10 @@ interface GoPlusEvmResult {
 // double-fetch per token (TTL cache + in-flight sharing), never retry
 // (a retry burns budget and the next scanner cycle re-fetches anyway), and
 // cache only successes — failures fail through to UNKNOWN, never SAFE.
-const GPLUS_MIN_INTERVAL_MS = 2_100;   // ~28/min, headroom under 30
+const GPLUS_MIN_INTERVAL_MS = 2_500;   // ~24/min, headroom under 30
 const GPLUS_CACHE_TTL_MS = 5 * 60_000; // holder counts / top-10 move slowly
 const GPLUS_CACHE_MAX = 1_000;
+const GPLUS_BREAKOUT_MS = [30_000, 60_000, 120_000, 300_000]; // escalating lockout
 // ponytail: solana/goplus-provider.ts hits the same per-IP 30/min budget
 // unthrottled — route it through this gate before adding solana back to
 // TRADING_CHAIN alongside EVM chains.
@@ -63,6 +64,12 @@ const gplusCache = new Map<string, { expiresAt: number; data: GoPlusEvmResult | 
 const gplusInflight = new Map<string, Promise<GoPlusEvmResult | null>>();
 let gplusQueue: Promise<void> = Promise.resolve();
 let gplusLastCallAt = 0;
+// Circuit breaker: observed live 2026-09-22 — after sustained over-budget the
+// IP stays 4029-boxed for minutes+ even with traffic stopped; spending into
+// the penalty keeps it locked (same lesson as the GeckoTerminal backoff).
+// Consecutive rate-limit hits escalate the lockout; any success resets it.
+let gplusCooldownUntil = 0;
+let gplusRateHits = 0;
 
 /** Clears process-wide gate state — unit tests stub fetch per test. */
 export function resetGoPlusGateForTests(): void {
@@ -70,12 +77,22 @@ export function resetGoPlusGateForTests(): void {
   gplusInflight.clear();
   gplusQueue = Promise.resolve();
   gplusLastCallAt = 0;
+  gplusCooldownUntil = 0;
+  gplusRateHits = 0;
+}
+
+function isRateLimitError(err: unknown): boolean {
+  const msg = (err as Error)?.message ?? "";
+  return msg.includes("rate limited") || msg.includes("GoPlus code 4029");
 }
 
 function gplusFetch(baseUrl: string, chainId: number, tokenAddress: string): Promise<GoPlusEvmResult | null> {
   const key = `${chainId}:${tokenAddress.toLowerCase()}`;
   const cached = gplusCache.get(key);
   if (cached && cached.expiresAt > Date.now()) return Promise.resolve(cached.data);
+  if (Date.now() < gplusCooldownUntil) {
+    return Promise.reject(new Error("GoPlus cooling down after rate limit"));
+  }
   const inflight = gplusInflight.get(key);
   if (inflight) return inflight;
 
@@ -102,7 +119,15 @@ function gplusFetch(baseUrl: string, chainId: number, tokenAddress: string): Pro
         }
       }
       gplusCache.set(key, { expiresAt: Date.now() + GPLUS_CACHE_TTL_MS, data });
+      gplusRateHits = 0; // any success ends the breaker escalation
       return data;
+    } catch (err) {
+      if (isRateLimitError(err)) {
+        const backoff = GPLUS_BREAKOUT_MS[Math.min(gplusRateHits, GPLUS_BREAKOUT_MS.length - 1)]!;
+        gplusRateHits++;
+        gplusCooldownUntil = Date.now() + backoff;
+      }
+      throw err;
     } finally {
       gplusInflight.delete(key);
       release();
