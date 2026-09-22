@@ -955,7 +955,7 @@ function drawEquity() {
     dot.setAttribute("cx", x(i)); dot.setAttribute("cy", y(d.totalValueUsd)); dot.setAttribute("visibility", "visible");
     const tip = $("tooltip");
     tip.replaceChildren(h("div", { class: "v", text: fmtUsd(d.totalValueUsd) }),
-      h("div", { class: "t", text: new Date(d.at).toLocaleString() + ` · dd ${d.drawdownPct.toFixed(3)}%` }));
+      h("div", { class: "t", text: new Date(d.at).toLocaleString() + ` · dd ${(d.drawdownPct ?? 0).toFixed(3)}%` }));
     tip.style.display = "block";
     const wrap = $("equity-wrap").getBoundingClientRect();
     let tx = ev.clientX - wrap.left + 14, ty = ev.clientY - wrap.top - 10;
@@ -978,7 +978,7 @@ function drawEquity() {
     tbl.append(h("tr", {},
       h("td", { text: new Date(d.at).toLocaleTimeString() }),
       h("td", { class: "num", text: fmtUsd(d.totalValueUsd) }),
-      h("td", { class: "num", text: d.drawdownPct.toFixed(3) + "%" })));
+      h("td", { class: "num", text: (d.drawdownPct ?? 0).toFixed(3) + "%" })));
   }
   $("equity-table").replaceChildren(tbl);
 }

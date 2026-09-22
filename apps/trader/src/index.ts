@@ -1481,9 +1481,15 @@ const httpServerOpts: Parameters<typeof startHttpServer>[0] = {
         buckets.set(t, (buckets.get(t) ?? 0) + row.totalValueUsd);
       }
     }
-    return [...buckets.entries()]
-      .sort((a, b) => a[0] - b[0])
-      .map(([t, v]) => ({ at: new Date(t).toISOString(), totalValueUsd: round(v) }));
+    // dd recomputed from the summed curve (running peak within this window);
+    // summing per-chain dd's would not be the aggregate drawdown
+    const points: Array<{ at: string; totalValueUsd: number; drawdownPct: number }> = [];
+    let peak = 0;
+    for (const [t, v] of [...buckets.entries()].sort((a, b) => a[0] - b[0])) {
+      peak = Math.max(peak, v);
+      points.push({ at: new Date(t).toISOString(), totalValueUsd: round(v), drawdownPct: peak > 0 ? round(((peak - v) / peak) * 100) : 0 });
+    }
+    return points;
   },
   getTrades: async () => {
     if (!db) return [];
