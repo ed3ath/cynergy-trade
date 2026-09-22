@@ -1,7 +1,15 @@
 /**
  * Candidate scorer — produces normalized 0–100 scores per dimension.
  * Weights are configurable; defaults are conservative starting points.
+ *
+ * Data-missing dimensions (provider never indexed the token — see
+ * isSecurityDataMissing / isHolderDataMissing) return null and are EXCLUDED
+ * from the composite with weight renormalization, instead of scoring 0:
+ * a zero-drag composite made unverified tokens mathematically unpromotable.
+ * ponytail: paper-phase tolerance; drop this when every chain has full
+ * provider coverage.
  */
+import { isHolderDataMissing, isSecurityDataMissing } from "@autonomous-trader/shared";
 import type { TokenCandidate, CandidateScores } from "../lifecycle/candidate.js";
 
 export interface ScoringWeights {
@@ -40,27 +48,34 @@ export function scoreCandidate(
   const execution = scoreExecutionDimension(candidate);
   const risk      = scoreRiskDimension(candidate);
 
-  const opportunity = clamp(
-    security  * weights.security +
-    liquidity * weights.liquidity +
-    holder    * weights.holder +
-    momentum  * weights.momentum +
-    marketQuality * weights.marketQuality +
-    execution * weights.execution +
-    risk      * weights.risk,
-  );
+  // null dims (data-missing) drop out; composite = weighted mean of what we have
+  const parts: Array<[value: number, weight: number]> = [
+    [security, weights.security],
+    [liquidity, weights.liquidity],
+    [holder, weights.holder],
+    [momentum, weights.momentum],
+    [marketQuality, weights.marketQuality],
+    [execution, weights.execution],
+    [risk, weights.risk],
+  ].filter((p): p is [number, number] => p[0] !== null);
+  const activeWeight = parts.reduce((s, [, w]) => s + w, 0);
+  const opportunity = activeWeight > 0
+    ? clamp(parts.reduce((s, [v, w]) => s + v * w, 0) / activeWeight)
+    : 0;
 
   return {
-    security, liquidity, holder, momentum,
+    security: security ?? 0, liquidity, holder: holder ?? 0, momentum,
     marketQuality, execution, risk, opportunity,
     computedAt: new Date(),
   };
 }
 
 // ─── Dimension scorers ────────────────────────────────────────────────────────
+// security/holder return null when the dimension is data-missing.
 
-function scoreSecurityDimension(c: TokenCandidate): number {
+function scoreSecurityDimension(c: TokenCandidate): number | null {
   if (!c.security) return 0;
+  if (isSecurityDataMissing(c.security)) return null;
   const { status, score, confidence } = c.security;
   if (status === "REJECT") return 0;
   if (status === "UNKNOWN") return clamp(score * 0.3 * confidence);
@@ -88,8 +103,9 @@ function scoreLiquidityDimension(c: TokenCandidate): number {
   return clamp((liqScore * 0.4 + slipScore * 0.3 + trendScore * 0.2 + ageScore * 0.1));
 }
 
-function scoreHolderDimension(c: TokenCandidate): number {
+function scoreHolderDimension(c: TokenCandidate): number | null {
   if (!c.holders) return 0;
+  if (isHolderDataMissing(c.holders)) return null;
   const h = c.holders;
 
   // Concentration penalty: lower top10 is better

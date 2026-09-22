@@ -10,6 +10,7 @@
  */
 import {
   RiskRejectionError,
+  isSecurityDataMissing,
   type RiskConfig,
   type TradeIntent,
   type PortfolioSnapshot,
@@ -70,7 +71,12 @@ export class RiskEngine {
     if (input.security.status === "REJECT") {
       rejections.push(`SECURITY_REJECTED: ${input.security.reasons.map((r) => r.code).join(",")}`);
     }
-    if (input.security.status === "UNKNOWN" && input.security.confidence < 0.5) {
+    // Data-missing UNKNOWN (provider never indexed the token) skips this gate
+    // and takes the security_unverified sizing penalty below instead.
+    // ponytail: paper-phase tolerance for brand-new pools; before EVM
+    // SHADOW/LIVE require a provider that actually verifies the token.
+    if (input.security.status === "UNKNOWN" && input.security.confidence < 0.5
+        && !isSecurityDataMissing(input.security)) {
       rejections.push("SECURITY_UNKNOWN_LOW_CONFIDENCE");
     }
 
@@ -184,6 +190,11 @@ export class RiskEngine {
     // Security warning penalty
     if (input.security.status === "WARNING") {
       multipliers["security_warning"] = 0.6;
+    }
+
+    // Unverified token (data-missing security) — halve the size
+    if (isSecurityDataMissing(input.security)) {
+      multipliers["security_unverified"] = 0.5;
     }
 
     const composite = Object.values(multipliers).reduce((acc, m) => acc * m, 1.0);

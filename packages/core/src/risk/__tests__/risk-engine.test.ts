@@ -160,6 +160,56 @@ describe("RiskEngine", () => {
     expect(result.rejectionReasons.some((r) => r.includes("SECURITY_REJECTED"))).toBe(true);
   });
 
+  it("rejects UNKNOWN low-confidence security with actual findings", () => {
+    const result = engine.evaluate(makeInput({
+      security: {
+        ...SAFE_SECURITY, status: "UNKNOWN", score: 30, confidence: 0.3,
+        reasons: [{ code: "UNVERIFIED_CONTRACT", message: "x", severity: "MEDIUM" }],
+      },
+    }));
+    expect(result.decision).toBe("REJECTED");
+    expect(result.rejectionReasons).toContain("SECURITY_UNKNOWN_LOW_CONFIDENCE");
+  });
+
+  it("approves data-missing (NO_DATA) security at half size", () => {
+    // GoPlus never indexed the token — UNKNOWN carrying only NO_DATA.
+    const unverified: SecurityAssessment = {
+      ...SAFE_SECURITY, status: "UNKNOWN", score: 30, confidence: 0.3,
+      reasons: [{ code: "NO_DATA", message: "GoPlus returned no data for token", severity: "LOW" }],
+    };
+    const clean = engine.evaluate(makeInput());
+    const result = engine.evaluate(makeInput({ security: unverified }));
+    expect(result.rejectionReasons).toHaveLength(0);
+    expect(["APPROVED", "REDUCED"]).toContain(result.decision);
+    expect(result.appliedMultipliers["security_unverified"]).toBe(0.5);
+    // no clamp interference in this setup → exactly half the clean risk fraction
+    expect(result.approvedRiskFraction).toBeCloseTo(clean.approvedRiskFraction * 0.5, 10);
+  });
+
+  it("approves data-missing (PROVIDER_ERROR) security with the unverified multiplier", () => {
+    const result = engine.evaluate(makeInput({
+      security: {
+        ...SAFE_SECURITY, status: "UNKNOWN", score: 30, confidence: 0.2,
+        reasons: [{ code: "PROVIDER_ERROR", message: "GoPlus HTTP 429", severity: "LOW" }],
+      },
+    }));
+    expect(result.rejectionReasons).toHaveLength(0);
+    expect(result.appliedMultipliers["security_unverified"]).toBe(0.5);
+  });
+
+  it("rejects UNKNOWN data-missing mixed with a real finding", () => {
+    const result = engine.evaluate(makeInput({
+      security: {
+        ...SAFE_SECURITY, status: "UNKNOWN", score: 30, confidence: 0.3,
+        reasons: [
+          { code: "NO_DATA", message: "no data", severity: "LOW" },
+          { code: "HONEYPOT_SUSPECTED", message: "x", severity: "CRITICAL" },
+        ],
+      },
+    }));
+    expect(result.decision).toBe("REJECTED");
+  });
+
   it("rejects below minimum liquidity", () => {
     const result = engine.evaluate(makeInput({
       liquidity: { ...GOOD_LIQUIDITY, liquidityUsd: 10_000 },

@@ -30,7 +30,7 @@ export type RiskConfig = z.infer<typeof RiskConfigSchema>;
 
 // ─── Market config ────────────────────────────────────────────────────────────
 export const MarketConfigSchema = z.object({
-  minLiquidityUsd: z.number().positive().default(50_000),
+  minLiquidityUsd: z.number().positive().default(15_000),
   maxSlippageBps: z.number().positive().default(300),
   maxPriceImpactBps: z.number().positive().default(500),
   minPoolAgeMs: z.number().positive().default(5 * 60 * 1000), // 5 min
@@ -220,7 +220,7 @@ export function loadConfig(overrides: Partial<Record<string, unknown>> = {}): Ap
       maxStrategyExposurePct: parseFloat(process.env["MAX_STRATEGY_EXPOSURE_PCT"] ?? "50"),
       maxSlippageBps: parseInt(process.env["MAX_SLIPPAGE_BPS"] ?? "300", 10),
       maxPriceImpactBps: parseInt(process.env["MAX_PRICE_IMPACT_BPS"] ?? "500", 10),
-      minLiquidityUsd: parseFloat(process.env["MIN_LIQUIDITY_USD"] ?? "50000"),
+      minLiquidityUsd: parseFloat(process.env["MIN_LIQUIDITY_USD"] ?? "15000"),
       maxConcurrentPositions: parseInt(process.env["MAX_CONCURRENT_POSITIONS"] ?? "5", 10),
       maxTransactionCostUsd: parseFloat(process.env["MAX_TRANSACTION_COST_USD"] ?? "2"),
       baseRiskPct: parseFloat(process.env["BASE_RISK_PCT"] ?? "0.5"),

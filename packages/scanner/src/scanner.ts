@@ -31,6 +31,9 @@ import {
 import { runFilters } from "./filters/filters.js";
 import { scoreCandidate } from "./scoring/scorer.js";
 
+/** WATCHLIST → TRADE_CANDIDATE promotion bar (and demote-under bar). */
+export const PROMOTION_SCORE = 55;
+
 export interface ScannerConfig {
   market: MarketConfig;
   freshness: DataFreshnessConfig;
@@ -460,7 +463,10 @@ export class Scanner {
         }
 
         // Promote high-scoring candidates to TRADE_CANDIDATE
-        if (candidate.status === "WATCHLIST" && candidate.scores.opportunity >= 65) {
+        // 55: with data-missing dims renormalized out, fresh-pool composites
+        // sit in the 50s — 65 starved BSC/BASE to zero promotions ever.
+        // Strategy + risk engine still gate every actual entry.
+        if (candidate.status === "WATCHLIST" && candidate.scores.opportunity >= PROMOTION_SCORE) {
           this.transition(candidate.tokenAddress, "TRADE_CANDIDATE");
           this.logger.info("Promoted to trade candidate", {
             token: candidate.tokenAddress,
@@ -470,7 +476,7 @@ export class Scanner {
 
         // Demote when the score falls back under the bar — a stale promotion
         // would keep feeding the strategy a deteriorated candidate
-        if (candidate.status === "TRADE_CANDIDATE" && candidate.scores.opportunity < 65) {
+        if (candidate.status === "TRADE_CANDIDATE" && candidate.scores.opportunity < PROMOTION_SCORE) {
           this.transition(candidate.tokenAddress, "WATCHLIST");
           this.logger.info("Demoted from trade candidate", {
             token: candidate.tokenAddress,

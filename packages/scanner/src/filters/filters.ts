@@ -2,7 +2,7 @@
  * Hard-gate filters — each returns null (pass) or a rejection reason string.
  * Applied before scoring. Fast and cheap.
  */
-import type { MarketConfig } from "@autonomous-trader/shared";
+import { isHolderDataMissing, isSecurityDataMissing, type MarketConfig } from "@autonomous-trader/shared";
 import type { TokenCandidate } from "../lifecycle/candidate.js";
 
 export type FilterResult = string | null; // null = pass
@@ -19,7 +19,11 @@ export const SecurityFilter: Filter = {
     const sec = candidate.security;
     if (!sec) return "SECURITY_DATA_MISSING";
     if (sec.status === "REJECT") return `SECURITY_REJECTED`;
-    if (sec.status === "UNKNOWN" && sec.confidence < 0.5) return "SECURITY_UNKNOWN_LOW_CONFIDENCE";
+    // Data-missing (provider never indexed the token) skips the hard reject —
+    // the risk engine still halves size via the security_unverified multiplier.
+    if (sec.status === "UNKNOWN" && sec.confidence < 0.5 && !isSecurityDataMissing(sec)) {
+      return "SECURITY_UNKNOWN_LOW_CONFIDENCE";
+    }
     if (sec.reasons.some((r) => r.severity === "CRITICAL")) return "SECURITY_CRITICAL_REASON";
     return null;
   },
@@ -53,7 +57,9 @@ export const HolderFilter: Filter = {
   check(candidate, config) {
     const h = candidate.holders;
     if (!h) return "HOLDER_DATA_MISSING";
-    if (h.totalHolders < config.minHolders) {
+    // Data-missing (zeroed low-confidence snapshot) ≠ 0 holders — skip;
+    // the holder dimension is dropped from scoring instead.
+    if (h.totalHolders < config.minHolders && !isHolderDataMissing(h)) {
       return `TOO_FEW_HOLDERS:${h.totalHolders}`;
     }
     if (h.top10Pct > config.maxTop10ConcentrationPct) {

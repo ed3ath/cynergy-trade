@@ -151,6 +151,29 @@ export interface HolderSnapshot {
   confidence: number;
 }
 
+// ─── Data-missing detection ───────────────────────────────────────────────────
+/**
+ * True when the security provider never indexed the token (UNKNOWN carrying
+ * only NO_DATA/PROVIDER_ERROR) — distinct from a provider that LOOKED and
+ * returned uncertain findings. GoPlus returns this for brand-new EVM pools.
+ * Still UNKNOWN, never SAFE: used to skip hard rejects and re-normalize
+ * scoring, with a sizing penalty at the risk engine.
+ * ponytail: paper-phase tolerance; before EVM SHADOW/LIVE require a provider
+ * that verifies (or re-check GoPlus once it indexes the token).
+ */
+export function isSecurityDataMissing(a: SecurityAssessment): boolean {
+  return a.status === "UNKNOWN"
+    && a.reasons.length > 0
+    && a.reasons.every((r) => r.code === "NO_DATA" || r.code === "PROVIDER_ERROR");
+}
+
+/** True for a zeroed low-confidence holder snapshot — provider returned no
+ *  data (GoPlus hasn't indexed the token). 0 holders with real confidence is
+ *  NOT data-missing and still rejects. */
+export function isHolderDataMissing(h: HolderSnapshot): boolean {
+  return h.totalHolders <= 0 && h.confidence <= 0.1;
+}
+
 // ─── Features ─────────────────────────────────────────────────────────────────
 export interface FeatureValue {
   name: string;
