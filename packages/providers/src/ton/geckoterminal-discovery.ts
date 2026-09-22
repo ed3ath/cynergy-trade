@@ -85,6 +85,16 @@ const DEFAULTS: GeckoTerminalDiscoveryConfig = {
   hotMinH1ChangePct: 0,
 };
 
+/** Deterministic per-chain poll offset: chains sharing GT's per-IP limit must
+ *  not fire in lockstep. Identical intervals from one boot aligned every
+ *  chain's requests and 429'd them all together each hot-pool cycle
+ *  (observed 2026-09-22 with ton,bsc,base). */
+export function gtStaggerMs(chain: string, spreadMs = 15_000): number {
+  let h = 0;
+  for (const c of chain) h = (h * 31 + c.charCodeAt(0)) >>> 0;
+  return h % spreadMs; // < half the 30s poll interval — full poll cadence preserved
+}
+
 export class GeckoTerminalDiscoveryProvider extends AbstractProvider implements TokenDiscoveryProvider {
   readonly name = "geckoterminal-discovery";
   readonly version = "1.0.0";
@@ -93,6 +103,7 @@ export class GeckoTerminalDiscoveryProvider extends AbstractProvider implements 
   private seenPools = new Set<string>();
   private pollTimer?: ReturnType<typeof setInterval>;
   private hotTimer?: ReturnType<typeof setInterval>;
+  private staggerTimer?: ReturnType<typeof setTimeout>;
   private polling = false;
   private pollingHot = false;
   /** Shared 429/timeout backoff — hammering a throttled GT extends the penalty. */
@@ -112,19 +123,24 @@ export class GeckoTerminalDiscoveryProvider extends AbstractProvider implements 
 
   override async initialize(): Promise<void> {
     await super.initialize();
-    this.pollTimer = setInterval(() => void this.pollOnce(), this.cfg.pollIntervalMs);
-    if (this.cfg.hotPoolsEnabled) {
-      this.hotTimer = setInterval(() => void this.pollHotPools(), this.cfg.hotPoolsIntervalMs);
-    }
+    const stagger = gtStaggerMs(this.cfg.chain ?? this.cfg.network);
+    this.staggerTimer = setTimeout(() => {
+      this.pollTimer = setInterval(() => void this.pollOnce(), this.cfg.pollIntervalMs);
+      if (this.cfg.hotPoolsEnabled) {
+        this.hotTimer = setInterval(() => void this.pollHotPools(), this.cfg.hotPoolsIntervalMs);
+      }
+    }, stagger);
     this.log.info("GeckoTerminal discovery polling started", {
       network: this.cfg.network,
       chain: this.cfg.chain,
       intervalMs: this.cfg.pollIntervalMs,
       hotPools: this.cfg.hotPoolsEnabled,
+      staggerMs: stagger,
     });
   }
 
   override async shutdown(): Promise<void> {
+    if (this.staggerTimer) clearTimeout(this.staggerTimer);
     if (this.pollTimer) clearInterval(this.pollTimer);
     if (this.hotTimer) clearInterval(this.hotTimer);
     await super.shutdown();
