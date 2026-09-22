@@ -12,7 +12,8 @@
  *  - exits are full-position at signal (live TP1/TP2 suggest partial sells but
  *    the paper path also fills them whole).
  *  - one position per token, no re-entry cooldown after exit.
- *  - regime is a fixed input — regime conditioning is Phase B step 3.
+ *  - regime is a fixed input — real conditioning (B3) joins regime_history by
+ *    entry time once that table has coverage.
  */
 import type {
   Chain, LiquiditySnapshot, MarketSnapshot, SecurityAssessment,

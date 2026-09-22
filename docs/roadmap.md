@@ -61,7 +61,11 @@ Replay recorded snapshots; stop tuning strategy parameters on vibes.
    neutral placeholders (ponytail) until those gates need to bite.
 2. FreshMomentum parameter sweep on recorded data — **gated on A3 data bar**
    (≥50 tokens × ≥20 samples; 13 as of 2026-09-22)
-3. Regime conditioning (does the edge exist only in RISK_ON?)
+3. Regime conditioning (does the edge exist only in RISK_ON?) — recording
+   started 2026-09-23: every regime transition persists to `regime_history`
+   (migration 009); the backtest CLI takes `--regime` for fixed-regime runs.
+   Real conditioning joins trades to regime at entry time once history has
+   coverage.
 4. Every strategy change after this point ships with a backtest delta
 
 ## Phase C — Execution realism (TON)

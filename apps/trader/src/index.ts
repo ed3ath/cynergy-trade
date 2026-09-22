@@ -609,7 +609,7 @@ async function updateRegime(rt: ChainRuntime): Promise<void> {
     // price failure — keep last samples; UNKNOWN-ish handling via confidence
   }
 
-  rt.regime = classifyRegime({
+  const next = classifyRegime({
     solPrices: rt.sampler.prices(),
     drawdownPct: rt.portfolio.currentDrawdownPct,
     maxDrawdownPct: config.risk.maxDrawdownPct,
@@ -619,6 +619,20 @@ async function updateRegime(rt: ChainRuntime): Promise<void> {
       ? performanceTracker.getStats("strategy-fresh-momentum").winRate
       : null,
   });
+
+  // B3 fuel: one row per transition (best-effort telemetry — never blocks trading)
+  if (next.regime !== rt.regime.regime && db) {
+    try {
+      await db.query(
+        `INSERT INTO regime_history (chain, regime, trend_pct_1h, volatility_pct, confidence, reasons)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [rt.chain, next.regime, next.solTrendPct1h, next.volatilityPct, next.confidence, next.reasons],
+      );
+    } catch (err) {
+      log.warn("regime_history insert failed", { chain: rt.chain, error: (err as Error).message });
+    }
+  }
+  rt.regime = next;
 }
 
 // ─── Main decision loop ───────────────────────────────────────────────────────

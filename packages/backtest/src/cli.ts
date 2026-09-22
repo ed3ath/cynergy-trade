@@ -1,13 +1,14 @@
 /**
  * Backtest CLI — replay the recorded snapshot dataset.
  *
- *   pnpm exec tsx packages/backtest/src/cli.ts [--chain ton] [--min-rows 20]
+ *   pnpm exec tsx packages/backtest/src/cli.ts [--chain ton] [--min-rows 20] [--regime BULL]
  *
  * Prints per-token trades and aggregate expectancy. This answers "what would
  * FreshMomentum have done on the recorded data" — NOT a tuning verdict until
  * the Phase-B data gate (≥50 tokens × ≥20 samples) is met.
  */
 import { DataFreshnessConfigSchema, MarketConfigSchema } from "@autonomous-trader/shared";
+import type { MarketRegime } from "@autonomous-trader/shared";
 import { Database } from "@autonomous-trader/core";
 import { loadSeries, runBacktest } from "./index.js";
 
@@ -18,6 +19,10 @@ const flag = (name: string) => {
 };
 const chain = (flag("chain") ?? "ton") as "ton" | "solana";
 const minRows = parseInt(flag("min-rows") ?? "20", 10);
+// Fixed regime for the whole run (roadmap B3). Real conditioning needs
+// regime_history rows joined by entry time — until that table has data, this
+// only measures strategy gate behavior across regimes.
+const regime = flag("regime") as MarketRegime | undefined;
 const dbUrl = process.env["DATABASE_URL"] ?? "postgresql://trader:trader@localhost:5432/trader";
 
 const db = new Database(dbUrl, 1, 2);
@@ -25,11 +30,12 @@ try {
   await db.connect();
   const series = await loadSeries(db, chain, { minRows });
   const withEnough = series.filter((s) => s.rows.length >= minRows);
-  console.log(`\nreplaying ${withEnough.length} tokens (chain=${chain}, ≥${minRows} samples each)`);
+  console.log(`\nreplaying ${withEnough.length} tokens (chain=${chain}, ≥${minRows} samples each${regime ? `, regime=${regime}` : ""})`);
 
   const result = runBacktest(withEnough, {
     marketConfig: MarketConfigSchema.parse({}),
     freshnessConfig: DataFreshnessConfigSchema.parse({}),
+    ...(regime ? { regime } : {}),
   });
 
   console.log(`\ntrades: ${result.trades.length} on ${result.tokensWithTrades}/${result.totalTokens} tokens`);
