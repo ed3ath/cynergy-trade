@@ -4,7 +4,7 @@
  * WBNB is the canonical clean fixture; flags are flat "0"/"1" strings.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { GoPlusEvmHoldersProvider, GoPlusEvmSecurityProvider } from "../goplus-evm.js";
+import { GoPlusEvmHoldersProvider, GoPlusEvmSecurityProvider, resetGoPlusGateForTests } from "../goplus-evm.js";
 
 const WBNB = "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c";
 
@@ -57,7 +57,10 @@ function wbnbFixture(overrides: Record<string, unknown> = {}): Record<string, un
   };
 }
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  vi.unstubAllGlobals();
+  resetGoPlusGateForTests(); // module-level gate state would leak between tests
+});
 
 describe("GoPlusEvmSecurityProvider", () => {
   const p = new GoPlusEvmSecurityProvider(56, "http://goplus.test");
@@ -140,5 +143,48 @@ describe("GoPlusEvmHoldersProvider", () => {
     const r = await p.getHolderSnapshot("0xdead", "bsc");
     expect(r.totalHolders).toBe(0);
     expect(r.confidence).toBe(0.1);
+  });
+
+  it("rate limit (HTTP 200 body code 4029) → single fetch, no retry storm, zeroed snapshot", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ code: 4029, message: "too many requests" }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const r = await p.getHolderSnapshot(WBNB, "bsc");
+    expect(fetchMock).toHaveBeenCalledTimes(1); // was 3 with withRetry — burns budget
+    expect(r.totalHolders).toBe(0);
+    expect(r.confidence).toBe(0.1);
+
+    // circuit breaker open: a different token makes NO HTTP call while cooling down
+    const cooling = await p.getHolderSnapshot("0xdead", "bsc").catch(() => null);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(cooling?.totalHolders ?? 0).toBe(0);
+  });
+
+  it("security + holders for the same token share one HTTP call (in-flight dedupe)", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ code: 1, message: "OK", result: { [WBNB.toLowerCase()]: wbnbFixture() } }), {
+        status: 200, headers: { "content-type": "application/json" },
+      }));
+    vi.stubGlobal("fetch", fetchMock);
+    const sec = new GoPlusEvmSecurityProvider(56, "http://goplus.test");
+    const [security, holders] = await Promise.all([
+      sec.analyzeToken(WBNB, "bsc"),
+      p.getHolderSnapshot(WBNB, "bsc"),
+    ]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(security.status).toBe("SAFE");
+    expect(holders.totalHolders).toBe(8_279_813);
+  });
+
+  it("TTL cache: second call within 5 min is served without HTTP", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ code: 1, message: "OK", result: { [WBNB.toLowerCase()]: wbnbFixture() } }), {
+        status: 200, headers: { "content-type": "application/json" },
+      }));
+    vi.stubGlobal("fetch", fetchMock);
+    await p.getHolderSnapshot(WBNB, "bsc");
+    const again = await p.getHolderSnapshot(WBNB, "bsc");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(again.totalHolders).toBe(8_279_813);
   });
 });

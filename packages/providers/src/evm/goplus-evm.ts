@@ -43,22 +43,98 @@ interface GoPlusEvmResult {
   holders?: Array<{ address?: string; balance?: string; percent?: string; is_locked?: number }>;
 }
 
-/** Shared fetch — both providers hit the same endpoint. */
-async function fetchEvmSecurity(
-  baseUrl: string,
-  chainId: number,
-  tokenAddress: string,
-  retry: (fn: () => Promise<GoPlusEvmResult | null>, opts: { maxRetries: number }) => Promise<GoPlusEvmResult | null>,
-): Promise<GoPlusEvmResult | null> {
-  return retry(async () => {
-    const url = `${baseUrl}/api/v1/token_security/${chainId}?contract_addresses=${tokenAddress}`;
-    const res = await fetch(url, { signal: AbortSignal.timeout(10_000) });
-    if (res.status === 429) throw new Error("GoPlus rate limited");
-    if (!res.ok) throw new Error(`GoPlus HTTP ${res.status}`);
-    const body = (await res.json()) as { code?: number; result?: Record<string, GoPlusEvmResult> };
-    if (body.code !== 1) throw new Error(`GoPlus code ${body.code}`);
-    return body.result?.[tokenAddress.toLowerCase()] ?? null;
-  }, { maxRetries: 2 });
+// ── Process-wide GoPlus call gate ────────────────────────────────────────────
+// Keyless tier is 30 req/min per IP, shared by every chain registry in this
+// process and by every retry. Observed live 2026-09-22: an unthrottled burst
+// locks the IP with HTTP 200 body {code:4029} — invisible to a status check —
+// and every token then reads as data-missing (holders "—", security UNKNOWN).
+// So: serialize all calls with spacing, dedupe the security/holders
+// double-fetch per token (TTL cache + in-flight sharing), never retry
+// (a retry burns budget and the next scanner cycle re-fetches anyway), and
+// cache only successes — failures fail through to UNKNOWN, never SAFE.
+const GPLUS_MIN_INTERVAL_MS = 2_500;   // ~24/min, headroom under 30
+const GPLUS_CACHE_TTL_MS = 5 * 60_000; // holder counts / top-10 move slowly
+const GPLUS_CACHE_MAX = 1_000;
+const GPLUS_BREAKOUT_MS = [30_000, 60_000, 120_000, 300_000]; // escalating lockout
+// ponytail: solana/goplus-provider.ts hits the same per-IP 30/min budget
+// unthrottled — route it through this gate before adding solana back to
+// TRADING_CHAIN alongside EVM chains.
+
+const gplusCache = new Map<string, { expiresAt: number; data: GoPlusEvmResult | null }>();
+const gplusInflight = new Map<string, Promise<GoPlusEvmResult | null>>();
+let gplusQueue: Promise<void> = Promise.resolve();
+let gplusLastCallAt = 0;
+// Circuit breaker: observed live 2026-09-22 — after sustained over-budget the
+// IP stays 4029-boxed for minutes+ even with traffic stopped; spending into
+// the penalty keeps it locked (same lesson as the GeckoTerminal backoff).
+// Consecutive rate-limit hits escalate the lockout; any success resets it.
+let gplusCooldownUntil = 0;
+let gplusRateHits = 0;
+
+/** Clears process-wide gate state — unit tests stub fetch per test. */
+export function resetGoPlusGateForTests(): void {
+  gplusCache.clear();
+  gplusInflight.clear();
+  gplusQueue = Promise.resolve();
+  gplusLastCallAt = 0;
+  gplusCooldownUntil = 0;
+  gplusRateHits = 0;
+}
+
+function isRateLimitError(err: unknown): boolean {
+  const msg = (err as Error)?.message ?? "";
+  return msg.includes("rate limited") || msg.includes("GoPlus code 4029");
+}
+
+function gplusFetch(baseUrl: string, chainId: number, tokenAddress: string): Promise<GoPlusEvmResult | null> {
+  const key = `${chainId}:${tokenAddress.toLowerCase()}`;
+  const cached = gplusCache.get(key);
+  if (cached && cached.expiresAt > Date.now()) return Promise.resolve(cached.data);
+  if (Date.now() < gplusCooldownUntil) {
+    return Promise.reject(new Error("GoPlus cooling down after rate limit"));
+  }
+  const inflight = gplusInflight.get(key);
+  if (inflight) return inflight;
+
+  const run = (async () => {
+    // take a place in the process-wide serial queue, spaced off the last call
+    const prev = gplusQueue;
+    let release!: () => void;
+    gplusQueue = new Promise<void>((r) => (release = r));
+    await prev;
+    const wait = gplusLastCallAt + GPLUS_MIN_INTERVAL_MS - Date.now();
+    if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+    gplusLastCallAt = Date.now();
+    try {
+      const url = `${baseUrl}/api/v1/token_security/${chainId}?contract_addresses=${tokenAddress}`;
+      const res = await fetch(url, { signal: AbortSignal.timeout(10_000) });
+      if (res.status === 429) throw new Error("GoPlus rate limited");
+      if (!res.ok) throw new Error(`GoPlus HTTP ${res.status}`);
+      const body = (await res.json()) as { code?: number; result?: Record<string, GoPlusEvmResult> };
+      if (body.code !== 1) throw new Error(`GoPlus code ${body.code}`); // 4029 lands here — no retry
+      const data = body.result?.[tokenAddress.toLowerCase()] ?? null;
+      if (gplusCache.size >= GPLUS_CACHE_MAX) {
+        for (const [k, v] of gplusCache) {
+          if (v.expiresAt <= Date.now() || gplusCache.size >= GPLUS_CACHE_MAX) gplusCache.delete(k);
+        }
+      }
+      gplusCache.set(key, { expiresAt: Date.now() + GPLUS_CACHE_TTL_MS, data });
+      gplusRateHits = 0; // any success ends the breaker escalation
+      return data;
+    } catch (err) {
+      if (isRateLimitError(err)) {
+        const backoff = GPLUS_BREAKOUT_MS[Math.min(gplusRateHits, GPLUS_BREAKOUT_MS.length - 1)]!;
+        gplusRateHits++;
+        gplusCooldownUntil = Date.now() + backoff;
+      }
+      throw err;
+    } finally {
+      gplusInflight.delete(key);
+      release();
+    }
+  })();
+  gplusInflight.set(key, run);
+  return run;
 }
 
 export class GoPlusEvmSecurityProvider extends AbstractProvider implements TokenSecurityProvider {
@@ -75,8 +151,7 @@ export class GoPlusEvmSecurityProvider extends AbstractProvider implements Token
   async analyzeToken(tokenAddress: string, chain: Chain): Promise<SecurityAssessment> {
     const checkedAt = new Date();
     try {
-      const result = await fetchEvmSecurity(this.baseUrl, this.chainId, tokenAddress,
-        (fn, opts) => this.withRetry(fn, opts));
+      const result = await gplusFetch(this.baseUrl, this.chainId, tokenAddress);
 
       if (!result) {
         // No data ≠ safe
@@ -171,8 +246,7 @@ export class GoPlusEvmHoldersProvider extends AbstractProvider implements Holder
   async getHolderSnapshot(tokenAddress: string, chain: Chain): Promise<HolderSnapshot> {
     const now = new Date();
     try {
-      const result = await fetchEvmSecurity(this.baseUrl, this.chainId, tokenAddress,
-        (fn, opts) => this.withRetry(fn, opts));
+      const result = await gplusFetch(this.baseUrl, this.chainId, tokenAddress);
       const holders = result?.holders ?? [];
       const totalHolders = parseInt(result?.holder_count ?? "0", 10);
       if (holders.length === 0 || !Number.isFinite(totalHolders) || totalHolders <= 0) {
