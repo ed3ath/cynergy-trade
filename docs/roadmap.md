@@ -14,8 +14,10 @@ State as of 2026-09-22. See `docs/architecture.md` for how it works.
   split. EVM SHADOW needs a quote aggregator (0x/1inch) — not wired yet.
 - Snapshot dataset accumulating in `token_market_snapshots` since 2026-09-12 —
   this is backtester fuel, every hour of runtime pays into Phase B
-- Running config since 2026-09-22: `TRADING_CHAIN=ton` only (Solana run
-  stopped 2026-09-16; EVM chains not enabled in `.env`)
+- Running config since 2026-09-22: `TRADING_CHAIN=ton,bsc,base` (widened later
+  that day to accelerate A3 breadth — EVM books start at $3,333 while TON keeps
+  its restored $10k book, legacy `base_capital_usd` key; A1 equity-series
+  continuity beats a cosmetic rebalance). Solana run stopped 2026-09-16.
 
 ## Phase A — Prove the edge (passive, costs nothing)
 
@@ -32,6 +34,9 @@ Progress audit 2026-09-22 (all numbers TON unless noted):
   13 tokens with ≥20 samples vs the ≥50-token bar (~640 rows/day; new-token
   inflow is the constraint, not samples per token). Stale Solana set:
   383 tokens but only 2 with ≥20 samples, nothing since 2026-09-16.
+  Action taken 2026-09-22: `TRADING_CHAIN` widened to `ton,bsc,base` —
+  EVM rejected tokens revive + keep sampling, so breadth accrues per chain;
+  GT 429 risk from 3 concurrent pollers is the thing to watch.
 
 | # | Item | Done when |
 |---|---|---|
