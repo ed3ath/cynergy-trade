@@ -48,14 +48,19 @@ export async function loadSeries(
     [chain, minRows],
   );
 
-  // Latest liquidity row per token (first snapshot ≈ discovery conditions)
+  // Full liquidity time series — replay attaches the latest sample ≤ each
+  // market row (as-of join) so liquidity-based exits see real history, not a
+  // static first snapshot.
   const { rows: liq } = await db.query<LiquidityRow>(
-    `SELECT DISTINCT ON (token_address) *
-     FROM liquidity_snapshots WHERE chain = $1
-     ORDER BY token_address, observed_at ASC`,
+    `SELECT * FROM liquidity_snapshots WHERE chain = $1
+     ORDER BY token_address, observed_at`,
     [chain],
   );
-  const liqByToken = new Map(liq.map((r) => [r.token_address, r]));
+  const liqByToken = new Map<string, LiquidityRow[]>();
+  for (const r of liq) {
+    const list = liqByToken.get(r.token_address);
+    if (list) list.push(r); else liqByToken.set(r.token_address, [r]);
+  }
 
   // holders/security are optional gates — v1 replays without them by skipping
   // such tokens (FreshMomentum requires all layers).
@@ -77,17 +82,28 @@ export async function loadSeries(
   }
   const out: TokenSeries[] = [];
   for (const [token, rows] of rowsByToken) {
-    const l = liqByToken.get(token);
-    if (!l || !holdersSet.has(token) || !securitySet.has(token)) continue;
+    const liqRows = liqByToken.get(token);
+    if (!liqRows?.length || !holdersSet.has(token) || !securitySet.has(token)) continue;
+    const first = liqRows[0]!;
+    // As-of: liquidity snapshots share the market snapshot cadence, so this
+    // walks forward in lockstep (O(n), both sorted by time)
+    let liqCursor = 0;
+    const perRow = rows.map((r) => {
+      while (liqCursor < liqRows.length && liqRows[liqCursor]!.observed_at <= r.observed_at) liqCursor++;
+      return liqRows[Math.max(0, liqCursor - 1)]!;
+    });
     out.push({
       token, chain,
-      rows: rows.map((r) => ({ at: new Date(r.observed_at), market: mapMarket(r, chain) })),
-      liquidity: mapLiquidity(token, chain, l),
+      rows: rows.map((r, i) => ({
+        at: new Date(r.observed_at), market: mapMarket(r, chain),
+        liquidity: mapLiquidity(token, chain, perRow[i]!),
+      })),
+      liquidity: mapLiquidity(token, chain, first),
       // ponytail: placeholder snapshots satisfy the strategy's layer checks
       // with neutral values — replace with real holder/security history when
       // the replay needs those gates to bite
-      holders: neutralHolders(token, chain, l.observed_at),
-      security: neutralSecurity(token, chain, l.observed_at),
+      holders: neutralHolders(token, chain, first.observed_at),
+      security: neutralSecurity(token, chain, first.observed_at),
     });
   }
   return out;

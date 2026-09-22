@@ -7,8 +7,8 @@
  * reflect production logic, not a parallel reimplementation.
  *
  * Deliberate simplifications (upgrade when the data warrants):
- *  - liquidity/holders/security are static per token (first recorded sample);
- *    market features are per-row. Live refreshes all layers.
+ *  - liquidity is per-row (as-of join since 2026-09-23) but holders/security
+ *    stay static (first recorded sample); live refreshes all layers.
  *  - exits are full-position at signal (live TP1/TP2 suggest partial sells but
  *    the paper path also fills them whole).
  *  - one position per token, no re-entry cooldown after exit.
@@ -34,7 +34,8 @@ import type { ExecutionRouter } from "@autonomous-trader/execution";
 export interface TokenSeries {
   token: string;
   chain: Chain;
-  rows: Array<{ at: Date; market: MarketSnapshot }>;
+  rows: Array<{ at: Date; market: MarketSnapshot; liquidity?: LiquiditySnapshot }>;
+  /** First recorded liquidity — fallback when a row has none. */
   liquidity?: LiquiditySnapshot;
   holders?: HolderSnapshot;
   security?: SecurityAssessment;
@@ -96,7 +97,6 @@ export function runBacktest(series: TokenSeries[], opts: BacktestOptions): Backt
       null as unknown as ExecutionRouter, noopLogger, opts.timeStopMs ?? 4 * 3_600_000,
     );
     const staticFeatures = {
-      ...computeLiquidityFeatures(s.liquidity),
       ...computeHolderFeatures(s.holders),
       ...computeSecurityFeatures(s.security),
     };
@@ -105,15 +105,21 @@ export function runBacktest(series: TokenSeries[], opts: BacktestOptions): Backt
     let entry: { at: Date; price: number } | null = null;
 
     for (const row of s.rows) {
+      // Per-row liquidity when the loader attached it (as-of), else the token's
+      // first recorded sample
+      const liquidity = row.liquidity ?? s.liquidity;
       if (openId === null) {
         const candidate = {
           tokenAddress: s.token, chain: s.chain,
           status: "TRADE_CANDIDATE" as const,
           firstSeenAt: s.rows[0]!.at, lastUpdatedAt: row.at,
           discoverySource: "backtest",
-          market: row.market, liquidity: s.liquidity,
+          market: row.market, liquidity,
           holders: s.holders, security: s.security,
-          features: mergeFeatures(computeMarketFeatures(row.market), staticFeatures),
+          features: mergeFeatures(
+            computeMarketFeatures(row.market),
+            { ...staticFeatures, ...computeLiquidityFeatures(liquidity) },
+          ),
           rejectionReasons: [], refreshCount: 1,
         } as unknown as TokenCandidate;
         candidate.scores = scoreCandidate(candidate);
@@ -164,7 +170,7 @@ export function runBacktest(series: TokenSeries[], opts: BacktestOptions): Backt
       }
 
       const signal = pm.updateAndCheckExit(openId, {
-        market: row.market, liquidity: s.liquidity, timestampMs: row.at.getTime(),
+        market: row.market, liquidity, timestampMs: row.at.getTime(),
       });
       if (signal) {
         trades.push(closeTrade(s.token, entry!, row, exitSlip, signal.reason));
