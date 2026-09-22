@@ -79,6 +79,14 @@
   }
   #theme-toggle:hover { border-color: var(--accent); color: var(--ink); }
   #theme-toggle svg { width: 14px; height: 14px; }
+  #currency {
+    font: 12px/1 Inter, system-ui, sans-serif; font-weight: 500;
+    padding: 5px 8px; border-radius: 8px; cursor: pointer;
+    border: 1px solid var(--ring); background: var(--surface); color: var(--ink-2);
+    transition: border-color 0.15s, color 0.15s;
+  }
+  #currency:hover { border-color: var(--accent); color: var(--ink); }
+  #currency:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
   #theme-toggle:focus-visible, .ph button:focus-visible, #detail-close:focus-visible {
     outline: 2px solid var(--accent); outline-offset: 1px;
   }
@@ -272,6 +280,7 @@
   <span class="sub" id="uptime"></span>
   <span class="chip sub" id="live-chip"><span class="dot" style="background: var(--good)"></span><span id="live-text">live</span></span>
   <span class="spacer"></span>
+  <select id="currency" aria-label="Display currency"></select>
   <button id="theme-toggle" aria-label="Color theme">
     <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
       <circle cx="12" cy="12" r="4.2" stroke="currentColor" stroke-width="2"/>
@@ -299,11 +308,12 @@
 
 <main class="grid">
   <section class="panel p-equity">
-    <div class="ph"><h2>Equity — total value (paper)</h2></div>
+    <div class="ph"><h2>Equity — wallet value (paper)</h2></div>
     <div id="equity-wrap">
       <svg id="equity-svg" role="img" aria-label="Equity curve"></svg>
       <div id="tooltip"></div>
     </div>
+    <details id="chain-wallet" hidden><summary>Wallet by chain</summary><div id="chains"></div></details>
     <details><summary>Table view</summary><div id="equity-table"></div></details>
   </section>
 
@@ -353,19 +363,55 @@
 <script>
 "use strict";
 const $ = (id) => document.getElementById(id);
-const fmtUsd = (n) => "$" + n.toLocaleString("en-US", { maximumFractionDigits: 2 });
-const fmtUsdInt = (n) => (n < 0 ? "-$" : "$") + Math.round(Math.abs(n)).toLocaleString("en-US");
+// Display currency: all backend values are USD. USD is native (rate 1); every
+// other currency is converted client-side with a live USD→X rate from the
+// Coinbase public exchange-rates endpoint (no key). Prioritized: USD, PHP.
+// ponytail: display-only conversion from one free FX source; upgrade = backend
+// FX proxy with staleness/audit if conversions must be trustworthy.
+const CURRENCIES = [
+  ["USD", "$"], ["PHP", "₱"], ["CAD", "C$"], ["AUD", "A$"],
+  ["EUR", "€"], ["GBP", "£"], ["JPY", "¥"], ["SGD", "S$"],
+  ["INR", "₹"], ["KRW", "₩"], ["AED", "AED "], ["THB", "฿"],
+];
+const SYM = Object.fromEntries(CURRENCIES);
+let currency = "USD";
+let fxRates = {}; // USD → code
+const rate = () => (currency === "USD" ? 1 : Number(fxRates[currency]) || 1);
+const sym = () => SYM[currency] ?? "$";
+const toCur = (usd) => usd * rate();
+const fmtUsd = (n) => sym() + toCur(n).toLocaleString("en-US", { maximumFractionDigits: 2 });
+const fmtUsdInt = (n) => (n < 0 ? "-" : "") + sym() + Math.round(Math.abs(toCur(n))).toLocaleString("en-US");
 const fmtPct = (n) => (n >= 0 ? "+" : "") + n.toFixed(2) + "%";
 // never scientific notation: toPrecision() prints "1.23e-8" for memecoin prices
-const fmtPrice = (n) => n == null ? "—"
-  : n >= 1000 ? "$" + n.toLocaleString("en-US", { maximumFractionDigits: 2 })
-  : n >= 1 ? "$" + n.toFixed(2)
-  : n >= 0.01 ? "$" + n.toFixed(4)
-  : "$" + n.toLocaleString("en-US", { maximumSignificantDigits: 4 });
-const fmtTick = (v) => Math.abs(v) >= 1e6
-  ? (v < 0 ? "-$" : "$") + Math.abs(v / 1e6).toFixed(2) + "M"
-  : fmtUsdInt(v);
-const fmtCompact = (n) => n == null ? "—" : n >= 1e9 ? "$" + (n / 1e9).toFixed(2) + "B" : n >= 1e6 ? "$" + (n / 1e6).toFixed(2) + "M" : n >= 1e3 ? "$" + (n / 1e3).toFixed(1) + "k" : "$" + n.toFixed(0);
+const fmtPrice = (n) => {
+  if (n == null) return "—";
+  const v = toCur(n);
+  // thresholds on the converted value: PHP/¥ tickers get compact numbers too
+  return v >= 1000 ? sym() + v.toLocaleString("en-US", { maximumFractionDigits: 2 })
+    : v >= 1 ? sym() + v.toFixed(2)
+    : v >= 0.01 ? sym() + v.toFixed(4)
+    : sym() + v.toLocaleString("en-US", { maximumSignificantDigits: 4 });
+};
+const fmtTick = (v) => {
+  const c = Math.abs(toCur(v));
+  return c >= 1e6 ? (v < 0 ? "-" : "") + sym() + (c / 1e6).toFixed(2) + "M" : fmtUsdInt(v);
+};
+const fmtCompact = (n) => {
+  if (n == null) return "—";
+  const v = toCur(n);
+  return v >= 1e9 ? sym() + (v / 1e9).toFixed(2) + "B" : v >= 1e6 ? sym() + (v / 1e6).toFixed(2) + "M"
+    : v >= 1e3 ? sym() + (v / 1e3).toFixed(1) + "k" : sym() + v.toFixed(0);
+};
+// actual token amount held (sizeTokens arrives as a string — BigInt over JSON)
+const fmtTokens = (t) => {
+  if (t == null) return "—";
+  const n = Number(t);
+  if (!Number.isFinite(n)) return "—";
+  return n >= 1e9 ? (n / 1e9).toFixed(2) + "B"
+    : n >= 1e6 ? (n / 1e6).toFixed(2) + "M"
+    : n >= 1e3 ? (n / 1e3).toFixed(1) + "k"
+    : n.toLocaleString("en-US", { maximumFractionDigits: 4 });
+};
 const fmtAge = (iso) => {
   if (!iso) return "—";
   const s = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 1000));
@@ -403,7 +449,7 @@ function tile(label, value, delta) {
   const t = h("div", { class: "tile" + (delta && delta.hero ? " hero" : "") },
     h("div", { class: "label", text: label }),
     h("div", { class: "value", text: value }));
-  if (delta) t.append(h("div", { class: "delta " + delta.cls, text: delta.text }));
+  if (delta) t.append(h("div", { class: "delta" + (delta.cls ? " " + delta.cls : ""), text: delta.text }));
   return t;
 }
 
@@ -421,6 +467,47 @@ function applyTheme() {
   drawEquity(); // axis/grid/series colors are read from CSS vars at draw time
 }
 $("theme-toggle").addEventListener("click", () => { themeIx = (themeIx + 1) % THEMES.length; applyTheme(); });
+
+// ── display currency: USD native, PHP/CAD/AUD/… converted at the live rate ──
+const curSel = $("currency");
+for (const [code, s] of CURRENCIES) {
+  const o = h("option", { value: code });
+  o.textContent = code === "USD" ? "USD $" : code + " " + s.trim();
+  curSel.append(o);
+}
+try { currency = localStorage.getItem("currency") || "USD"; } catch { /* storage unavailable */ }
+if (!SYM[currency]) currency = "USD";
+curSel.value = currency;
+curSel.addEventListener("change", () => {
+  currency = curSel.value;
+  try { localStorage.setItem("currency", currency); } catch { /* storage unavailable */ }
+  renderAll();
+});
+const FX_TTL = 30 * 60_000; // refresh rates every 30 min
+async function refreshFx() {
+  try {
+    const j = await fetch("https://api.coinbase.com/v2/exchange-rates?currency=USD").then((r) => r.json());
+    if (j && j.data && j.data.rates) {
+      fxRates = j.data.rates;
+      try { localStorage.setItem("fx", JSON.stringify({ at: Date.now(), rates: fxRates })); } catch { /* storage unavailable */ }
+      renderAll();
+    }
+  } catch { /* keep last rates; USD is always exact */ }
+}
+try {
+  const cached = JSON.parse(localStorage.getItem("fx") || "null");
+  if (cached && Date.now() - cached.at < FX_TTL) fxRates = cached.rates;
+  else void refreshFx();
+} catch { /* storage unavailable */ }
+setInterval(refreshFx, FX_TTL);
+// currency (or rate) changed → re-render every money figure from cached frames
+function renderAll() {
+  if (window.__lastStatus) renderStatus(window.__lastStatus);
+  if (lastMarket) renderMarket(lastMarket);
+  if (lastTrades) renderTrades(lastTrades);
+  drawEquity();
+  void refreshOpenDetail();
+}
 
 // ── /status + /metrics ────────────────────────────────────────────────────────
 function parseMetrics(text) {
@@ -469,26 +556,45 @@ function renderStatus(status) {
     const daily = p.dailyPnlUsd;
     const tiles = $("tiles");
     tiles.replaceChildren(
-      tile("Total value", fmtUsdInt(p.totalValueUsd), { hero: true, cls: daily >= 0 ? "up" : "down", text: `daily ${fmtUsd(daily)}` }),
+      tile("Wallet", fmtUsdInt(p.totalValueUsd), { hero: true, cls: daily >= 0 ? "up" : "down", text: `daily ${fmtUsd(daily)}` }),
       tile("Drawdown", p.currentDrawdownPct.toFixed(3) + "%"),
       tile("Open positions", String(p.openPositions)),
-      tile("Available", fmtUsd(p.availableCapitalUsd)),
+      tile("Cash", fmtUsd(p.availableCapitalUsd), { text: `in positions ${fmtUsd(p.allocatedUsd)}` }),
       tile("All-time PnL", fmtUsd(p.allTimePnlUsd), { cls: p.allTimePnlUsd >= 0 ? "up" : "down", text: `weekly ${fmtUsd(p.weeklyPnlUsd)}` }),
       tile("Shadow win rate", m.shadow_signal_win_rate != null ? m.shadow_signal_win_rate.toFixed(1) + "%" : "—",
         { cls: (m.shadow_avg_return_pct || 0) >= 0 ? "up" : "down",
           text: m.shadow_avg_return_pct != null ? `avg ${fmtPct(m.shadow_avg_return_pct)}` : "" }),
     );
 
+    // wallet split across chain books (only meaningful when several trade)
+    const cw = $("chain-wallet");
+    if (status.chains && status.chains.length > 1) {
+      const t = h("table");
+      t.append(h("tr", {}, h("th", { text: "Chain" }), h("th", { class: "num", text: "Wallet" }),
+        h("th", { class: "num", text: "Pos" }), h("th", { text: "Regime" })));
+      for (const c of status.chains) {
+        t.append(h("tr", {},
+          h("td", { text: c.chain }),
+          h("td", { class: "num", text: fmtUsd(c.equityUsd) }),
+          h("td", { class: "num", text: String(c.positions) }),
+          h("td", { text: c.regime })));
+      }
+      $("chains").replaceChildren(t);
+      cw.hidden = false;
+    } else cw.hidden = true;
+
     const pos = $("positions");
     if (!status.positions.length) pos.replaceChildren(h("div", { class: "empty", text: "No open positions" }));
     else {
       const tbl = h("table");
-      tbl.append(h("tr", {}, h("th", { text: "Token" }), h("th", { class: "num", text: "Size" }),
-        h("th", { class: "num", text: "PnL %" }), h("th", { class: "num", text: "PnL $" }), h("th", { text: "Opened" })));
+      tbl.append(h("tr", {}, h("th", { text: "Token" }), h("th", { class: "num", text: "Holding" }),
+        h("th", { class: "num", text: "Value" }), h("th", { class: "num", text: "PnL %" }),
+        h("th", { class: "num", text: "PnL $" }), h("th", { text: "Opened" })));
       for (const x of status.positions) {
         tbl.append(h("tr", {},
           tokenCell(x.tokenAddress),
-          h("td", { class: "num", text: fmtUsd(x.sizeUsd) }),
+          h("td", { class: "num mono", text: fmtTokens(x.sizeTokens), title: "tokens held" }),
+          h("td", { class: "num", text: fmtUsd(x.sizeUsd + x.unrealizedPnlUsd), title: `entry ${fmtUsd(x.sizeUsd)}` }),
           h("td", { class: "num", text: fmtPct(x.unrealizedPnlPct), style: `color: var(--${x.unrealizedPnlPct >= 0 ? "good" : "critical"})` }),
           h("td", { class: "num", text: fmtUsd(x.unrealizedPnlUsd) }),
           h("td", { text: relTime(x.openedAt) })));
@@ -530,17 +636,21 @@ async function refreshStatus() {
 
 // ── /history → equity line ────────────────────────────────────────────────────
 let history = [];
+let lastTrades = null; // last /trades frame — re-rendered on currency switch
+let lastMarket = null; // last /market frame — same
 async function refreshHistory() {
   try {
     history = await fetch("/history").then((r) => r.json());
   } catch { /* keep last frame */ }
   drawEquity();
   try {
-    renderTrades(await fetch("/trades").then((r) => r.json()));
+    lastTrades = await fetch("/trades").then((r) => r.json());
   } catch { /* keep last frame */ }
+  renderTrades(lastTrades);
   try {
-    renderMarket(await fetch("/market").then((r) => r.json()));
+    lastMarket = await fetch("/market").then((r) => r.json());
   } catch { /* keep last frame */ }
+  renderMarket(lastMarket);
   void refreshOpenDetail();
 }
 function renderTrades(trades) {
