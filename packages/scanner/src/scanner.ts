@@ -318,7 +318,8 @@ export class Scanner {
       marketCapUsd: c.market?.marketCapUsd ?? null,
       liquidityUsd: c.liquidity?.liquidityUsd ?? null,
       dex: c.liquidity?.dex ?? null,
-      holders: c.holders?.totalHolders ?? null,
+      // low-confidence snapshots (GoPlus-unindexed EVM) are UNKNOWN, not zero-holders
+      holders: c.holders && c.holders.confidence >= 0.5 ? c.holders.totalHolders : null,
       rejection: c.rejectionReasons[0] ?? null,
       observedAt: c.market?.observedAt?.toISOString() ?? null,
     };
