@@ -238,6 +238,13 @@
   /* grid (not flex): the message cell gets minmax(0,1fr) so a squeezed panel
      shrinks the message column instead of overflowing the token link onto it */
   #activity .row, #console .row { display: grid; grid-template-columns: auto 52px minmax(0, 1fr); gap: 8px; align-items: baseline; }
+  /* activity rows add a chain chip column between kind and message */
+  #activity .row { grid-template-columns: auto 52px auto minmax(0, 1fr); }
+  #activity .ch {
+    font-size: 9px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase;
+    color: var(--muted); border: 1px solid var(--ring); border-radius: 4px;
+    padding: 0 3px; line-height: 14px; align-self: center; white-space: nowrap;
+  }
   #activity .row.dim, #console .row.dim { opacity: .65; }
   #activity .t, #console .t { color: var(--muted); }
   #activity .lv, #console .lv { font-weight: 700; }
@@ -823,6 +830,7 @@ function actRow(e) {
   return h("div", { class: "row" + (e.kind === "skip" || e.kind === "cycle" ? " dim" : "") },
     h("span", { class: "t", text: new Date(e.at).toLocaleTimeString() }),
     h("span", { class: "lv lv-" + k.cls, text: k.label }),
+    e.chain ? h("span", { class: "ch", text: e.chain }) : h("span"),
     h("span", { class: "m" }, tok, (tok ? " · " : "") + (e.detail ?? "") + score));
 }
 function renderActivity() {

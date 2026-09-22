@@ -11,6 +11,7 @@ export interface ActivityEvent {
   at: string; // ISO timestamp
   kind: ActivityKind;
   token?: string;
+  chain?: string;
   detail: string;
   data?: Record<string, unknown>;
 }
@@ -21,7 +22,7 @@ export class ActivityBus {
 
   constructor(private readonly capacity = 200) {}
 
-  publish(kind: ActivityKind, detail: string, extra?: { token?: string; data?: Record<string, unknown> }): void {
+  publish(kind: ActivityKind, detail: string, extra?: { token?: string; chain?: string; data?: Record<string, unknown> }): void {
     const e: ActivityEvent = { at: new Date().toISOString(), kind, detail, ...extra };
     this.ring.push(e);
     if (this.ring.length > this.capacity) this.ring.splice(0, this.ring.length - this.capacity);

@@ -511,7 +511,7 @@ const copyTracker = config.copytrade.wallets.length > 0 && tonRt?.providers.tonA
           `${s.label} ${s.swap.side} ${size} ${s.swap.symbol || "jetton"}`
             + (s.swap.tonAmount ? ` (≈${s.swap.tonAmount.toFixed(2)} TON)` : "")
             + (s.swap.dex ? ` via ${s.swap.dex}` : ""),
-          { token: s.swap.jettonMaster },
+          { token: s.swap.jettonMaster, chain: "ton" },
         );
       },
     )
@@ -667,7 +667,7 @@ async function decisionCycle(rt: ChainRuntime): Promise<void> {
           urgency: exitSignal.urgency,
         });
         activity.publish("exit", `exit signal · ${exitSignal.reason} (${exitSignal.urgency})`,
-          { token: position.tokenAddress, data: { pnlPct: position.unrealizedPnlPct } });
+          { token: position.tokenAddress, chain: position.chain, data: { pnlPct: position.unrealizedPnlPct } });
         if (exitSignal.urgency === "EMERGENCY") {
           alerter.alert("WARNING", `emergency-exit:${position.tokenAddress}`,
             `EMERGENCY EXIT ${position.tokenAddress}: ${exitSignal.reason} ` +
@@ -690,8 +690,8 @@ async function decisionCycle(rt: ChainRuntime): Promise<void> {
   const candidates = rt.scanner.getTradeCandidates();
   log.debug("Evaluating trade candidates", { chain: rt.chain, count: candidates.length });
   activity.publish("cycle",
-    `tick [${rt.chain}] · ${candidates.length} candidate(s) · ${openPositions.length} open · ${rt.regime.regime}`,
-    { data: { chain: rt.chain, candidates: candidates.length, open: openPositions.length, regime: rt.regime.regime } });
+    `tick · ${candidates.length} candidate(s) · ${openPositions.length} open · ${rt.regime.regime}`,
+    { chain: rt.chain, data: { candidates: candidates.length, open: openPositions.length, regime: rt.regime.regime } });
 
   for (const candidate of candidates.slice(0, 5)) { // cap per cycle
     try {
@@ -729,7 +729,7 @@ async function decisionCycle(rt: ChainRuntime): Promise<void> {
             reason,
           });
           activity.publish("skip", `${d.decision} · ${reason}`,
-            { token: candidate.tokenAddress, data: { score: candidate.scores.opportunity } });
+            { token: candidate.tokenAddress, chain: candidate.chain, data: { score: candidate.scores.opportunity } });
         }
         continue;
       }
@@ -747,7 +747,7 @@ async function decisionCycle(rt: ChainRuntime): Promise<void> {
             reason: aiVerdict.reason,
           });
           activity.publish("reject", `ai veto · ${aiVerdict.reason}`,
-            { token: candidate.tokenAddress });
+            { token: candidate.tokenAddress, chain: candidate.chain });
           continue;
         }
       }
@@ -879,7 +879,7 @@ async function executeExit(
   });
   activity.publish("exit",
     `closed · ${realizedPnl >= 0 ? "+" : ""}$${realizedPnl.toFixed(2)} (${position.unrealizedPnlPct.toFixed(1)}%)`,
-    { token: position.tokenAddress, data: { realizedPnlUsd: realizedPnl, reason: exitSignal.reason } });
+    { token: position.tokenAddress, chain: position.chain, data: { realizedPnlUsd: realizedPnl, reason: exitSignal.reason } });
 }
 
 /** Full entry path: intent → risk gate → journal → router → position → trackers.
@@ -954,7 +954,7 @@ async function executeEntry(
         reasons: riskResult.rejectionReasons,
       });
       activity.publish("reject", `risk engine · ${riskResult.rejectionReasons.join("; ")}`,
-        { token: input.tokenAddress });
+        { token: input.tokenAddress, chain: input.chain });
       return false;
     }
 
@@ -1000,11 +1000,11 @@ async function executeEntry(
       mode: config.trading.mode,
     });
     activity.publish("enter",
-      `BUY [${rt.chain}] $${intent.positionSizeUsd.toFixed(2)} @ ${position.entryPrice.toPrecision(4)}`,
+      `BUY $${intent.positionSizeUsd.toFixed(2)} @ ${position.entryPrice.toPrecision(4)}`,
       {
         token: input.tokenAddress,
+        chain: input.chain,
         data: {
-          chain: rt.chain,
           sizeUsd: intent.positionSizeUsd, entryPrice: position.entryPrice,
           stopLoss: position.stopLoss, takeProfit1: position.takeProfit1 ?? null,
           reasons: input.decision.reasons,
@@ -1097,7 +1097,7 @@ async function runAiCycle(): Promise<void> {
 async function runAiAction(action: AiAction, candidates: AiCandidate[]): Promise<void> {
   const skip = (reason: string): void => {
     log.info("AI action skipped", { type: action.type, token: action.tokenAddress, reason });
-    activity.publish("info", `ai skip · ${reason}`, { token: action.tokenAddress });
+    activity.publish("info", `ai skip · ${reason}`, { token: action.tokenAddress, chain: action.chain });
   };
   const cooldownUntil = (): number => aiCooldowns.get(action.tokenAddress) ?? 0;
   const onCooldown = cooldownUntil() > Date.now();
@@ -1233,7 +1233,7 @@ async function runAiAction(action: AiAction, candidates: AiCandidate[]): Promise
     });
     activity.publish("info",
       `ai tighten · ${Object.keys(result.applied).join("+") || "none"}${result.clamped.length ? ` (clamped: ${result.clamped.join("; ")})` : ""}`,
-      { token: action.tokenAddress });
+      { token: action.tokenAddress, chain: action.chain });
   } catch (err) {
     log.warn("AI action failed", { type: action.type, token: action.tokenAddress, error: (err as Error).message });
   }
@@ -1322,7 +1322,7 @@ async function runCopyEntry(signal: CopyTradeSignal): Promise<void> {
     if (verdict.verdict === "REJECT") {
       log.info("Copytrade candidate vetoed by AI", { token: swap.jettonMaster, reason: verdict.reason });
       activity.publish("reject", `ai veto · copy-trade ${swap.symbol} · ${verdict.reason}`,
-        { token: swap.jettonMaster });
+        { token: swap.jettonMaster, chain: "ton" });
       return;
     }
   }
