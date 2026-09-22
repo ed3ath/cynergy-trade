@@ -9,8 +9,11 @@
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
   /* Design system: ui-ux-pro-max "Minimalism & Swiss / Trust" — navy + gold terminal.
-     Layout: ui-ux-pro-max "Data-Dense Dashboard" — one 100dvh shell, no page scroll;
-     every panel scrolls internally (tables keep sticky headers).
+     Layout: ui-ux-pro-max "Data-Dense Dashboard" — one 100dvh shell, no page scroll
+     and no horizontal scroll from 700px up: the market table owns a full-width
+     bottom band, every panel scrolls internally (sticky headers), and table
+     columns triage away below width breakpoints instead of overflowing
+     (full data stays in the row drill-down modal + cell titles).
      Chart colors are the dataviz reference palette, re-validated against these
      surfaces (series-1 passes all checks on #222735 dark / #ffffff light;
      status hexes carry icon+label, never color alone). */
@@ -128,22 +131,31 @@
   .tile .delta { font-size: 11px; margin-top: 1px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .delta.up   { color: var(--good); }
   .delta.down { color: var(--critical); }
-  /* ── main grid: equity | market (tall) | activity+console ─────────────── */
+  /* ── main grid: the market table is the widest thing on the page, so it gets
+     a full-width band at the bottom — full width is what kills horizontal
+     scrolling. Logs flank it as tall panels; equity + book stack left.
+     One screen from 700px up; panels scroll internally; table columns
+     triage away below the breakpoints (nothing is lost — the drill-down
+     modal and cell titles keep the full data). ──────────────────────────── */
   main.grid {
     flex: 1; min-height: 0; display: grid; gap: 8px;
-    grid-template-columns: minmax(300px, 1fr) minmax(420px, 1.4fr) minmax(270px, 0.85fr);
-    grid-template-rows: minmax(0, 1.1fr) minmax(0, 1fr);
+    grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr) minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr) minmax(0, 1.1fr) minmax(0, 1.7fr);
+    grid-template-areas:
+      "equity  activity console"
+      "book    activity console"
+      "market  market   market";
   }
   .panel {
     background: var(--surface); border: 1px solid var(--ring); border-radius: 10px;
     padding: 8px 10px; margin: 0; min-width: 0; min-height: 0;
-    display: flex; flex-direction: column; gap: 6px;
+    display: flex; flex-direction: column; gap: 6px; overflow: hidden;
   }
-  .p-equity    { grid-column: 1; grid-row: 1; }
-  .p-book      { grid-column: 1; grid-row: 2; }
-  .p-market    { grid-column: 2; grid-row: 1 / span 2; }
-  .p-activity  { grid-column: 3; grid-row: 1; }
-  .p-console   { grid-column: 3; grid-row: 2; }
+  .p-equity    { grid-area: equity; }
+  .p-book      { grid-area: book; }
+  .p-market    { grid-area: market; }
+  .p-activity  { grid-area: activity; }
+  .p-console   { grid-area: console; }
   .ph { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; flex: none; }
   .ph h2 {
     font-size: 10px; color: var(--ink-2); margin: 0; font-weight: 600;
@@ -162,7 +174,7 @@
   }
   .pbody { flex: 1; min-height: 0; overflow: auto; }
   /* ── equity chart ────────────────────────────────────────────────────── */
-  #equity-wrap { position: relative; flex: 1; min-height: 120px; }
+  #equity-wrap { position: relative; flex: 1; min-height: 90px; }
   #equity-svg { width: 100%; height: 100%; display: block; }
   #equity-svg text { font: 11px Inter, system-ui, sans-serif; fill: var(--muted); }
   #tooltip {
@@ -202,11 +214,18 @@
   .pill-warn { color: var(--warning); border-color: color-mix(in srgb, var(--warning) 35%, transparent); }
   .pill-bad  { color: var(--critical); border-color: color-mix(in srgb, var(--critical) 35%, transparent); }
   .pill-info { color: var(--series-1); border-color: color-mix(in srgb, var(--series-1) 35%, transparent); }
-  /* ── market table ────────────────────────────────────────────────────── */
+  /* ── market table: no min-width — the full-width band + column triage make
+     it fit; overflow-x stays as a phone-sized safety net only ───────────── */
   .p-market .pbody { overflow: auto; }
-  #market table { min-width: 820px; }
-  .p-market th, .p-market td { padding-left: 6px; padding-right: 6px; }
+  .p-market th, .p-market td { padding-left: 5px; padding-right: 5px; }
+  .p-book th, .p-book td { padding-left: 5px; padding-right: 5px; }
   .p-market td { white-space: nowrap; }
+  /* column triage: hide the least-critical columns as the viewport narrows;
+     their data survives in the row drill-down modal and cell titles */
+  @media (max-width: 1399px) { .col-opened { display: none; } }           /* book: age → Holding title */
+  @media (max-width: 1239px) { .col-v5, .col-v1h, .col-hold { display: none; } } /* market: vols+holders */
+  @media (max-width: 1199px) { .col-entry { display: none; } }            /* trades: entry → title */
+  @media (max-width: 999px)  { .col-mc, .col-upd { display: none; } }     /* market: cap+staleness */
   #market tr[data-token] { cursor: pointer; }
   #market tr[data-token]:hover, #market tr[data-token]:focus { background: var(--wash); outline: none; }
   /* ── activity / console ──────────────────────────────────────────────── */
@@ -248,8 +267,24 @@
   #token-detail .detail-grid .grp { border: 1px solid var(--ring); border-radius: 8px; padding: 6px 10px; }
   #token-detail .grp h3 { font-size: 11px; color: var(--ink-2); margin: 0 0 4px; font-weight: 600; }
   #token-detail td { padding: 2px 6px; }
-  /* ── narrow screens: back to a stacked, scrolling page ────────────────── */
+  /* ── KPI digits shrink a notch before they would ellipsize ────────────── */
+  @media (max-width: 1100px) {
+    .tile .value { font-size: 16px; }
+    .tile.hero .value { font-size: 22px; }
+  }
+  /* ── medium (700–1023px): still ONE screen — two columns, market full width */
   @media (max-width: 1023px) {
+    main.grid {
+      grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);
+      grid-template-rows: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1.5fr);
+      grid-template-areas:
+        "equity  activity"
+        "book    console"
+        "market  market";
+    }
+  }
+  /* ── phone (<700px): five panels cannot share one screen — stacked page ── */
+  @media (max-width: 699px) {
     body { display: block; height: auto; min-height: 100dvh; overflow: auto; padding: 0 12px 12px; }
     .appbar { margin: 0 -12px; padding: 8px 12px; }
     .kpis { flex-direction: column; margin-top: 10px; }
@@ -624,16 +659,16 @@ function renderStatus(status) {
       const tbl = h("table");
       tbl.append(h("tr", {}, h("th", { text: "Token" }), h("th", { class: "num", text: "Holding" }),
         h("th", { class: "num", text: "Value" }), h("th", { class: "num", text: "PnL %" }),
-        h("th", { class: "num", text: "PnL $" }), h("th", { text: "Opened" })));
+        h("th", { class: "num", text: "PnL $" }), h("th", { class: "col-opened", text: "Opened" })));
       for (const x of status.positions) {
         const sym = symByToken.get(x.tokenAddress)?.symbol;
         tbl.append(h("tr", {},
           tokenCell(x.tokenAddress, sym ? sym + " · " + x.tokenAddress : undefined, x.chain, sym),
-          h("td", { class: "num mono", text: fmtTokens(x.sizeTokens) + (sym ? " " + sym : ""), title: "tokens held" }),
+          h("td", { class: "num mono", text: fmtTokens(x.sizeTokens) + (sym ? " " + sym : ""), title: "tokens held · opened " + relTime(x.openedAt) }),
           h("td", { class: "num", text: fmtUsd(x.sizeUsd + x.unrealizedPnlUsd), title: `entry ${fmtUsd(x.sizeUsd)}` }),
           h("td", { class: "num", text: fmtPct(x.unrealizedPnlPct), style: `color: var(--${x.unrealizedPnlPct >= 0 ? "good" : "critical"})` }),
           h("td", { class: "num", text: fmtUsd(x.unrealizedPnlUsd) }),
-          h("td", { text: relTime(x.openedAt) })));
+          h("td", { class: "col-opened", text: relTime(x.openedAt) })));
       }
       pos.replaceChildren(tbl);
     }
@@ -697,17 +732,16 @@ function renderTrades(trades) {
   }
   const tbl = h("table");
   tbl.append(h("tr", {},
-    h("th", { text: "Token" }), h("th", { class: "num", text: "Tokens" }),
-    h("th", { class: "num", text: "Entry" }), h("th", { class: "num", text: "Size" }),
+    h("th", { text: "Token" }),
+    h("th", { class: "num col-entry", text: "Entry" }),
     h("th", { class: "num", text: "PnL $" }),
     h("th", { class: "num", text: "PnL %" }), h("th", { text: "Exit" }), h("th", { text: "Closed" })));
   for (const t of trades) {
     const sym = symByToken.get(t.tokenAddress)?.symbol;
     tbl.append(h("tr", {},
       tokenCell(t.tokenAddress, sym ? sym + " · " + t.tokenAddress : undefined, t.chain, sym),
-      h("td", { class: "num mono", text: fmtTokens(t.sizeTokens) + (sym ? " " + sym : ""), title: "tokens traded · size at entry " + fmtUsd(t.sizeUsd) }),
-      h("td", { class: "num", text: fmtPrice(t.entryPrice) }),
-      h("td", { class: "num", text: fmtUsd(t.sizeUsd) }),
+      h("td", { class: "num mono col-entry", text: fmtPrice(t.entryPrice),
+        title: `entry ${fmtPrice(t.entryPrice)} · size ${fmtUsd(t.sizeUsd)} · ${fmtTokens(t.sizeTokens)}${sym ? " " + sym : ""} tokens` }),
       h("td", { class: "num", text: fmtUsd(t.pnlUsd), style: `color: var(--${t.pnlUsd >= 0 ? "good" : "critical"})` }),
       h("td", { class: "num", text: fmtPct(t.pnlPct), style: `color: var(--${t.pnlPct >= 0 ? "good" : "critical"})` }),
       h("td", { text: t.exitReason ?? "—" }),
@@ -860,15 +894,16 @@ function renderMarket(rows) {
   const pct = (n) => n == null
     ? h("td", { class: "num", text: "—" })
     : h("td", { class: "num", text: fmtPct(n), style: `color: var(--${n >= 0 ? "good" : "critical"})` });
-  const num = (v) => h("td", { class: "num", text: v });
+  const num = (v, cls) => h("td", { class: "num" + (cls ? " " + cls : ""), text: v });
   const tbl = h("table");
   tbl.append(h("tr", {},
     h("th", { text: "Token" }), h("th", { class: "num", text: "Price" }),
     h("th", { class: "num", text: "5m" }), h("th", { class: "num", text: "1h" }), h("th", { class: "num", text: "24h" }),
-    h("th", { class: "num", text: "Vol 5m" }), h("th", { class: "num", text: "Vol 1h" }), h("th", { class: "num", text: "Vol 24h" }),
-    h("th", { class: "num", text: "Liquidity" }), h("th", { class: "num", text: "Mkt cap" }),
-    h("th", { class: "num", text: "Holders" }), h("th", { class: "num", text: "Score" }),
-    h("th", { text: "Status" }), h("th", { class: "num", text: "Updated" })));
+    h("th", { class: "num col-v5", text: "Vol 5m" }), h("th", { class: "num col-v1h", text: "Vol 1h" }),
+    h("th", { class: "num", text: "Vol 24h" }),
+    h("th", { class: "num", text: "Liquidity" }), h("th", { class: "num col-mc", text: "Mkt cap" }),
+    h("th", { class: "num col-hold", text: "Holders" }), h("th", { class: "num", text: "Score" }),
+    h("th", { text: "Status" }), h("th", { class: "num col-upd", text: "Updated" })));
   for (const r of rows) {
     tbl.append(h("tr", {
       "data-token": r.token, tabindex: "0",
@@ -880,12 +915,13 @@ function renderMarket(rows) {
         r.chain, r.symbol),
       num(fmtPrice(r.priceUsd)),
       pct(r.priceChange5m), pct(r.priceChange1h), pct(r.priceChange24h),
-      num(fmtCompact(r.volume5mUsd)), num(fmtCompact(r.volume1hUsd)), num(fmtCompact(r.volume24hUsd)),
-      num(fmtCompact(r.liquidityUsd)), num(fmtCompact(r.marketCapUsd)),
-      num(r.holders == null ? "—" : r.holders.toLocaleString("en-US")),
+      num(fmtCompact(r.volume5mUsd), "col-v5"), num(fmtCompact(r.volume1hUsd), "col-v1h"),
+      num(fmtCompact(r.volume24hUsd)),
+      num(fmtCompact(r.liquidityUsd)), num(fmtCompact(r.marketCapUsd), "col-mc"),
+      num(r.holders == null ? "—" : r.holders.toLocaleString("en-US"), "col-hold"),
       num(r.score ? String(r.score) : "—"),
       r.status ? h("td", { title: r.rejection ?? "" }, statusPill(r.status)) : h("td", { text: "—" }),
-      num(fmtAge(r.observedAt))));
+      num(fmtAge(r.observedAt), "col-upd")));
   }
   el.replaceChildren(tbl);
 }
