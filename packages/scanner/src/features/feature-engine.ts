@@ -33,7 +33,23 @@ function feature(
   };
 }
 
+/** Buy/sell ratio from a window's counts; undefined when the window is empty (unknown).
+ *  Optional params: journal rows recorded before window counts existed lack the fields. */
+function ratioFromCounts(buys: number | undefined, sells: number | undefined): number | undefined {
+  const b = buys ?? 0;
+  const s = sells ?? 0;
+  if (b === 0 && s === 0) return undefined;
+  return s > 0 ? b / s : b;
+}
+
 export function computeMarketFeatures(snap: MarketSnapshot): Partial<FeatureSet> {
+  // Finest populated trade-count window wins: 1m (Birdeye/mock) → 5m → 1h
+  // (DexScreener txns, verified live 2026-09-22 on bsc/ton — the EVM
+  // confirmation path). Zero counts on every window = unknown, not bearish.
+  const buySellRatio =
+    ratioFromCounts(snap.buyCount1m, snap.sellCount1m)
+    ?? ratioFromCounts(snap.buyCount5m, snap.sellCount5m)
+    ?? ratioFromCounts(snap.buyCount1h, snap.sellCount1h);
   return {
     price_usd:           feature("price_usd",           snap.priceUsd,           snap),
     price_change_1m:     feature("price_change_1m",     snap.priceChange1m,      snap),
@@ -53,17 +69,9 @@ export function computeMarketFeatures(snap: MarketSnapshot): Partial<FeatureSet>
     trade_count_24h:     feature("trade_count_24h",     snap.tradeCount24h,      snap),
     unique_traders_24h:  feature("unique_traders_24h",  snap.uniqueTraders24h,   snap),
     // Derived
-    // Absent trade counts (DexScreener: TON always, Solana without Birdeye) are
-    // unknown, not bearish — omit the feature so strategies apply their neutral default
-    ...(snap.buyCount1m === 0 && snap.sellCount1m === 0
+    ...(buySellRatio === undefined
       ? {}
-      : {
-          buy_sell_ratio: feature(
-            "buy_sell_ratio",
-            snap.sellCount1m > 0 ? snap.buyCount1m / snap.sellCount1m : snap.buyCount1m,
-            snap,
-          ),
-        }),
+      : { buy_sell_ratio: feature("buy_sell_ratio", buySellRatio, snap) }),
     volume_buy_pct: feature(
       "volume_buy_pct",
       snap.volumeUsd1m > 0 ? (snap.buyVolumeUsd1m / snap.volumeUsd1m) * 100 : 50,

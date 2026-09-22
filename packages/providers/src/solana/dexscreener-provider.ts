@@ -68,6 +68,11 @@ export class DexScreenerProvider extends AbstractProvider
       priceChange24h: p.priceChange?.h24 ?? 0,
       buyCount1m: 0,
       sellCount1m: 0,
+      // txns.{m5,h1} verified live 2026-09-22 on bsc/ton (and base pairs); absent → 0
+      buyCount5m: p.txns?.m5?.buys ?? 0,
+      sellCount5m: p.txns?.m5?.sells ?? 0,
+      buyCount1h: p.txns?.h1?.buys ?? 0,
+      sellCount1h: p.txns?.h1?.sells ?? 0,
       buyVolumeUsd1m: 0,
       sellVolumeUsd1m: 0,
       uniqueBuyers1m: 0,

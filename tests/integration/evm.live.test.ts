@@ -58,6 +58,14 @@ describe.skipIf(!(await networkAvailable()))("live EVM provider integration", ()
     expect(l.liquidityUsd).toBeGreaterThan(100_000);
   }, 30_000);
 
+  it("DexScreener txns windows populate buy/sell counts (EVM flow-confirmation path)", async () => {
+    const p = new DexScreenerProvider("https://api.dexscreener.com", 0, "bsc");
+    const m = await p.getMarketSnapshot(WBNB, "bsc");
+    // txns.{m5,h1} verified live 2026-09-22 — WBNB trades continuously
+    expect(m.buyCount5m + m.sellCount5m).toBeGreaterThan(0);
+    expect(m.buyCount1h + m.sellCount1h).toBeGreaterThan(m.buyCount5m + m.sellCount5m);
+  }, 30_000);
+
   it("GeckoTerminal bsc discovery poll resolves (never throws)", async () => {
     const p = new GeckoTerminalDiscoveryProvider("https://api.geckoterminal.com", {
       network: "bsc",

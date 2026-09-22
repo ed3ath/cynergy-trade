@@ -91,6 +91,11 @@ export interface MarketSnapshot {
   priceChange24h: number;
   buyCount1m: number;
   sellCount1m: number;
+  /** Window trade counts (DexScreener txns.m5/h1; 0 when provider lacks them). */
+  buyCount5m: number;
+  sellCount5m: number;
+  buyCount1h: number;
+  sellCount1h: number;
   buyVolumeUsd1m: number;
   sellVolumeUsd1m: number;
   uniqueBuyers1m: number;

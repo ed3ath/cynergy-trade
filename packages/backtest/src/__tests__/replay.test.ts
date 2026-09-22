@@ -22,7 +22,9 @@ function series(token: string, prices: number[], h1 = 5, c5m = 2): TokenSeries {
         volumeUsd1m: 1_000, volumeUsd5m: 5_000, volumeUsd15m: 15_000,
         volumeUsd1h: 60_000, volumeUsd24h: 1_400_000,
         priceChange1m: 1, priceChange5m: c5m, priceChange15m: c5m, priceChange1h: h1, priceChange24h: 10,
-        buyCount1m: 0, sellCount1m: 0, buyVolumeUsd1m: 0, sellVolumeUsd1m: 0,
+        buyCount1m: 0, sellCount1m: 0,
+        buyCount5m: 0, sellCount5m: 0, buyCount1h: 0, sellCount1h: 0,
+        buyVolumeUsd1m: 0, sellVolumeUsd1m: 0,
         uniqueBuyers1m: 0, uniqueSellers1m: 0, tradeCount24h: 500, uniqueTraders24h: 100,
         observedAt: new Date(t0 + i * 60_000), provider: "test", confidence: 0.9,
       },
@@ -55,13 +57,14 @@ const opts = { marketConfig, freshnessConfig };
 
 describe("runBacktest", () => {
   it("enters on momentum, exits on TP1 (first take-profit level) with positive return", () => {
-    // 1.0 → +3.5%/min: entry row0(+slip), TP1 = entry*1.2 hit first
+    // 1.0 → +3.5%/min: entry row0(+slip), TP1 +3% (policy since 2026-09-22,
+    // was +5%) crossed at row1
     const prices = Array.from({ length: 30 }, (_, i) => 1 + i * 0.035);
     const r = runBacktest([series("RISE", prices)], opts);
 
     expect(r.trades.length).toBeGreaterThanOrEqual(1);
     const t = r.trades[0]!;
-    expect(t.returnPct).toBeGreaterThan(4); // TP1 +5% minus slippage (policy: take profit early)
+    expect(t.returnPct).toBeGreaterThan(1.5); // TP1 +3% minus entry+exit slippage
     expect(t.reason).toMatch(/Take profit 1/);
     expect(r.winRate).toBe(1);
   });

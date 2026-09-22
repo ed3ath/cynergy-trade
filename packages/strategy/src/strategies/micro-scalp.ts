@@ -66,6 +66,7 @@ export class MicroScalpStrategy implements TradingStrategy {
     }
 
     // ── Entry trigger: 1m burst path or coarse fallback ───────────────────────
+    let turnoverOnly = false;
     const hasFineData = market.volumeUsd1m > 0 && market.uniqueBuyers1m > 0;
     if (hasFineData) {
       const perMinute5m = Math.max(1, market.volumeUsd5m / 5);
@@ -102,6 +103,15 @@ export class MicroScalpStrategy implements TradingStrategy {
         reasons.push(`1h move +${coarse5m.toFixed(1)}%`, `Buy/sell ratio ${buySellRatio.toFixed(2)}`);
       } else if (holderGrowth > 0.5) {
         reasons.push(`1h move +${coarse5m.toFixed(1)}%`, `Holder growth +${holderGrowth.toFixed(1)}%/5m`);
+      } else if (liquidity.liquidityUsd > 0 && market.volumeUsd5m / liquidity.liquidityUsd >= 0.05) {
+        // Flow counts AND holder velocity both missing (GoPlus-unindexed EVM
+        // pools): 5m turnover ≥ 5% of pool TVL is still real volume
+        // confirmation (§2 rule: entry without volume = trap) — enter at
+        // reduced confidence rather than hard-skip.
+        reasons.push(`1h move +${coarse5m.toFixed(1)}%`,
+          `5m turnover ${(100 * market.volumeUsd5m / liquidity.liquidityUsd).toFixed(1)}% of pool`);
+        risks.push("Flow counts unavailable — turnover-only confirmation");
+        turnoverOnly = true;
       } else {
         return this.skip("No volume/holder confirmation available", ctx);
       }
@@ -110,7 +120,8 @@ export class MicroScalpStrategy implements TradingStrategy {
     // ── Confidence: bursts are noisier than sustained trends ──────────────────
     const baseConfidence = Math.min(0.7, 0.4 + candidate.scores.opportunity / 250);
     const securityPenalty = security.status === "WARNING" ? 0.1 : 0;
-    const confidence = Math.max(0.3, baseConfidence - securityPenalty);
+    const turnoverPenalty = turnoverOnly ? 0.05 : 0;
+    const confidence = Math.max(0.3, baseConfidence - securityPenalty - turnoverPenalty);
 
     // ── Tight exit profile — this is what makes it a scalp ────────────────────
     const price = market.priceUsd;

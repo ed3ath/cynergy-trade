@@ -57,7 +57,7 @@ import {
   type ProviderRegistry,
 } from "@autonomous-trader/providers";
 import { Scanner, type ScannerConfig } from "@autonomous-trader/scanner";
-import { StrategyEngine, FreshMomentumStrategy, MicroScalpStrategy, type StrategyContext } from "@autonomous-trader/strategy";
+import { StrategyEngine, FreshMomentumStrategy, MicroScalpStrategy, BreakoutContinuationStrategy, DipReversionStrategy, type StrategyContext } from "@autonomous-trader/strategy";
 import {
   createExecutionRouter,
   PgIdempotencyGuard,
@@ -417,6 +417,8 @@ function aggregatePortfolio(): PortfolioSnapshot {
 const strategyEngine = new StrategyEngine(log.child({ component: "strategy" }));
 strategyEngine.register(new FreshMomentumStrategy());
 strategyEngine.register(new MicroScalpStrategy());
+strategyEngine.register(new BreakoutContinuationStrategy());
+strategyEngine.register(new DipReversionStrategy());
 
 const performanceTracker = new StrategyPerformanceTracker();
 const riskEngine = new RiskEngine(
