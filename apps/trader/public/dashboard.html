@@ -541,6 +541,7 @@ async function refreshHistory() {
   try {
     renderMarket(await fetch("/market").then((r) => r.json()));
   } catch { /* keep last frame */ }
+  void refreshOpenDetail();
 }
 function renderTrades(trades) {
   const el = $("trades");
@@ -754,6 +755,16 @@ async function showTokenDetail(token) {
 $("token-detail").addEventListener("click", (e) => {
   if (e.target === $("token-detail")) closeTokenDetail(); // backdrop click
 });
+// silent re-fetch of an open panel, piggybacked on the 15s market refresh
+async function refreshOpenDetail() {
+  const token = detailReqToken;
+  if (!token) return;
+  try {
+    const d = await fetch("/market/" + encodeURIComponent(token)).then((r) => r.json());
+    if (detailReqToken !== token) return; // closed or superseded meanwhile
+    renderTokenDetail(d, false);
+  } catch { /* keep last frame */ }
+}
 addEventListener("keydown", (e) => {
   if (e.key === "Escape" && $("token-detail").classList.contains("open")) closeTokenDetail();
 });
@@ -774,22 +785,52 @@ function fmtDur(ms) {
     : h >= 1 ? `${h}h ${Math.round((ms % 3600000) / 60000)}m`
     : `${Math.round(ms / 60000)}m`;
 }
-function renderTokenDetail(d) {
+// focus=false renders a silent refresh of an already-open panel — keeps the
+// user's focus/selection instead of snapping back to the Close button
+function renderTokenDetail(d, focus = true) {
   const el = $("token-sheet");
   const close = h("button", { id: "detail-close", text: "Close", onclick: closeTokenDetail });
   if (!d || !d.token) { el.replaceChildren(close, h("div", { class: "empty", text: "token not tracked" })); return; }
   const sec = d.security;
   const hist = d.history || [];
-  const spark = h("svg", { viewBox: "0 0 300 64", preserveAspectRatio: "none", style: "width: 100%; height: 64px; display: block" });
+  // Two stacked lanes on one shared x — price on top, $volume (1h rolling) below.
+  // Separate lanes, not a second y-scale on the same marks: single-axis rule.
+  const spark = h("svg", { viewBox: "0 0 300 78", preserveAspectRatio: "none", style: "width: 100%; height: 78px; display: block" });
+  let sparkCap = null;
   if (hist.length >= 2) {
     const vals = hist.map((p) => p.priceUsd);
+    const vols = hist.map((p) => p.volumeUsd1h || 0);
     let lo = Math.min(...vals), hi = Math.max(...vals);
     if (hi === lo) { hi = lo * 1.01 || 1; lo = lo * 0.99; }
+    const vmax = Math.max(...vols, 1e-12);
     const x = (i) => (i / (hist.length - 1)) * 300;
-    const y = (v) => 4 + (1 - (v - lo) / (hi - lo)) * 52;
+    const y = (v) => 4 + (1 - (v - lo) / (hi - lo)) * 40; // price lane [4,44]
+    const vTop = (v) => 76 - (v / vmax) * 26;             // volume lane [50,76]
+    const slot = 300 / hist.length, barW = Math.max(0.8, slot * 0.6);
+    for (let i = 0; i < hist.length; i++) {
+      if (vols[i] <= 0) continue;
+      spark.append(h("rect", { x: x(i) - barW / 2, y: vTop(vols[i]), width: barW, height: 76 - vTop(vols[i]), fill: cssVar("--series-1"), opacity: 0.22 }));
+    }
     const line = vals.map((v, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join("");
-    spark.append(h("path", { d: `${line}L300,62L0,62Z`, fill: cssVar("--series-1"), opacity: 0.1 }));
+    spark.append(h("path", { d: `${line}L300,44L0,44Z`, fill: cssVar("--series-1"), opacity: 0.08 }));
     spark.append(h("path", { d: line, fill: "none", stroke: cssVar("--series-1"), "stroke-width": 1.5 }));
+    const cross = h("line", { y1: 2, y2: 76, stroke: cssVar("--baseline"), "stroke-width": 1, visibility: "hidden" });
+    spark.append(cross);
+    sparkCap = h("div", { style: "color: var(--ink-2); font-size: 11px" });
+    const summary = `${fmtPrice(hist[0].priceUsd)} → ${fmtPrice(hist[hist.length - 1].priceUsd)} · ${new Date(hist[0].at).toLocaleTimeString()} → ${new Date(hist[hist.length - 1].at).toLocaleTimeString()} · bars = $vol 1h`;
+    sparkCap.textContent = summary;
+    // hover: the whole svg is the hit target; the readout swaps the caption line
+    spark.addEventListener("mousemove", (e) => {
+      const r = spark.getBoundingClientRect();
+      const i = Math.max(0, Math.min(hist.length - 1, Math.round(((e.clientX - r.left) / r.width) * (hist.length - 1))));
+      cross.setAttribute("x1", x(i)); cross.setAttribute("x2", x(i)); cross.setAttribute("visibility", "visible");
+      const p = hist[i];
+      sparkCap.textContent = `${fmtPrice(p.priceUsd)} · ${fmtCompact(p.volumeUsd1h || 0)} vol 1h · ${new Date(p.at).toLocaleTimeString()}`;
+    });
+    spark.addEventListener("mouseleave", () => {
+      cross.setAttribute("visibility", "hidden");
+      sparkCap.textContent = summary;
+    });
   }
   el.replaceChildren(
     close,
@@ -798,10 +839,7 @@ function renderTokenDetail(d) {
       h("span", { text: d.status, style: "font-weight: 600" }),
       h("span", { text: `score ${d.score} · tracked ${relTime(d.firstSeenAt)} · ${hist.length} price points`, style: "color: var(--ink-2)" })),
     hist.length >= 2
-      ? h("div", { style: "margin-top: 6px" }, spark,
-          h("div", {
-            text: `${fmtPrice(hist[0].priceUsd)} → ${fmtPrice(hist[hist.length - 1].priceUsd)} · ${new Date(hist[0].at).toLocaleTimeString()} → ${new Date(hist[hist.length - 1].at).toLocaleTimeString()}`,
-            style: "color: var(--ink-2); font-size: 11px" }))
+      ? h("div", { style: "margin-top: 6px" }, spark, sparkCap)
       : h("div", { class: "empty", text: "no persisted price history yet — the sparkline starts after the first snapshot minute" }),
     h("div", { class: "detail-grid" },
       sec ? grp("Security", [
@@ -834,7 +872,7 @@ function renderTokenDetail(d) {
       ]),
     ),
   );
-  close.focus(); // modal open → focus lands on its dismiss control
+  if (focus) close.focus(); // modal open → focus lands on its dismiss control
 }
 function niceTicks(min, max, count) {
   const span = max - min || 1;
