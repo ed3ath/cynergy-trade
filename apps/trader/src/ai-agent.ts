@@ -49,9 +49,10 @@ export interface AiCandidate {
    *  this token on the last tick — guidance for the AI's decision, never a
    *  gate. Absent for tokens the ensemble hasn't evaluated. */
   strategyViews?: { strategyId: string; decision: string; confidence: number; reasons: string[] }[];
-  /** Jev-ai classifier second opinion: P(good entry), 0–1. Guidance like
-   *  scores/strategyViews — never a gate; the host also damps ENTER sizing
-   *  confidence by it. Absent when Jev is disabled, failed, or unscored. */
+  /** Jev-ai classifier second opinion: 0–1 entry score from an independent
+   *  rug/momentum review. Guidance like scores/strategyViews — never a gate;
+   *  the host also damps ENTER sizing confidence by it. Absent when Jev is
+   *  disabled, failed, or unscored. */
   jevScore?: number;
 }
 

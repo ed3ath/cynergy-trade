@@ -1268,23 +1268,27 @@ async function runAiCycle(): Promise<void> {
     // (guidance for the model, sizing damper for the host). Failures = no
     // scores = pass-through, so a dead Jev never blocks entries.
     if (jevAgent && candidates.length > 0) {
-      const jevScores = await jevAgent.score(candidates);
+      const jevReviews = await jevAgent.score(candidates);
+      const pct = (p: number | undefined): string => (p === undefined ? "?" : Math.round(p * 100) + "%");
       let kept = 0;
       let filtered = 0;
       for (let i = candidates.length - 1; i >= 0; i--) {
         const c = candidates[i];
         if (!c) continue;
-        const s = jevScores.get(`${c.chain}:${c.tokenAddress}`);
-        if (s === undefined) continue;
-        if (s < config.ai.jevMinScore) {
+        const r = jevReviews.get(`${c.chain}:${c.tokenAddress}`);
+        if (r === undefined) continue;
+        if (r.score < config.ai.jevMinScore) {
           candidates.splice(i, 1);
           filtered++;
-          aiLog.info("Jev filtered candidate", { token: c.tokenAddress, chain: c.chain, score: s });
+          aiLog.info("Jev filtered candidate", {
+            token: c.tokenAddress, chain: c.chain,
+            score: r.score, rug: r.rugProb, momentum: r.momentumProb,
+          });
           activity.publish("reject",
-            `jev filtered · P(entry) ${s.toFixed(2)} < ${config.ai.jevMinScore}`,
-            { token: c.tokenAddress, chain: c.chain, data: { score: Math.round(s * 100) } });
+            `jev filtered · ${(r.score * 5).toFixed(1)}/5 · rug ${pct(r.rugProb)} · mom ${pct(r.momentumProb)}`,
+            { token: c.tokenAddress, chain: c.chain, data: { score: Math.round(r.score * 100) } });
         } else {
-          c.jevScore = s;
+          c.jevScore = r.score;
           kept++;
         }
       }

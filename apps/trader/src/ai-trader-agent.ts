@@ -123,7 +123,8 @@ const SYSTEM_PROMPT =
   "memory of what past losses taught you), and — when copy-trade is on — recent swaps by " +
   "tracked high-PNL wallets. " +
   "Scores and strategyViews are GUIDANCE, not gates: they tell you what the quantitative " +
-  "screens see; jevScore, when present, is an independent classifier's P(good entry) — " +
+  "screens see; jevScore, when present, is an independent classifier's 0-1 entry score from " +
+  "a rug/momentum review — " +
   "same deal — and when your own evidence-based thesis says a trade has positive expected " +
   "value you ENTER it even if scores are middling or every strategy declined — the goal is " +
   "net positive PnL, and passing on a good setup loses money just like a bad entry does. " +

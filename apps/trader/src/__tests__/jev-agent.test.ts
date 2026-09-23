@@ -45,33 +45,66 @@ afterEach(() => {
 });
 
 describe("JevAgent", () => {
-  it("maps noul answers to chain:token scores and tracks input-token cost", async () => {
-    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({
+  it("normalizes graded score answers and attaches the rug/momentum review", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({
       model: "jev-latest",
       answers: {
-        c0: { type: "noul", noul: 0.9 },
-        c1: { type: "noul", noul: 0.2 },
+        s0: { type: "score", score: 4.2 },
+        rug0: { type: "noul", noul: 0.7 },
+        mom0: { type: "noul", noul: 0.9 },
+        s1: { type: "score", score: 1 },
+        rug1: { type: "noul", noul: 0.05 },
+        mom1: { type: "noul", noul: 0.6 },
       },
       usage: { input_tokens: 400, output_tokens: 0 },
     })));
-    const scores = await agent().score([cand("TokA"), cand("TokB", "ton")]);
-    expect(scores.get("solana:TokA")).toBe(0.9);
-    expect(scores.get("ton:TokB")).toBe(0.2);
-
-    const body = JSON.parse((fetchSpy.mock.calls[0]?.[1] as RequestInit).body as string) as {
-      questions: Record<string, { type: string }>;
-    };
-    expect(Object.keys(body.questions)).toEqual(["c0", "c1"]);
-    expect(body.questions["c0"]!.type).toBe("noul");
+    const reviews = await agent().score([cand("TokA"), cand("TokB", "ton")]);
+    expect(reviews.get("solana:TokA")).toEqual({ score: 4.2 / 5, rugProb: 0.7, momentumProb: 0.9 });
+    expect(reviews.get("ton:TokB")).toEqual({ score: 1 / 5, rugProb: 0.05, momentumProb: 0.6 });
   });
 
-  it("clamps out-of-range noul values into 0–1", async () => {
+  it("clamps out-of-range probabilities and fractional scores into 0–1", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({
-      answers: { c0: { type: "noul", noul: 1.7 }, c1: { type: "noul", noul: -0.3 } },
+      answers: {
+        s0: { type: "score", score: 9.5 },
+        rug0: { type: "noul", noul: 1.7 },
+        mom0: { type: "noul", noul: -0.3 },
+      },
     })));
-    const scores = await agent().score([cand("TokA"), cand("TokB")]);
-    expect(scores.get("solana:TokA")).toBe(1);
-    expect(scores.get("solana:TokB")).toBe(0);
+    const reviews = await agent().score([cand("TokA")]);
+    expect(reviews.get("solana:TokA")).toEqual({ score: 1, rugProb: 1, momentumProb: 0 });
+  });
+
+  it("omits review probabilities that are missing or non-numeric", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({
+      answers: { s0: { type: "score", score: 3 }, rug0: { type: "noul" }, mom0: { type: "noul", noul: "yes" } },
+    })));
+    const reviews = await agent().score([cand("TokA")]);
+    expect(reviews.get("solana:TokA")).toEqual({ score: 3 / 5 });
+  });
+
+  it("drops candidates whose score answer is invalid (pass-through, no guess)", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({
+      answers: { s0: { type: "score" }, s1: { type: "noul", noul: 0.9 }, rug1: {}, mom1: {} },
+    })));
+    const reviews = await agent().score([cand("TokA"), cand("TokB")]);
+    expect(reviews.size).toBe(0);
+  });
+
+  it("sends compact card state and score+noul questions", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({
+      answers: { s0: { type: "score", score: 3 } },
+    })));
+    await agent().score([cand("TokVeryLongAddress123456789")]);
+    const body = JSON.parse((fetchSpy.mock.calls[0]?.[1] as RequestInit).body as string) as {
+      state: string;
+      questions: Record<string, { type: string; criteria?: string[] }>;
+    };
+    expect(Object.keys(body.questions).sort()).toEqual(["mom0", "rug0", "s0"]);
+    expect(body.questions["s0"]!.criteria).toHaveLength(6);
+    // compact card: shortened address, no strategyViews/market bloat
+    const state = JSON.parse(body.state) as { token: string }[];
+    expect(state[0]!.token).toBe("TokVer…6789");
   });
 
   it("returns an empty map on HTTP failure, timeout, or garbage — never throws", async () => {
@@ -88,20 +121,11 @@ describe("JevAgent", () => {
   it("skips the call entirely on empty input or a hit cost cap", async () => {
     const fetchSpy = vi.spyOn(globalThis, "fetch");
     expect(await agent().score([])).toEqual(new Map());
-    // cap enforced only when costPer1k > 0
     const c = cfg({ costPer1kTokensUsd: 1, maxCostPerDayUsd: 0.001 });
     const log = createLogger({ t: "test" });
     const budget = new AiBudget(c, log);
     budget.trackCost({ prompt_tokens: 10_000 }); // blows the tiny cap
     expect(await new JevAgent(c, log, budget).score([cand("TokA")])).toEqual(new Map());
     expect(fetchSpy).not.toHaveBeenCalled();
-  });
-
-  it("drops answers with non-numeric noul instead of trusting them", async () => {
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({
-      answers: { c0: { type: "noul", noul: "high" }, c1: { type: "noul" } },
-    })));
-    const scores = await agent().score([cand("TokA"), cand("TokB")]);
-    expect(scores.size).toBe(0);
   });
 });
