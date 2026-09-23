@@ -108,7 +108,7 @@ export class PositionManager {
   /** Update a position's current market data. Returns any exit signal. */
   updateAndCheckExit(positionId: string, input: PositionMonitorInput): ExitSignal | null {
     const position = this.positions.get(positionId);
-    if (!position || position.status !== "OPEN") return null;
+    if (!position || (position.status !== "OPEN" && position.status !== "PARTIAL_EXIT")) return null;
 
     const price = input.market.priceUsd;
     position.currentPrice = price;
@@ -263,6 +263,48 @@ export class PositionManager {
     return null;
   }
 
+  /** Sell a fraction of an open position without closing it — TP1 takes half,
+   *  the remainder keeps running under the exit hierarchy (stop / trailing /
+   *  TP2 / time stop). One-way: TP1 is cleared so it can never re-fire;
+   *  status moves OPEN → PARTIAL_EXIT. SELL outputAmount is USD-micro, so the
+   *  token delta is derived from soldUsd / executedPrice (tokens are 1e9-nano). */
+  async reducePosition(
+    positionId: string,
+    sellFraction: number,
+    currentPriceUsd: number,
+    intent: TradeIntent,
+  ): Promise<{ result: ExecutionResult; position: Position }> {
+    const position = this.positions.get(positionId);
+    if (!position || (position.status !== "OPEN" && position.status !== "PARTIAL_EXIT")) {
+      throw new Error(`Position ${positionId} not open for reduce`);
+    }
+    if (sellFraction <= 0 || sellFraction >= 1) {
+      throw new Error(`sellFraction must be in (0,1), got ${sellFraction}`);
+    }
+
+    const result = await this.executionRouter.execute(intent, currentPriceUsd);
+
+    if (result.status !== "CONFIRMED") {
+      throw new Error(`Reduce of ${positionId} not confirmed (${result.status}) — size unchanged`);
+    }
+
+    const soldTokensNano = BigInt(Math.round((intent.positionSizeUsd / result.executedPrice) * 1e9));
+    position.sizeTokens -= soldTokensNano;
+    position.sizeUsd = Math.max(0, position.sizeUsd - intent.positionSizeUsd);
+    delete position.takeProfit1; // one-shot: never fires again
+    position.status = "PARTIAL_EXIT";
+    position.updatedAt = new Date();
+
+    this.logger.info("Position reduced", {
+      positionId,
+      token: position.tokenAddress,
+      soldUsd: intent.positionSizeUsd,
+      remainingUsd: position.sizeUsd,
+      executedPrice: result.executedPrice,
+    });
+    return { result, position };
+  }
+
   /** Execute an exit for a given position. */
   async exitPosition(
     positionId: string,
@@ -303,7 +345,8 @@ export class PositionManager {
    *  double-sell on-chain (ops must resolve the in-flight order). */
   restorePosition(position: Position): void {
     if (this.positions.has(position.id)) return;
-    if (position.status !== "OPEN" && !(position.mode === "LIVE" && position.status === "CLOSING")) {
+    if (position.status !== "OPEN" && position.status !== "PARTIAL_EXIT"
+        && !(position.mode === "LIVE" && position.status === "CLOSING")) {
       this.logger.warn("Restored position in transient status — coercing to OPEN", {
         positionId: position.id, status: position.status,
       });
@@ -321,7 +364,8 @@ export class PositionManager {
   }
 
   getOpenPositions(): Position[] {
-    return [...this.positions.values()].filter((p) => p.status === "OPEN");
+    return [...this.positions.values()]
+      .filter((p) => p.status === "OPEN" || p.status === "PARTIAL_EXIT");
   }
 
   getPosition(id: string): Position | undefined {

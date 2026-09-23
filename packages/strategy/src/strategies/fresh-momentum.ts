@@ -147,10 +147,9 @@ export class FreshMomentumStrategy implements TradingStrategy {
 
     // ── Stop / TP levels ──────────────────────────────────────────────────────
     const price = market.priceUsd;
-    // Policy: always take profit, never hold long. First TP hit exits the full
-    // position (execution sells position.sizeUsd on any exit signal), so TP1 is
-    // the effective full take-profit. Geometry roughly matches Micro Scalp
-    // (-7/+3/+10) — momentum gets slightly more room.
+    // Policy: TP1 (+3%) sells HALF the position (see executePartialTp1 in the
+    // trader); the remainder runs under stop/trailing/TP2/time-stop. Geometry
+    // roughly matches Micro Scalp (-7/+3/+10) — momentum gets slightly more room.
     const stopLoss = price * 0.90;      // -10% hard stop — loss prevention over ride-through
     const takeProfit1 = price * 1.03;   // +3% take profit (full exit)
     const takeProfit2 = price * 1.10;   // +10% backstop target

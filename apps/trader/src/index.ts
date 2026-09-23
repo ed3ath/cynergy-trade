@@ -753,7 +753,14 @@ async function decisionCycle(rt: ChainRuntime): Promise<void> {
             `(pnl ${position.unrealizedPnlPct.toFixed(1)}%)`);
         }
 
-        await executeExit(rt, position, exitSignal, marketSnap);
+        // TP1 policy (user 2026-09-23): take HALF at the first take-profit and
+        // let the remainder run under stop/trailing/TP2/time-stop. Everything
+        // else exits in full.
+        if (exitSignal.reason.startsWith("Take profit 1") && position.status === "OPEN") {
+          await executePartialTp1(rt, position, exitSignal, marketSnap);
+        } else {
+          await executeExit(rt, position, exitSignal, marketSnap);
+        }
       }
     } catch (err) {
       log.error("Position monitoring error", { chain: rt.chain, positionId: position.id, error: (err as Error).message });
@@ -909,6 +916,74 @@ async function decisionCycle(rt: ChainRuntime): Promise<void> {
 }
 
 // ─── Shared execution paths (strategy loop + autonomous AI) ──────────────────
+
+/** TP1 partial path: sell half, journal + realize the half's PnL, keep the
+ *  remainder managed (stop/trailing/TP2/time-stop still armed). */
+async function executePartialTp1(
+  rt: ChainRuntime,
+  position: Position,
+  exitSignal: ExitSignal,
+  marketSnap: MarketSnapshot,
+): Promise<void> {
+  const soldUsd = position.sizeUsd * 0.5;
+  const intent: TradeIntent = {
+    id: generateTradeIntentId(),
+    tokenAddress: position.tokenAddress,
+    chain: position.chain,
+    side: "SELL",
+    mode: config.trading.mode,
+    strategyId: position.strategyId,
+    strategyVersion: "1.0.0",
+    riskVersion: config.risk.version,
+    positionSizeUsd: soldUsd,
+    maxSlippageBps: config.risk.maxSlippageBps,
+    maxPriceImpactBps: config.risk.maxPriceImpactBps,
+    reason: exitSignal.reason,
+    createdAt: new Date(),
+    expiresAt: new Date(Date.now() + 30_000),
+  };
+
+  const { result, position: reduced } =
+    await rt.positions.reducePosition(position.id, 0.5, marketSnap.priceUsd, intent);
+
+  await journal.recordTradeIntent(intent);
+  await journal.recordExecutionResult(result, intent);
+  rt.fillCalibrator?.record(intent, result);
+  await journal.updatePosition(reduced);
+  await journal.recordPositionEvent(position.id, "PARTIAL_EXIT", result.executedPrice,
+    soldUsd - soldUsd / (1 + position.unrealizedPnlPct / 100), {
+      reason: exitSignal.reason,
+      soldUsd,
+      remainingUsd: reduced.sizeUsd,
+    });
+
+  // Realize the sold half's PnL into the ledgers (proportional to the
+  // position-level unrealized PnL); the remainder stays mark-to-market.
+  const realizedPnl = position.unrealizedPnlUsd * 0.5;
+  rt.portfolio.dailyPnlUsd += realizedPnl;
+  rt.portfolio.weeklyPnlUsd += realizedPnl;
+  rt.portfolio.monthlyPnlUsd += realizedPnl;
+  rt.portfolio.allTimePnlUsd += realizedPnl;
+  performanceTracker.record({
+    strategyId: position.strategyId,
+    pnlUsd: realizedPnl,
+    feesUsd: result.feeUsd,
+    slippageUsd: soldUsd * (result.actualSlippageBps / 10_000),
+    durationMs: Date.now() - position.openedAt.getTime(),
+    timestamp: new Date(),
+  });
+
+  log.info("TP1 partial exit", {
+    chain: rt.chain,
+    positionId: position.id,
+    token: position.tokenAddress,
+    soldUsd: soldUsd.toFixed(2),
+    realizedPnlUsd: realizedPnl.toFixed(2),
+    remainingUsd: reduced.sizeUsd.toFixed(2),
+  });
+  activity.publish("exit", `tp1 half out · +${position.unrealizedPnlPct.toFixed(1)}% → ${realizedPnl >= 0 ? "+" : ""}${realizedPnl.toFixed(2)} USD, half still riding`,
+    { token: position.tokenAddress, chain: position.chain, data: { realizedPnlUsd: realizedPnl } });
+}
 
 /** Full exit path: intent → router → journal → PnL ledgers → trackers. */
 async function executeExit(
