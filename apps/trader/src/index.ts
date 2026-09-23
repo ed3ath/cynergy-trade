@@ -497,6 +497,38 @@ if (db && aiTrader) {
   if (aiLessons.length > 0) log.info("AI loss lessons restored", { count: aiLessons.length });
 }
 
+// ── Strategy ensemble guidance (auto mode) — strategies advise, AI decides ──
+// Written on every deterministic tick, read when the AI cycle builds its
+// snapshot. Views older than the TTL are pruned on read so stale takes can't
+// ride along forever.
+// ponytail: if the ensemble grows per-strategy state worth advising on (e.g.
+// regime fit), widen the view shape then — not before.
+const STRATEGY_GUIDANCE_TTL_MS = 15 * 60_000;
+const strategyGuidance = new Map<string, { at: number; views: NonNullable<AiCandidate["strategyViews"]> }>();
+
+function recordStrategyGuidance(chain: Chain, token: string, decisions: StrategyDecision[]): void {
+  strategyGuidance.set(`${chain}:${token}`, {
+    at: Date.now(),
+    views: decisions.map((d) => ({
+      strategyId: d.strategyId,
+      decision: d.decision,
+      confidence: d.confidence,
+      reasons: [...d.reasons.slice(0, 3), ...d.risks.slice(0, 2)],
+    })),
+  });
+}
+
+function strategyViewsFor(chain: Chain, token: string): NonNullable<AiCandidate["strategyViews"]> | undefined {
+  const key = `${chain}:${token}`;
+  const entry = strategyGuidance.get(key);
+  if (!entry) return undefined;
+  if (Date.now() - entry.at > STRATEGY_GUIDANCE_TTL_MS) {
+    strategyGuidance.delete(key);
+    return undefined;
+  }
+  return entry.views;
+}
+
 // ─── Token blacklist (AI-vetoed sus tokens, persistent) ──────────────────────
 const { TokenBlacklist } = await import("./blacklist.js");
 import type { BlacklistStore } from "./blacklist.js";
@@ -776,6 +808,12 @@ async function decisionCycle(rt: ChainRuntime): Promise<void> {
       };
 
       const ensembleResult = strategyEngine.evaluate(strategyCtx);
+      // auto mode: the AI trader decides every entry — the ensemble only
+      // advises. Its view (fires and declines, with reasons) rides along on
+      // the AI cycle's candidates; nothing enters deterministically.
+      if (aiTrader) {
+        recordStrategyGuidance(rt.chain, candidate.tokenAddress, ensembleResult.decisions);
+      }
       const enterDecisions = ensembleResult.enterDecisions.filter(
         (d) => !heldStrategies.has(d.strategyId));
       if (enterDecisions.length === 0) {
@@ -792,6 +830,23 @@ async function decisionCycle(rt: ChainRuntime): Promise<void> {
             { token: candidate.tokenAddress, chain: candidate.chain, data: { score: candidate.scores.opportunity } });
         }
         continue;
+      }
+
+      if (aiTrader) {
+        // Advisory signals still shadow-track at decision price — signal
+        // quality evidence independent of whether the AI acts on them.
+        if (candidate.market && candidate.market.priceUsd > 0) {
+          for (const d of enterDecisions) {
+            await rt.shadow.record({
+              tokenAddress: candidate.tokenAddress,
+              strategyId: d.strategyId,
+              decisionPrice: candidate.market.priceUsd,
+              confidence: d.confidence,
+              decidedAt: new Date(),
+            });
+          }
+        }
+        continue; // no deterministic entry, no veto — the AI cycle decides
       }
 
       // AI veto — cached per token, UNKNOWN on any failure (never blocks trading)
@@ -1117,7 +1172,12 @@ async function runAiCycle(): Promise<void> {
     const agg = aggregatePortfolio();
     const openPositions = runtimes.flatMap((rt) => rt.positions.getOpenPositions());
     const candidates: AiCandidate[] = runtimes.flatMap((rt) =>
-      rt.scanner.getTradeCandidates().slice(0, 5));
+      rt.scanner.getTradeCandidates().slice(0, 5).map((c) => {
+        const aiCand: AiCandidate = { ...c };
+        const views = strategyViewsFor(rt.chain, c.tokenAddress);
+        if (views) aiCand.strategyViews = views;
+        return aiCand;
+      }));
     // Closed-trade window: 200 per chain feeds the loss stats, the newest 20
     // ride along as recentTrades for concrete pattern-matching.
     const closed = db

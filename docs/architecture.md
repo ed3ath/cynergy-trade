@@ -54,9 +54,13 @@ daily USD budget (`AI_MAX_COST_PER_DAY_USD`) across both agents (`apps/trader/sr
 - `off` — agent dead
 - `veto` (default) — `AiVetoAgent` (`apps/trader/src/ai-agent.ts`): one-shot APPROVE/REJECT second
   opinion on strategy candidates, cached per token, UNKNOWN on any failure (never blocks trading)
-- `auto` — `AiTraderAgent` (`apps/trader/src/ai-trader-agent.ts`): every `AI_CYCLE_SEC` the host
-  builds a snapshot (portfolio, open positions, top scanner candidates, recent trades); the agent
-  replies with STRICT-JSON actions, executed only through host guards:
+- `auto` — `AiTraderAgent` (`apps/trader/src/ai-trader-agent.ts`): the **sole entry decision
+  maker** — strategies advise, the agent decides. The 10s deterministic loop still evaluates the
+  ensemble, but only records its per-token view (fires and declines, with reasons) into a
+  guidance map and shadow-tracks ENTER signals; nothing enters deterministically and the veto
+  agent has nothing to gate. Every `AI_CYCLE_SEC` the host builds a snapshot (portfolio, open
+  positions, top scanner candidates carrying the ensemble's `strategyViews`, recent trades);
+  the agent replies with STRICT-JSON actions, executed only through host guards:
   - `ENTER` (token of its choice — host fetches fresh market/liquidity/security, any fetch
     failure skips the action) → routed through `executeEntry`, i.e. the **same risk engine +
     journal as strategies** under `strategyId: "ai-autonomous"`. AI never sets absolute size;
@@ -67,7 +71,9 @@ daily USD budget (`AI_MAX_COST_PER_DAY_USD`) across both agents (`apps/trader/sr
     is computed from live inputs each tick — structurally unreachable by AI.
   - Guards: per-cycle action cap, per-token cooldown, AI-open-position cap, kill switch /
     `stopNewEntries` (blocks ENTERs only — exits always allowed). Cost cap or timeout →
-    empty cycle, never a thrown error, never blocks the 10s deterministic loop.
+    empty cycle, never a thrown error, never blocks the 10s deterministic loop. Since the
+    agent is the only entry path in auto, a dead gateway or cost cap means no new entries
+    until it recovers — open positions keep managing and exiting normally.
 
 ### Copy-trade (`COPYTRADE_ENABLED`, TON-only)
 

@@ -2,9 +2,12 @@
  * Autonomous AI trader agent — the AI that actually trades (`AI_AUTONOMY=auto`).
  *
  * Each cycle the host builds a pure-data snapshot (portfolio, open positions,
- * scanner candidates, recent trades); the agent may call the same read-only
- * data tools as the veto agent, then answers with STRICT JSON actions:
- * ENTER / EXIT / TIGHTEN. Every action is host-guarded downstream (risk
+ * scanner candidates with the strategy ensemble's advisory views, recent
+ * trades); the agent may call the same read-only data tools as the veto
+ * agent, then answers with STRICT JSON actions:
+ * ENTER / EXIT / TIGHTEN. In auto mode this agent is the sole entry decision
+ * maker — strategies advise (strategyViews), the agent decides. Every action
+ * is host-guarded downstream (risk
  * engine gates all entries; PositionManager.tightenExits is a one-way
  * ratchet) — the model's output can only propose, never bypass.
  *
@@ -111,21 +114,30 @@ const TAKE_PROFIT_PCT: [number, number] = [1, 200];
 const TRAILING_PCT: [number, number] = [1, 50];
 
 const SYSTEM_PROMPT =
-  "You are an autonomous micro-cap token trader on Solana/TON/EVM chains. " +
+  "You are the decision maker of a micro-cap token trading book on Solana/TON/EVM chains — " +
+  "the deterministic strategies only advise you. " +
   "Each cycle you receive a portfolio snapshot: capital, open positions with live PnL, " +
-  "top scanner candidates with quantitative scores, recent closed trades with exit reasons, " +
+  "top scanner candidates with quantitative scores and strategyViews (what the strategy " +
+  "ensemble said about each), recent closed trades with exit reasons, " +
   "lossStats (aggregate over your last 200 closed trades), lessons (your own persisted " +
   "memory of what past losses taught you), and — when copy-trade is on — recent swaps by " +
   "tracked high-PNL wallets. " +
+  "Scores and strategyViews are GUIDANCE, not gates: they tell you what the quantitative " +
+  "screens see, but when your own evidence-based thesis says a trade has positive expected " +
+  "value you ENTER it even if scores are middling or every strategy declined — the goal is " +
+  "net positive PnL, and passing on a good setup loses money just like a bad entry does. " +
   "You may call the provided read-only data tools to refresh data on any token before acting. " +
-  "You respond with a list of actions, executed only after the deterministic risk engine approves them. " +
-  "Rules: never ENTER a token your own ai-autonomous slot already holds — core-strategy positions " +
+  "You respond with a list of actions, executed only after the deterministic risk engine approves them — " +
+  "a risk-engine refusal (security, liquidity, exposure caps) is final, not a signal to retry. " +
+  "Rules: never ENTER a token your own ai-autonomous slot already holds — other slots " +
   "on it are fine, each strategy holds its own slot (copy-trade slots excepted too: you may add ONE " +
   "extra, smaller position when copying a tracked wallet's fresh BUY); every ENTER needs a " +
   "concrete evidence-based thesis — a tracked wallet's BUY is a lead to verify (tools), not a reason " +
   "by itself, and their SELL of a token you hold is a take-profit hint; you may EXIT any position or " +
   "TIGHTEN its exits (raise stop, lower take-profit/trailing) but you can " +
-  "never loosen risk; prefer fewer, higher-conviction actions; an empty action list is a valid answer. " +
+  "never loosen risk; prefer higher-conviction actions over marginal ones, and remember an " +
+  "empty action list means passing on every opportunity — only send it when nothing offers " +
+  "positive expected value. " +
   "LEARNING — the goal is >=80% win rate with positive net PnL. Exits are asymmetric (take-profit " +
   "near +3%, hard stop -10%), so one loss erases roughly three wins: refuse marginal entries that " +
   "match your loss lessons, and use EXIT/TIGHTEN early on positions resembling past losers. " +

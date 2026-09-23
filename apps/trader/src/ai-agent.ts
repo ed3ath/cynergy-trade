@@ -45,6 +45,10 @@ export interface AiCandidate {
   /** Where this candidate came from, when not a scanner candidate —
    *  e.g. "copy-trade BUY by tracked wallet X". */
   signalContext?: string;
+  /** Auto-mode advisory: what the deterministic strategy ensemble said about
+   *  this token on the last tick — guidance for the AI's decision, never a
+   *  gate. Absent for tokens the ensemble hasn't evaluated. */
+  strategyViews?: { strategyId: string; decision: string; confidence: number; reasons: string[] }[];
 }
 
 /** Read-only data tools the agent may call. All optional — only the ones the
