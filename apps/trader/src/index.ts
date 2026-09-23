@@ -497,6 +497,12 @@ if (db && aiTrader) {
   if (aiLessons.length > 0) log.info("AI loss lessons restored", { count: aiLessons.length });
 }
 
+// ─── Token blacklist (AI-vetoed sus tokens, persistent) ──────────────────────
+const { TokenBlacklist } = await import("./blacklist.js");
+import type { BlacklistStore } from "./blacklist.js";
+const blacklist = new TokenBlacklist(db ? (journal as unknown as BlacklistStore) : null, log.child({ component: "blacklist" }));
+await blacklist.load();
+
 // ─── Copy-trade tracker (COPYTRADE_WALLETS) ───────────────────────────────────
 // TON-only (TonApiClient wallet feed). Runs whenever wallets are configured —
 // observe mode records every tracked-wallet swap (JSONL + Activity + dashboard
@@ -731,6 +737,17 @@ async function decisionCycle(rt: ChainRuntime): Promise<void> {
 
   for (const candidate of candidates.slice(0, 5)) { // cap per cycle
     try {
+      // Blacklisted (AI-vetoed sus) tokens are never re-evaluated
+      if (blacklist.isListed(candidate.tokenAddress)) {
+        log.info("Candidate blacklisted — skipping", {
+          chain: rt.chain,
+          token: candidate.tokenAddress,
+        });
+        activity.publish("skip", "blacklisted · sus token",
+          { token: candidate.tokenAddress, chain: candidate.chain });
+        continue;
+      }
+
       // One position per (token, strategy) — different strategies may hold
       // the same token concurrently, each in its own slot (aggregate token
       // exposure still capped by the risk engine's maxTokenExposureUsd gate).
@@ -782,6 +799,8 @@ async function decisionCycle(rt: ChainRuntime): Promise<void> {
             confidence: aiVerdict.confidence,
             reason: aiVerdict.reason,
           });
+          // A REJECT is durable evidence — never re-evaluate this token
+          blacklist.add(candidate.tokenAddress, candidate.chain, aiVerdict.reason);
           activity.publish("reject", `ai veto · ${aiVerdict.reason}`,
             { token: candidate.tokenAddress, chain: candidate.chain });
           continue;
@@ -1190,6 +1209,7 @@ async function runAiAction(action: AiAction, candidates: AiCandidate[]): Promise
     // block the AI's own slot — only an existing ai-autonomous position does.
     const held = rt.positions.getOpenPositions().filter((p) => p.tokenAddress === action.tokenAddress);
     if (held.some((p) => p.strategyId === AI_STRATEGY_ID)) return skip("ai slot already held");
+    if (blacklist.isListed(action.tokenAddress)) return skip("token blacklisted (sus)");
     if (onCooldown) return skip("token cooldown");
     // Profiles are for copy-trade slots only: honored when the token traces to a
     // fresh (age-filtered) tracked-wallet BUY, not just because the model asked —
@@ -1638,6 +1658,10 @@ const httpServerOpts: Parameters<typeof startHttpServer>[0] = {
   }),
   logTailer,
   activityBus: activity,
+  getBlacklist: () => ({
+    count: blacklist.size,
+    tokens: blacklist.snapshot(),
+  }),
 };
 if (monitorToken) httpServerOpts.authToken = monitorToken;
 const httpServer = startHttpServer(httpServerOpts);

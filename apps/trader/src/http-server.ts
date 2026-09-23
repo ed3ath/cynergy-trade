@@ -61,6 +61,8 @@ export function startHttpServer(opts: {
   getMarket?: () => unknown[];
   /** Tracked-wallet swap records for GET /copytrade (dashboard Traders tab). */
   getCopyTrades?: () => unknown;
+  /** Blacklisted (AI-vetoed sus) tokens for GET /blacklist. */
+  getBlacklist?: () => unknown;
   /** Full detail + price history for GET /market/:token. Null → 404. */
   getTokenDetail?: (token: string) => Promise<unknown> | unknown;
   /** Preloaded dashboard HTML served at GET /. */
@@ -70,7 +72,7 @@ export function startHttpServer(opts: {
   /** Structured decision events for GET /activity (live Activity feed). */
   activityBus?: { subscribe(fn: (e: unknown) => void): () => void; backlog(): unknown[] } | undefined;
 }): { close: () => void } {
-  const { port, host, authToken, emergency, logger, getStatus, getMetrics, getReport, getHistory, getTrades, getMarket, getCopyTrades, getTokenDetail, dashboardHtml, logTailer, activityBus } = opts;
+  const { port, host, authToken, emergency, logger, getStatus, getMetrics, getReport, getHistory, getTrades, getMarket, getCopyTrades, getBlacklist, getTokenDetail, dashboardHtml, logTailer, activityBus } = opts;
   const startedAt = Date.now();
 
   const server = createServer((req, res) => {
@@ -121,6 +123,11 @@ export function startHttpServer(opts: {
       if (req.method === "GET" && path === "/copytrade") {
         if (!getCopyTrades) return respond(res, 404, { error: "copytrade not enabled" });
         return respond(res, 200, getCopyTrades());
+      }
+
+      if (req.method === "GET" && path === "/blacklist") {
+        if (!getBlacklist) return respond(res, 404, { error: "blacklist not enabled" });
+        return respond(res, 200, getBlacklist());
       }
 
       if (req.method === "GET" && path.startsWith("/market/")) {
