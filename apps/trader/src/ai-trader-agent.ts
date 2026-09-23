@@ -233,8 +233,9 @@ export class AiTraderAgent {
         }),
       });
       if (!res.ok) {
-        this.log.warn("AI trader call failed", { status: res.status });
-        throw new Error(`HTTP ${res.status}`);
+        const detail = await res.text().then((t) => t.slice(0, 200)).catch(() => "");
+        this.log.warn("AI trader call failed", { status: res.status, error: detail });
+        throw new Error(`HTTP ${res.status}${detail ? `: ${detail}` : ""}`);
       }
       return parseChatCompletion(await res.text());
     } finally {

@@ -59,7 +59,10 @@ export class JevAgent {
           questions,
         }),
       });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) {
+        const detail = await res.text().then((t) => t.slice(0, 200)).catch(() => "");
+        throw new Error(`HTTP ${res.status}${detail ? `: ${detail}` : ""}`);
+      }
       const body = (await res.json()) as {
         answers?: Record<string, { noul?: unknown }>;
         usage?: { input_tokens?: number };

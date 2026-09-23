@@ -283,8 +283,9 @@ export class AiVetoAgent {
         }),
       });
       if (!res.ok) {
-        this.log.warn("AI veto call failed", { status: res.status, token });
-        throw new Error(`HTTP ${res.status}`);
+        const detail = await res.text().then((t) => t.slice(0, 200)).catch(() => "");
+        this.log.warn("AI veto call failed", { status: res.status, token, error: detail });
+        throw new Error(`HTTP ${res.status}${detail ? `: ${detail}` : ""}`);
       }
       return parseChatCompletion(await res.text());
     } finally {

@@ -1269,6 +1269,8 @@ async function runAiCycle(): Promise<void> {
     // scores = pass-through, so a dead Jev never blocks entries.
     if (jevAgent && candidates.length > 0) {
       const jevScores = await jevAgent.score(candidates);
+      let kept = 0;
+      let filtered = 0;
       for (let i = candidates.length - 1; i >= 0; i--) {
         const c = candidates[i];
         if (!c) continue;
@@ -1276,10 +1278,19 @@ async function runAiCycle(): Promise<void> {
         if (s === undefined) continue;
         if (s < config.ai.jevMinScore) {
           candidates.splice(i, 1);
+          filtered++;
           aiLog.info("Jev filtered candidate", { token: c.tokenAddress, chain: c.chain, score: s });
+          activity.publish("reject",
+            `jev filtered · P(entry) ${s.toFixed(2)} < ${config.ai.jevMinScore}`,
+            { token: c.tokenAddress, chain: c.chain, data: { score: Math.round(s * 100) } });
         } else {
           c.jevScore = s;
+          kept++;
         }
+      }
+      if (kept + filtered > 0) {
+        activity.publish("info", `jev scored · kept ${kept} · filtered ${filtered}`,
+          { data: { scored: kept + filtered, kept, filtered } });
       }
     }
     // Closed-trade window: 200 per chain feeds the loss stats, the newest 20
