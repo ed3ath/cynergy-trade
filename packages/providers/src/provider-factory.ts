@@ -154,7 +154,7 @@ function createTonRegistry(config: ProvidersConfig): ProviderRegistry {
  * no-key APIs:
  *   discovery: GeckoTerminal new pools · market/liquidity: DexScreener pairs
  *   security + holders: GoPlus EVM (same endpoint, two views)
- * GT rate budget: every chain adds 2/min + 0.5/min to the shared per-IP 30/min.
+ * GT rate budget: every chain adds 1/min + 0.25/min to the shared per-IP limit.
  * ponytail: wire a 0x/1inch quote provider for SHADOW, viem signing for LIVE.
  */
 function createEvmRegistry(config: ProvidersConfig, chain: "bsc" | "base" | "polygon" | "arbitrum"): ProviderRegistry {
