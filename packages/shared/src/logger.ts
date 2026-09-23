@@ -66,11 +66,15 @@ function emit(level: LogLevel, msg: string, ctx: Record<string, unknown>): void 
 
   if (prettyMode) {
     const color = { debug: "\x1b[37m", info: "\x1b[36m", warn: "\x1b[33m", error: "\x1b[31m" }[level];
+    // component renders as a bracketed tag; AI components get magenta so they stand out
+    const component = typeof entry.component === "string" ? entry.component : undefined;
+    const tagColor = component?.startsWith("ai") ? "\x1b[35m" : "\x1b[90m";
+    const tag = component ? `${tagColor}[${component}]\x1b[0m ` : "";
     const rest = Object.entries(entry)
-      .filter(([k]) => !["time", "level", "msg"].includes(k))
+      .filter(([k]) => !["time", "level", "msg", "component"].includes(k))
       .map(([k, v]) => `${k}=${JSON.stringify(v)}`)
       .join(" ");
-    process.stdout.write(`${color}${entry.time} [${level.toUpperCase()}] ${msg}\x1b[0m ${rest}\n`);
+    process.stdout.write(`${color}${entry.time} [${level.toUpperCase()}]${tag ? ` ${tag}` : ""} ${msg}\x1b[0m ${rest}\n`);
   } else {
     process.stdout.write(JSON.stringify(entry) + "\n");
   }

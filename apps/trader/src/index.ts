@@ -76,6 +76,7 @@ import { fileURLToPath } from "node:url";
 const config = loadConfig();
 configureLogger({ level: config.log.level, pretty: config.log.pretty ?? true });
 const log = createLogger({ service: "trader", mode: config.trading.mode });
+const aiLog = log.child({ component: "ai" });
 
 // Structured decision events → dashboard Activity feed (GET /activity SSE)
 const { ActivityBus } = await import("./activity-bus.js");
@@ -458,7 +459,7 @@ const aiAgent = config.ai.enabled && config.ai.autonomy !== "off"
   ? new AiVetoAgent(config.ai, log.child({ component: "ai" }), aiTools, aiBudget)
   : null;
 if (aiAgent) {
-  log.info("AI veto agent enabled", {
+  aiLog.info("AIveto agent enabled", {
     provider: config.ai.provider,
     model: config.ai.model,
     baseUrl: config.ai.baseUrl,
@@ -468,7 +469,7 @@ const aiTrader = config.ai.enabled && config.ai.autonomy === "auto"
   ? new AiTraderAgent(config.ai, log.child({ component: "ai-trader" }), aiBudget, aiTools)
   : null;
 if (aiTrader) {
-  log.info("AI autonomy enabled", {
+  aiLog.info("AIautonomy enabled", {
     model: config.ai.model,
     baseUrl: config.ai.baseUrl,
     cycleSec: config.ai.cycleSec,
@@ -494,7 +495,7 @@ if (db && aiTrader) {
       }
     }
   } catch { /* fresh start on corrupt state */ }
-  if (aiLessons.length > 0) log.info("AI loss lessons restored", { count: aiLessons.length });
+  if (aiLessons.length > 0) aiLog.info("AIloss lessons restored", { count: aiLessons.length });
 }
 
 // ── Strategy ensemble guidance (auto mode) — strategies advise, AI decides ──
@@ -1320,7 +1321,7 @@ async function runAiCycle(): Promise<void> {
     if (copySignals && copySignals.length > 0) snapshot.copySignals = copySignals;
 
     const { actions, summary, lessons } = await aiTrader.propose(snapshot);
-    log.info("AI trader cycle", { actions: actions.length, summary });
+    aiLog.info("AItrader cycle", { actions: actions.length, summary });
     for (const action of actions) {
       await runAiAction(action, candidates);
     }
@@ -1336,21 +1337,21 @@ async function runAiCycle(): Promise<void> {
       aiLessons = lessons;
       if (db) {
         void journal.setSystemState(AI_LESSONS_KEY, JSON.stringify(lessons))
-          .then(() => log.info("AI loss lessons updated", { count: lessons.length }))
-          .catch((err: unknown) => log.warn("AI lessons persist failed", { error: (err as Error).message }));
+          .then(() => aiLog.info("AIloss lessons updated", { count: lessons.length }))
+          .catch((err: unknown) => aiLog.warn("AIlessons persist failed", { error: (err as Error).message }));
       }
       activity.publish("info", `ai learned · ${lessons.length} lesson(s) stored`, {
         data: { lessons: lessons.length },
       });
     }
   } catch (err) {
-    log.warn("AI trader cycle failed", { error: (err as Error).message });
+    aiLog.warn("AItrader cycle failed", { error: (err as Error).message });
   }
 }
 
 async function runAiAction(action: AiAction, candidates: AiCandidate[]): Promise<void> {
   const skip = (reason: string): void => {
-    log.info("AI action skipped", { type: action.type, token: action.tokenAddress, reason });
+    aiLog.info("AIaction skipped", { type: action.type, token: action.tokenAddress, reason });
     activity.publish("info", `ai skip · ${reason}`, { token: action.tokenAddress, chain: action.chain });
   };
   const cooldownUntil = (): number => aiCooldowns.get(action.tokenAddress) ?? 0;
@@ -1441,7 +1442,7 @@ async function runAiAction(action: AiAction, candidates: AiCandidate[]): Promise
       ...(profile ? { timeStopMs: profile.timeStopMs } : {}),
     });
     aiCooldowns.set(action.tokenAddress, Date.now() + config.ai.tokenCooldownSec * 1000);
-    if (!entered) log.info("AI entry not opened", { token: action.tokenAddress });
+    if (!entered) aiLog.info("AIentry not opened", { token: action.tokenAddress });
     return;
   }
 
@@ -1459,7 +1460,7 @@ async function runAiAction(action: AiAction, candidates: AiCandidate[]): Promise
     if (action.type === "EXIT") {
       if (onCooldown) return skip("token cooldown");
       const marketSnap = await rt.providers.marketData.getMarketSnapshot(action.tokenAddress, action.chain);
-      log.info("AI exiting position", { positionId: position.id, token: action.tokenAddress, rationale: action.rationale });
+      aiLog.info("AIexiting position", { positionId: position.id, token: action.tokenAddress, rationale: action.rationale });
       await executeExit(rt, position,
         { reason: `AI exit · ${action.rationale ?? "no rationale"}`, urgency: "NORMAL", suggestedSellPct: 100 },
         marketSnap);
@@ -1494,7 +1495,7 @@ async function runAiAction(action: AiAction, candidates: AiCandidate[]): Promise
       `ai tighten · ${Object.keys(result.applied).join("+") || "none"}${result.clamped.length ? ` (clamped: ${result.clamped.join("; ")})` : ""}`,
       { token: action.tokenAddress, chain: action.chain });
   } catch (err) {
-    log.warn("AI action failed", { type: action.type, token: action.tokenAddress, error: (err as Error).message });
+    aiLog.warn("AIaction failed", { type: action.type, token: action.tokenAddress, error: (err as Error).message });
   }
 }
 
