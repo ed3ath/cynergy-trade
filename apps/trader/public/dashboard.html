@@ -893,11 +893,21 @@ function parseLogLine(line) {
 }
 function logRow(e) {
   const cls = logClass(e);
-  let m = e.msg || String(e);
+  let m = (e.component ? `[${e.component}] ` : "") + (e.msg || String(e));
   // symbol beats the shortened address whenever the market feed knows the token
   if (e.token) m += " " + (symByToken.get(e.token)?.symbol || e.token.slice(0, 6) + "…" + e.token.slice(-4));
   if (e.reason) m += " — " + e.reason;
   else if (e.decision) m += " — " + e.decision;
+  // carry every structured field the row has no column for (error, status,
+  // score, chain, …) so failures always show their reason — k=v, capped
+  const skip = new Set(["time", "level", "msg", "token", "reason", "decision", "t", "pid", "hostname", "v", "raw", "service", "mode", "component"]);
+  const extra = Object.entries(e)
+    .filter(([k, v]) => !skip.has(k) && v != null && v !== "")
+    .map(([k, v]) => {
+      const s = typeof v === "object" ? JSON.stringify(v) : String(v);
+      return k + "=" + (s.length > 160 ? s.slice(0, 160) + "…" : s);
+    });
+  if (extra.length) m += " · " + extra.join(" ");
   return h("div", { class: "row" + (cls === "skip" || cls === "reject" ? " dim" : "") },
     h("span", { class: "t", text: e.time ? new Date(e.time).toLocaleTimeString() : "" }),
     h("span", { class: "lv lv-" + cls, text: cls.toUpperCase() }),
