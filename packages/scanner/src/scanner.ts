@@ -347,10 +347,11 @@ export class Scanner {
   /**
    * Called when a position closes — walks the token SM to CLOSED and queues
    * it for watchlist re-entry after a cooldown. Security-deterioration exits
-   * park the token at REJECTED (never re-entered).
+   * and catastrophic gap-through stops (≤ -20% realized vs a -10% stop —
+   * the rug signature) park the token at REJECTED (never re-entered).
    */
-  markExited(tokenAddress: string, reason: string): void {
-    if (reason.startsWith("Security")) {
+  markExited(tokenAddress: string, reason: string, catastrophic = false): void {
+    if (reason.startsWith("Security") || catastrophic) {
       this.transition(tokenAddress, "REJECTED"); // ENTERED → REJECTED (terminal)
       return;
     }

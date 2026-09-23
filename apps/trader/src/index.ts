@@ -889,8 +889,14 @@ async function executeExit(
     });
   }
 
-  // Walk token SM to CLOSED and queue cooldown-gated watchlist re-entry
-  rt.scanner.markExited(position.tokenAddress, exitSignal.reason);
+  // Walk token SM to CLOSED and queue cooldown-gated watchlist re-entry.
+  // A gap-through hard stop (≤ -20% vs the -10% stop) means the exit
+  // infrastructure failed on this token — rug-tier behavior. Same evidence
+  // class as an AI-veto REJECT: never trade it again.
+  const catastrophic = exitSignal.reason.startsWith("Hard stop") && position.unrealizedPnlPct <= -20;
+  rt.scanner.markExited(position.tokenAddress, exitSignal.reason, catastrophic);
+  if (catastrophic) blacklist.add(position.tokenAddress, position.chain,
+    `hard stop gap ${position.unrealizedPnlPct.toFixed(1)}% — rug-tier exit`);
 
   // Realize PnL into the PnL ledgers. totalValue/drawdown are NOT touched
   // here — the mark-to-market formula in step 1 owns them (unrealized was
@@ -1461,7 +1467,23 @@ async function runCopyEntry(signal: CopyTradeSignal): Promise<void> {
 }
 
 /** Outer cycle: emergency check + PnL window rollover (all books), then chains. */
+let cycleInFlight = false;
 async function decisionCycleAll(): Promise<void> {
+  // Overlap guard: a cycle with inline AI veto calls can exceed CYCLE_INTERVAL_MS,
+  // and setInterval fire-and-forget would then start a second concurrent cycle —
+  // both read the same stale open-position state and double-enter the same token
+  // (seen 2026-09-23: two micro-scalp slots on one rug, -$6 instead of -$3).
+  // Skip, don't queue: a piled-up queue is worse than a missed tick.
+  if (cycleInFlight) return;
+  cycleInFlight = true;
+  try {
+    await decisionCycleAllInner();
+  } finally {
+    cycleInFlight = false;
+  }
+}
+
+async function decisionCycleAllInner(): Promise<void> {
   if (emergency.isKillSwitchActive()) {
     if (!killSwitchAlerted) {
       killSwitchAlerted = true;

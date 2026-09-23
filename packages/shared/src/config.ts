@@ -227,6 +227,12 @@ export function loadConfig(overrides: Partial<Record<string, unknown>> = {}): Ap
       minRiskPct: parseFloat(process.env["MIN_RISK_PCT"] ?? "0.1"),
       maxRiskPct: parseFloat(process.env["MAX_RISK_PCT"] ?? "2.0"),
     },
+    market: {
+      // Scanner hard gates (LiquidityFilter). The 2026-09-22 loosening sat at
+      // the schema defaults (15k / 5 min) — rug-tier on EVM; env-tunable now.
+      minLiquidityUsd: parseFloat(process.env["MIN_POOL_LIQUIDITY_USD"] ?? "15000"),
+      minPoolAgeMs: parseInt(process.env["MIN_POOL_AGE_MIN"] ?? "5", 10) * 60_000,
+    },
     providers: {
       helius: { enabled: true, apiKey: process.env["HELIUS_API_KEY"] },
       birdeye: { enabled: true, apiKey: process.env["BIRDEYE_API_KEY"] },
