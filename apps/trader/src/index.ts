@@ -702,7 +702,7 @@ async function decisionCycle(rt: ChainRuntime): Promise<void> {
 
       // Persist evolving state each tick — restart restores the tightened
       // exits and trailing peak, not the entry-time snapshot
-      void journal.updatePosition(position).catch((e) =>
+      void journal.updatePosition(position).catch((e: unknown) =>
         log.warn("Position state write-back failed", { positionId: position.id, error: (e as Error).message }));
 
       if (exitSignal) {
