@@ -455,6 +455,11 @@ const aiTools = {
   },
 };
 const aiBudget = new AiBudget(config.ai, log.child({ component: "ai" }));
+// Jev-ai second opinion (auto mode): cheap classifier pre-filter + ENTER
+// confidence damper. Absent key = off; any failure = pass-through.
+const { JevAgent } = await import("./jev-agent.js");
+const jevAgent = config.ai.jevApiKey ? new JevAgent(config.ai, aiLog, aiBudget) : null;
+if (jevAgent) aiLog.info("Jev second opinion enabled", { model: config.ai.jevModel, minScore: config.ai.jevMinScore });
 const aiAgent = config.ai.enabled && config.ai.autonomy !== "off"
   ? new AiVetoAgent(config.ai, log.child({ component: "ai" }), aiTools, aiBudget)
   : null;
@@ -1258,6 +1263,25 @@ async function runAiCycle(): Promise<void> {
         if (views) aiCand.strategyViews = views;
         return aiCand;
       }));
+    // Jev pre-filter: one batched classifier call before the main AI — weak
+    // candidates never reach it (cheaper cycles), survivors carry jevScore
+    // (guidance for the model, sizing damper for the host). Failures = no
+    // scores = pass-through, so a dead Jev never blocks entries.
+    if (jevAgent && candidates.length > 0) {
+      const jevScores = await jevAgent.score(candidates);
+      for (let i = candidates.length - 1; i >= 0; i--) {
+        const c = candidates[i];
+        if (!c) continue;
+        const s = jevScores.get(`${c.chain}:${c.tokenAddress}`);
+        if (s === undefined) continue;
+        if (s < config.ai.jevMinScore) {
+          candidates.splice(i, 1);
+          aiLog.info("Jev filtered candidate", { token: c.tokenAddress, chain: c.chain, score: s });
+        } else {
+          c.jevScore = s;
+        }
+      }
+    }
     // Closed-trade window: 200 per chain feeds the loss stats, the newest 20
     // ride along as recentTrades for concrete pattern-matching.
     const closed = db
@@ -1409,12 +1433,16 @@ async function runAiAction(action: AiAction, candidates: AiCandidate[]): Promise
     const price = marketSnap.priceUsd;
     if (!(price > 0)) return skip("no live price");
 
+    // Jev second opinion damps sizing confidence only — never inflates it:
+    // jevScore 0 → half confidence, 1 → unchanged, unscored → as-is.
+    const jevScore = candidates.find((c) =>
+      c.tokenAddress === action.tokenAddress && c.chain === action.chain)?.jevScore;
     const decision: StrategyDecision = {
       strategyId: profile?.strategyId ?? AI_STRATEGY_ID,
       strategyVersion: "1.0.0",
       tokenAddress: action.tokenAddress,
       decision: "ENTER",
-      confidence: action.confidence ?? 0.5,
+      confidence: (action.confidence ?? 0.5) * (jevScore === undefined ? 1 : 0.5 + 0.5 * jevScore),
       reasons: [action.rationale ?? "ai autonomous entry"],
       risks: [],
       invalidationConditions: [],

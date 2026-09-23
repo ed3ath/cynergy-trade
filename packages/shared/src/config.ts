@@ -119,6 +119,18 @@ export const AIConfigSchema = z.object({
   tokenCooldownSec: z.number().int().positive().default(600),
   /** Cheap opt-out: AI agent stays silent in LIVE mode when false. */
   liveEnabled: z.boolean().default(true),
+  /** Jev-ai (jev-ai.pro) second opinion: non-generative classifier that
+   *  pre-filters auto-mode candidates before the main AI sees them and damps
+   *  ENTER confidence. Absent key = disabled; any Jev failure = pass-through
+   *  (no filtering, no damping) — never blocks the loop. */
+  jevApiKey: z.string().optional(),
+  /** Endpoint base; `/systemone` is appended. Point at a local gateway to
+   *  route Jev through the same proxy as the main AI. */
+  jevBaseUrl: z.string().url().default("https://jev-ai.pro/api/v1"),
+  jevModel: z.string().default("jev-latest"),
+  /** Drop candidates whose Jev P(entry) falls below this. */
+  jevMinScore: z.number().min(0).max(1).default(0.5),
+  jevTimeoutMs: z.number().int().positive().default(5_000),
 });
 export type AIConfig = z.infer<typeof AIConfigSchema>;
 
@@ -259,6 +271,11 @@ export function loadConfig(overrides: Partial<Record<string, unknown>> = {}): Ap
       maxOpenPositions: parseInt(process.env["AI_MAX_OPEN_POSITIONS"] ?? "3", 10),
       tokenCooldownSec: parseInt(process.env["AI_TOKEN_COOLDOWN_SEC"] ?? "600", 10),
       liveEnabled: process.env["AI_LIVE_ENABLED"] !== "false",
+      jevApiKey: process.env["JEV_API_KEY"] || undefined,
+      jevBaseUrl: process.env["JEV_BASE_URL"] ?? "https://jev-ai.pro/api/v1",
+      jevModel: process.env["JEV_MODEL"] ?? "jev-latest",
+      jevMinScore: parseFloat(process.env["JEV_MIN_SCORE"] ?? "0.5"),
+      jevTimeoutMs: parseInt(process.env["JEV_TIMEOUT_MS"] ?? "5000", 10),
     },
     copytrade: {
       enabled: process.env["COPYTRADE_ENABLED"] === "true",
