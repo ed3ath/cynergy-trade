@@ -8,8 +8,11 @@
  *     fresh pools are overwhelmingly dust, so top h24-volume movers with
  *     positive 1h momentum feed the watchlist too (recipe verified 2026-09-16)
  *
- * Free, no key, ~30 req/min shared per IP across ALL networks → 2/min + 0.5/min
- * per chain stays safe up to ~6 chains polling simultaneously.
+ * Free, no key, ~30 req/min shared per IP across ALL networks. In practice GT
+ * throttles sustained polling far below the documented limit — 2/min + 0.5/min
+ * per chain got chronic HTTP 429s with 3 chains (observed 2026-09-23, all day,
+ * discovery coverage degraded). 1/min + 0.25/min per chain + backoff keeps
+ * the shared per-IP penalty from re-triggering across chains.
  *
  * Emits the base token of each pool (address after the "<network>_" prefix in
  * relationship ids). Pools whose base is on the skip list (native coin, wrapped
@@ -54,13 +57,13 @@ export interface GeckoTerminalDiscoveryConfig {
   /** Base-token ids (GT "<network>_<addr>" form) never worth trading:
    *  native coin, wrapped native, major stables. */
   skipBaseTokenIds: string[];
-  pollIntervalMs: number;  // default 30s (2/min vs 30/min limit, shared per IP)
+  pollIntervalMs: number;  // default 60s (1/min — GT real limit ≪ documented 30/min)
   maxSeenPools: number;    // LRU cap, default 50_000
   /** Pools below this reserve never pass scanner gates — skip early, save downstream calls. */
   minReserveUsd: number;
   /** Hot-pool poll (top h24-volume movers, not just new pools). */
   hotPoolsEnabled: boolean;
-  hotPoolsIntervalMs: number;  // default 120s
+  hotPoolsIntervalMs: number;  // default 240s
   /** Minimum pool reserve for a hot pool (50k = scanner's own liquidity gate). */
   hotMinReserveUsd: number;
   /** Minimum 1h price change % for a hot pool — momentum must be positive. */
@@ -71,16 +74,16 @@ const DEFAULTS: GeckoTerminalDiscoveryConfig = {
   network: "ton",
   chain: "ton",
   skipBaseTokenIds: [TON_NATIVE_ID, USDT_TON_ID, STTON_ID],
-  // GT throttles sustained polling harder than the documented 30/min — a 15s
-  // new-pool poll ran all day and got the IP 429'd (verified 2026-09-16).
-  // 2/min + 0.5/min with backoff stays well inside the real limit.
-  pollIntervalMs: 30_000,
+  // GT throttles sustained polling far harder than the documented 30/min:
+  // 15s polls 429'd all day (2026-09-16); 30s/120s still drew chronic 429s
+  // with 3 chains sharing the per-IP budget (2026-09-23). Halved again.
+  pollIntervalMs: 60_000,
   maxSeenPools: 50_000,
   // dust pre-filter only — pools below this never grow into candidates; the
   // scanner still applies its own minLiquidityUsd gate (50k) on live data.
   minReserveUsd: 5_000,
   hotPoolsEnabled: true,
-  hotPoolsIntervalMs: 120_000,
+  hotPoolsIntervalMs: 240_000,
   hotMinReserveUsd: 50_000,
   hotMinH1ChangePct: 0,
 };
