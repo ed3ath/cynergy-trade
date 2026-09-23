@@ -235,6 +235,13 @@ export class Scanner {
     const rows: MarketFeedRow[] = [];
     for (const c of this.candidates.values()) {
       if (c.status === "ARCHIVED") continue;
+      // Post-rug corpses (already rejected, liquidity collapsed below $1k) show
+      // DexScreener dead-pair values ($0-12 mcap, cents of liquidity) — drop
+      // them from the list; GET /market/:token still serves full history.
+      if (
+        (c.status === "REJECTED" || c.status === "CLOSED") &&
+        (c.liquidity?.liquidityUsd ?? Infinity) < 1_000
+      ) continue;
       rows.push(this.feedRow(c));
     }
     return rows.sort((a, b) => rank(a.status) - rank(b.status) || b.score - a.score);

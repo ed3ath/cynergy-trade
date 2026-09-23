@@ -1161,6 +1161,10 @@ const AI_STRATEGY_ID = "ai-autonomous";
 const aiCooldowns = new Map<string, number>();
 let aiTicks = 0;
 const aiTicksPerCycle = Math.max(1, Math.round(config.ai.cycleSec / 10));
+/** Lessons may only be rewritten after a trade CLOSES — otherwise the model
+ *  re-hallucinates "lessons" every idle cycle (observed: 7 rewrites / 16 min,
+ *  zero trades). 0 = not yet baselined (first cycle baselines, never persists). */
+let lastLessonsClosedAtMs = 0;
 
 /** One autonomous cycle: snapshot → propose → guarded dispatch. Never throws;
  *  any failure degrades to a no-op for that cycle. */
@@ -1246,8 +1250,14 @@ async function runAiCycle(): Promise<void> {
       await runAiAction(action, candidates);
     }
 
-    // Persist refined lessons — the agent's long-term memory across restarts
-    if (lessons && lessons.length > 0 && JSON.stringify(lessons) !== JSON.stringify(aiLessons)) {
+    // Persist refined lessons — the agent's long-term memory across restarts.
+    // Gated on a new closed trade: idle cycles must not rewrite memory.
+    const newestClosedMs = closed[0]?.closedAt?.getTime() ?? 0;
+    const closedSinceLast = newestClosedMs > lastLessonsClosedAtMs;
+    if (lastLessonsClosedAtMs === 0) lastLessonsClosedAtMs = newestClosedMs; // baseline
+    if (lessons && lessons.length > 0 && closedSinceLast
+        && JSON.stringify(lessons) !== JSON.stringify(aiLessons)) {
+      lastLessonsClosedAtMs = newestClosedMs;
       aiLessons = lessons;
       if (db) {
         void journal.setSystemState(AI_LESSONS_KEY, JSON.stringify(lessons))
