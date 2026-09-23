@@ -700,6 +700,11 @@ async function decisionCycle(rt: ChainRuntime): Promise<void> {
         timestampMs: Date.now(),
       });
 
+      // Persist evolving state each tick — restart restores the tightened
+      // exits and trailing peak, not the entry-time snapshot
+      void journal.updatePosition(position).catch((e) =>
+        log.warn("Position state write-back failed", { positionId: position.id, error: (e as Error).message }));
+
       if (exitSignal) {
         log.info("Exit signal triggered", {
           chain: rt.chain,
@@ -1331,6 +1336,10 @@ async function runAiAction(action: AiAction, candidates: AiCandidate[]): Promise
     if (Object.keys(opts).length === 0) return skip("no tighten values");
 
     const result = rt.positions.tightenExits(position.id, opts);
+    if (Object.keys(result.applied).length > 0) {
+      // Tightened exits survive restart — write through immediately
+      await journal.updatePosition(position);
+    }
     const marketSnap = await rt.providers.marketData.getMarketSnapshot(action.tokenAddress, action.chain);
     await journal.recordPositionEvent(position.id, "ADJUST", marketSnap.priceUsd, 0, {
       by: "ai", applied: result.applied, clamped: result.clamped,

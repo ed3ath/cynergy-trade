@@ -296,9 +296,19 @@ export class PositionManager {
   }
 
   /** Re-register a position loaded from persistence (restart recovery).
-   *  No execution — the position already exists on-chain/on-paper. */
+   *  No execution — the position already exists on-chain/on-paper.
+   *  Crash-orphaned transient statuses (OPENING/CLOSING) are coerced back to
+   *  OPEN so the exit loop manages them — otherwise they'd restore unmanaged
+   *  on every boot forever. LIVE CLOSING is left alone: re-exiting could
+   *  double-sell on-chain (ops must resolve the in-flight order). */
   restorePosition(position: Position): void {
     if (this.positions.has(position.id)) return;
+    if (position.status !== "OPEN" && !(position.mode === "LIVE" && position.status === "CLOSING")) {
+      this.logger.warn("Restored position in transient status — coercing to OPEN", {
+        positionId: position.id, status: position.status,
+      });
+      position.status = "OPEN";
+    }
     this.positions.set(position.id, position);
     this.stateMachines.set(position.id, new PositionStateMachine(position.status));
     this.logger.warn("Position restored from persistence", {

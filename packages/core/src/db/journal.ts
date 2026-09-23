@@ -188,12 +188,16 @@ export class JournalRepository {
     );
   }
 
+  /** Full state write-back — exit params included so restart restores the
+   *  tightened stops, not the entry-time ones. */
   async updatePosition(position: Position): Promise<void> {
     await this.db.query(
       `UPDATE positions SET
          status = $2, current_price = $3, peak_price = $4,
          unrealized_pnl_usd = $5, unrealized_pnl_pct = $6,
          drawdown_from_peak_pct = $7, exit_reason = $8,
+         stop_loss = $9, take_profit_1 = $10, take_profit_2 = $11,
+         trailing_stop_pct = $12,
          realized_pnl_usd = CASE WHEN $2::position_status IN ('CLOSED','ERROR')
                                  THEN $5 ELSE realized_pnl_usd END,
          closed_at = CASE WHEN $2::position_status IN ('CLOSED','ERROR') THEN NOW() ELSE closed_at END,
@@ -201,7 +205,9 @@ export class JournalRepository {
        WHERE id = $1`,
       [position.id, position.status, position.currentPrice, position.peakPrice,
        position.unrealizedPnlUsd, position.unrealizedPnlPct,
-       position.drawdownFromPeakPct, position.exitReason ?? null],
+       position.drawdownFromPeakPct, position.exitReason ?? null,
+       position.stopLoss, position.takeProfit1 ?? null, position.takeProfit2 ?? null,
+       position.trailingStopPct ?? null],
     );
   }
 
