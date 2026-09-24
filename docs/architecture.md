@@ -5,8 +5,9 @@ Roadmap + phase gates: `docs/roadmap.md`.
 ## Overview
 
 Autonomous crypto trading system targeting newly-launched tokens. `TRADING_CHAIN` selects
-the chains traded simultaneously — a comma list of `solana`, `ton`, and the cheap-gas EVM
-family `bsc|base|polygon|arbitrum` (e.g. `TRADING_CHAIN=solana,ton,bsc`, default `solana`).
+the chains traded simultaneously — a comma list of `solana`, `ton`, and the keyless EVM
+family `bsc|base|polygon|arbitrum|ethereum|avalanche|optimism|linea|mantle|blast|zksync|scroll`
+(e.g. `TRADING_CHAIN=solana,ton,bsc`, default `solana`; all EVM chains are PAPER-only).
 TypeScript monorepo, modular packages, deterministic risk firewall around all capital deployment.
 
 Multi-chain model: one runtime per chain (providers, scanner, execution router, positions,

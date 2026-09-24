@@ -1,7 +1,12 @@
 // ─── Chain ────────────────────────────────────────────────────────────────────
-/** EVM family = cheap-gas chains (bsc/base/polygon/arbitrum) — all ride the
- *  same GeckoTerminal/DexScreener/GoPlus adapters, parameterized by network. */
-export const CHAIN_VALUES = ["solana", "ton", "bsc", "base", "polygon", "arbitrum"] as const;
+/** EVM family = cheap-gas chains — all ride the same GeckoTerminal/DexScreener/
+ *  GoPlus adapters, parameterized by network. All EVM chains are PAPER-only
+ *  (boot-guarded in the trader: no quote aggregator or signing path). */
+export const CHAIN_VALUES = [
+  "solana", "ton",
+  "bsc", "base", "polygon", "arbitrum",
+  "ethereum", "avalanche", "optimism", "linea", "mantle", "blast", "zksync", "scroll",
+] as const;
 export type Chain = (typeof CHAIN_VALUES)[number];
 
 // ─── Token lifecycle ──────────────────────────────────────────────────────────

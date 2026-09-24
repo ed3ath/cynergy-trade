@@ -1900,7 +1900,10 @@ log.info("Scanner started — beginning decision loop");
 function seedMatchesChain(addr: string, chain: Chain): boolean {
   if (chain === "ton") return /^(EQ|UQ)[A-Za-z0-9_-]{46}$/.test(addr);
   if (isEvmChain(chain)) return /^0x[0-9a-fA-F]{40}$/.test(addr);
-  return true; // solana: base58, no strict check
+  // solana: base58 (no 0OIl), 32-byte pubkey → 32-44 chars. The "no strict
+  // check" return-true let TON seeds (48-char base64url, contains -/_) into
+  // the solana scanner — they can never fetch and just burn rate budget.
+  return /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(addr);
 }
 if (config.trading.seedTokens.length > 0) {
   for (const rt of runtimes) {

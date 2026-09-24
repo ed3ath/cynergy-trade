@@ -12,6 +12,9 @@ State as of 2026-09-22. See `docs/architecture.md` for how it works.
   solana/ton plus keyless EVM chains (bsc/base/polygon/arbitrum, PAPER-only,
   GeckoTerminal+DexScreener+GoPlus). Per-chain equity books, even capital
   split. EVM SHADOW needs a quote aggregator (0x/1inch) — not wired yet.
+- EVM family widened 2026-09-24: + ethereum/avalanche/optimism/linea/mantle/
+  blast/zksync/scroll (all live-verified adapters, PAPER-only). GT poll
+  intervals scale with chain count (shared per-IP rate limit).
 - Snapshot dataset accumulating in `token_market_snapshots` since 2026-09-12 —
   this is backtester fuel, every hour of runtime pays into Phase B
 - Running config since 2026-09-22: `TRADING_CHAIN=ton,bsc,base` (widened later

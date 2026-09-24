@@ -30,7 +30,7 @@ const QUOTE_MINTS = new Set([
   "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", // USDC
   "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB", // USDT
   "4zMMC9srt5Ri5a14ra27C66vfh6Vq2s2tX4qA9at6BZJ", // USDC (dev)
-  "JUPyiwrYJFskUPiHa7hkeR8VUaoJeM9Z29pOHKcfjFr",  // JUP (common quote)
+  "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN",  // JUP (common quote — live-verified via DexScreener; old entry had a corrupted tail)
 ]);
 
 export interface RaydiumDiscoveryConfig {

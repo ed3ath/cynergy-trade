@@ -39,7 +39,7 @@ describe("createProviderRegistry chain selection", () => {
     expect(r.holders.name).toMatch(/^mock/); // no birdeye key
   });
 
-  it.each(["bsc", "base", "polygon", "arbitrum"] as const)(
+  it.each(["bsc", "base", "polygon", "arbitrum", "ethereum", "avalanche", "optimism", "linea", "mantle", "blast", "zksync", "scroll"] as const)(
     "chain=%s → EVM registry: GT discovery, DexScreener market, GoPlus security, mock quote/execution",
     (chain) => {
       const r = createProviderRegistry(cfg, chain);

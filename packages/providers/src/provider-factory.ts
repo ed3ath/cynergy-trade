@@ -30,8 +30,22 @@ import { TonApiSecurityProvider } from "./ton/tonapi-security.js";
 import { TonApiHoldersProvider } from "./ton/tonapi-holders.js";
 import { GeckoTerminalDiscoveryProvider } from "./ton/geckoterminal-discovery.js";
 import { StonQuoteProvider } from "./ton/ston-quote.js";
-import { EVM_CHAINS, evmSkipBaseIds, isEvmChain } from "./evm/chains.js";
+import { EVM_CHAINS, EvmChain, evmSkipBaseIds, isEvmChain } from "./evm/chains.js";
 import { GoPlusEvmHoldersProvider, GoPlusEvmSecurityProvider } from "./evm/goplus-evm.js";
+
+/**
+ * GT poll budget: every GT-discovery chain shares one per-IP rate limit. 1/min
+ * per chain held with ≤4 chains (2026-09-23 fix) but N chains firing 1/min
+ * re-triggers the chronic 429 spiral — scale the interval up as chains are
+ * added. 4 chains → today's 60s/240s; 12 → 180s/720s.
+ */
+function gtPollIntervals(): { pollIntervalMs: number; hotPoolsIntervalMs: number } {
+  const chains = (process.env["TRADING_CHAIN"] ?? "solana")
+    .split(",").map((c) => c.trim().toLowerCase()).filter(Boolean);
+  const gtChains = chains.filter((c) => c === "ton" || isEvmChain(c as Chain)).length;
+  const pollIntervalMs = Math.max(60_000, gtChains * 15_000);
+  return { pollIntervalMs, hotPoolsIntervalMs: pollIntervalMs * 4 };
+}
 
 export function createProviderRegistry(config: ProvidersConfig, activeChain: Chain = "solana"): ProviderRegistry {
   if (activeChain === "ton") return createTonRegistry(config);
@@ -128,7 +142,7 @@ function createTonRegistry(config: ProvidersConfig): ProviderRegistry {
 
   return {
     discovery: config.geckoterminal.enabled
-      ? new GeckoTerminalDiscoveryProvider()
+      ? new GeckoTerminalDiscoveryProvider("https://api.geckoterminal.com", gtPollIntervals())
       : new MockDiscoveryProvider("ton"),
     marketData: dexscreener,
     liquidity: dexscreener,
@@ -157,7 +171,7 @@ function createTonRegistry(config: ProvidersConfig): ProviderRegistry {
  * GT rate budget: every chain adds 1/min + 0.25/min to the shared per-IP limit.
  * ponytail: wire a 0x/1inch quote provider for SHADOW, viem signing for LIVE.
  */
-function createEvmRegistry(config: ProvidersConfig, chain: "bsc" | "base" | "polygon" | "arbitrum"): ProviderRegistry {
+function createEvmRegistry(config: ProvidersConfig, chain: EvmChain): ProviderRegistry {
   const meta = EVM_CHAINS[chain];
   const dexscreener = new DexScreenerProvider("https://api.dexscreener.com", 5_000, chain);
   const goplus = config.goplus.enabled;
@@ -168,6 +182,7 @@ function createEvmRegistry(config: ProvidersConfig, chain: "bsc" | "base" | "pol
         network: meta.network,
         chain,
         skipBaseTokenIds: evmSkipBaseIds(meta),
+        ...gtPollIntervals(),
       })
       : new MockDiscoveryProvider(chain),
     marketData: dexscreener,

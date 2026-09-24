@@ -1,6 +1,6 @@
 # cynergy-trade
 
-Autonomous multi-chain trading system (`TRADING_CHAIN` = comma list of `solana|ton|bsc|base|polygon|arbitrum` — chains trade simultaneously, one scanner/equity book each). TS pnpm-workspaces monorepo.
+Autonomous multi-chain trading system (`TRADING_CHAIN` = comma list of `solana|ton|bsc|base|polygon|arbitrum|ethereum|avalanche|optimism|linea|mantle|blast|zksync|scroll` — chains trade simultaneously, one scanner/equity book each; all EVM chains are PAPER-only). TS pnpm-workspaces monorepo.
 
 - Architecture + current state: `docs/architecture.md` · roadmap: `docs/roadmap.md` · ops: `docs/deployment.md`
 - Build order + test commands: use the `build` skill
@@ -9,7 +9,7 @@ Autonomous multi-chain trading system (`TRADING_CHAIN` = comma list of `solana|t
 - Changing strategies/scanner filters/exits/sizing: `trading-techniques` skill
 - Risk engine (`packages/core/src/risk/`) is the firewall around money — changes there require deterministic unit tests (`pnpm exec vitest run packages/core`)
 - Provider failures/missing data must map to UNKNOWN, never SAFE
-- `TRADING_MODE=LIVE` only after the Phase-6 checklist in `docs/deployment.md`. Enforced in code: Solana LIVE refuses to boot without a healthy Redis idempotency guard; TON LIVE is refused outright (no signing path); EVM chains (bsc/base/polygon/arbitrum) are PAPER-only — no quote aggregator or signing path yet
+- `TRADING_MODE=LIVE` only after the Phase-6 checklist in `docs/deployment.md`. Enforced in code: Solana LIVE refuses to boot without a healthy Redis idempotency guard; TON LIVE is refused outright (no signing path); EVM chains (bsc/base/polygon/arbitrum/ethereum/avalanche/optimism/linea/mantle/blast/zksync/scroll) are PAPER-only — no quote aggregator or signing path yet
 - Risk limits are per-chain books (capital splits evenly across `TRADING_CHAIN`); cross-chain aggregate exposure is not gated — see the ponytail in `apps/trader/src/index.ts`
 - All env lives in the root `.env` — no per-app env files. `SERVER_PORT` must match the watchdog's `MONITOR_PORT` (default 3000)
 
