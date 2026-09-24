@@ -102,9 +102,10 @@ describe("JevAgent", () => {
     };
     expect(Object.keys(body.questions).sort()).toEqual(["mom0", "rug0", "s0"]);
     expect(body.questions["s0"]!.criteria).toHaveLength(6);
-    // compact card: shortened address, no strategyViews/market bloat
-    const state = JSON.parse(body.state) as { token: string }[];
-    expect(state[0]!.token).toBe("TokVer…6789");
+    // compact card in a context envelope: shortened address, symbol carried
+    const state = JSON.parse(body.state) as { context: string; tokens: { token: string }[] };
+    expect(state.context).toContain("STRUCTURAL");
+    expect(state.tokens[0]!.token).toBe("TokVer…6789");
   });
 
   it("returns an empty map on HTTP failure, timeout, or garbage — never throws", async () => {

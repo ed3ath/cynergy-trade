@@ -33,7 +33,16 @@ export interface JevReview {
   momentumProb?: number;
 }
 
-/** Compact token card for the classifier — numeric essentials only. */
+/** Context preface so the classifier doesn't misread established tokens as
+ *  rugs just because momentum is flat and security data is UNKNOWN. */
+const STATE_CONTEXT =
+  "Micro-cap trade candidates. Rug means STRUCTURAL scam evidence: honeypot or malicious " +
+  "contract, creator/insider concentration, sniper/bundler loading, liquidity-pull setup. " +
+  "An established token (top-tier mcap, deep liquidity, old pool, clean security) is NOT a " +
+  "rug risk — judge entry quality and timing instead. Absent security data (sec UNKNOWN) " +
+  "means unverified, not malicious.";
+
+/** Compact token card for the classifier — numeric essentials + symbol. */
 function card(c: AiCandidate, i: number): Record<string, unknown> {
   const short = c.tokenAddress.length > 14
     ? c.tokenAddress.slice(0, 6) + "…" + c.tokenAddress.slice(-4)
@@ -41,18 +50,32 @@ function card(c: AiCandidate, i: number): Record<string, unknown> {
   return {
     i,
     token: short,
+    ...(c.symbol ? { sym: c.symbol } : {}),
     chain: c.chain,
     ...(c.market ? {
       mcapUsd: c.market.marketCapUsd,
       vol1hUsd: c.market.volumeUsd1h,
       ch5mPct: c.market.priceChange5m,
       ch1hPct: c.market.priceChange1h,
+      buy1mUsd: c.market.buyVolumeUsd1m,
+      sell1mUsd: c.market.sellVolumeUsd1m,
+      buyers1m: c.market.uniqueBuyers1m,
+      sellers1m: c.market.uniqueSellers1m,
     } : {}),
     ...(c.liquidity ? {
       liqUsd: c.liquidity.liquidityUsd,
       poolAgeMin: Math.round(c.liquidity.poolAgeMs / 60_000),
+      slipBps500: c.liquidity.estimatedSlippageBps500,
+      liqCh5mPct: c.liquidity.liquidityChange5m,
     } : {}),
-    ...(c.holders ? { top10Pct: c.holders.top10Pct } : {}),
+    ...(c.holders ? {
+      holders: c.holders.totalHolders,
+      top10Pct: c.holders.top10Pct,
+      creatorPct: c.holders.creatorPct,
+      insiderPct: c.holders.insiderPct,
+      sniperPct: c.holders.sniperPct,
+      bundlerPct: c.holders.bundlerPct,
+    } : {}),
     ...(c.security ? { sec: c.security.status, secScore: c.security.score } : {}),
     ...(c.scores ? { scannerScores: c.scores } : {}),
     ...(c.strategyViews
@@ -75,19 +98,28 @@ export class JevAgent {
     const picked = candidates.slice(0, MAX_CANDIDATES);
     const questions: Record<string, { type: string; instructions: string; criteria?: string[] }> = {};
     picked.forEach((c, i) => {
-      const t = `candidate ${i} (${card(c, i).token})`;
+      const t = `candidate ${i} (${card(c, i).token}${c.symbol ? " " + c.symbol : ""})`;
       questions[`s${i}`] = {
         type: "score",
-        instructions: `Score ${t} as a micro-cap trade entry right now, weighing exit-liquidity, holder/rug risk, and momentum vs exit-pump risk.`,
+        instructions:
+          `Score ${t} as an entry RIGHT NOW. Rubric: 6 prime = deep liquidity (>$100k), top10 <25%, ` +
+          "clean security, healthy fresh momentum (ch1h roughly +2..+20%). 4 decent = solid liquidity, " +
+          "minor flags. 3 marginal = thin liquidity or mixed signals. 2 weak = poor liquidity, stale or " +
+          "negative momentum. 1 avoid = structural scam flags, <$10k liquidity, or already exit-pumped.",
         criteria: SCORE_LEVELS,
       };
       questions[`rug${i}`] = {
         type: "noul",
-        instructions: `Is ${t} a rug, scam, or dump-risk token?`,
+        instructions:
+          `Does ${t} show STRUCTURAL scam evidence — honeypot/malicious contract, creator or insider ` +
+          "concentration >30%, snipers/bundlers, liquidity-pull setup? Old age, flat price, or unverified " +
+          "security data alone is NOT rug.",
       };
       questions[`mom${i}`] = {
         type: "noul",
-        instructions: `Is ${t} momentum entry-safe — rising without being already exit-pumped?`,
+        instructions:
+          `Is ${t} momentum entry-safe: rising or basing with two-way flow (buyers ≈ sellers, liquidity ` +
+          "stable), not already pumped >30% in 1h and not collapsing?",
       };
     });
 
@@ -102,7 +134,7 @@ export class JevAgent {
           ...(this.cfg.jevApiKey ? { authorization: `Bearer ${this.cfg.jevApiKey}` } : {}),
         },
         body: JSON.stringify({
-          state: JSON.stringify(picked.map(card)),
+          state: JSON.stringify({ context: STATE_CONTEXT, tokens: picked.map(card) }),
           model: this.cfg.jevModel,
           questions,
         }),

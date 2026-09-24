@@ -37,6 +37,9 @@ export interface AiVerdict {
 export interface AiCandidate {
   tokenAddress: string;
   chain: Chain;
+  /** Display symbol when the liquidity provider exposed it — context for the
+   *  AI/classifier (recognizing majors), display only. */
+  symbol?: string | null;
   market?: { priceUsd: number; marketCapUsd?: number; volumeUsd5m: number; volumeUsd1h: number; priceChange5m: number; priceChange1h: number; buyVolumeUsd1m: number; sellVolumeUsd1m: number; uniqueBuyers1m: number; uniqueSellers1m: number };
   liquidity?: { liquidityUsd: number; poolAgeMs: number; estimatedSlippageBps500: number; liquidityChange5m: number };
   holders?: { totalHolders: number; top10Pct: number; creatorPct: number; insiderPct: number; sniperPct: number; bundlerPct: number };
