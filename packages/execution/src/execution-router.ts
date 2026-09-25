@@ -42,6 +42,37 @@ export class PaperExecutionRouter implements ExecutionRouter {
   ) {}
 
   async execute(intent: TradeIntent, currentPriceUsd: number): Promise<ExecutionResult> {
+    if (intent.mode !== "PAPER" || (intent.side !== "BUY" && intent.side !== "SELL")
+        || !Number.isFinite(currentPriceUsd) || currentPriceUsd <= 0
+        || !Number.isFinite(intent.positionSizeUsd) || intent.positionSizeUsd <= 0
+        || !Number.isFinite(intent.maxSlippageBps) || intent.maxSlippageBps < 0 || intent.maxSlippageBps >= 20_000
+        || !Number.isFinite(intent.maxPriceImpactBps) || intent.maxPriceImpactBps < 0
+        || !Number.isFinite(intent.expiresAt.getTime()) || intent.expiresAt.getTime() <= Date.now()) {
+      throw new ExecutionError("Invalid or expired PAPER intent or execution price", { intentId: intent.id });
+    }
+    if (intent.side === "SELL" && (typeof intent.paperTokenQuantity !== "bigint" || intent.paperTokenQuantity <= 0n)) {
+      throw new ExecutionError("PAPER SELL requires a positive exact paperTokenQuantity", { intentId: intent.id });
+    }
+
+    // Mode-specific units: PAPER buys spend USD-micro and receive token-nano;
+    // sells spend the exact token-nano quantity and receive USD-micro. These
+    // synthetic scales must never be used for SHADOW/LIVE provider amounts.
+    const slippageFactor = 1 - (intent.maxSlippageBps / 2) / 10_000;
+    const filledPrice = intent.side === "BUY"
+      ? currentPriceUsd / slippageFactor
+      : currentPriceUsd * slippageFactor;
+    const inputUsdMicro = Math.round(intent.positionSizeUsd * 1e6);
+    const output = intent.side === "BUY"
+      ? Math.round((inputUsdMicro / 1e6 / filledPrice) * 1e9)
+      : Math.round(Number(intent.paperTokenQuantity) / 1e9 * filledPrice * 1e6);
+    if (!Number.isFinite(filledPrice) || filledPrice <= 0
+        || (intent.side === "BUY" && (!Number.isSafeInteger(inputUsdMicro) || inputUsdMicro <= 0))
+        || !Number.isFinite(output) || output <= 0
+        || (intent.side === "BUY" && output >= 1e30)
+        || (intent.side === "SELL" && !Number.isSafeInteger(output))) {
+      throw new ExecutionError("PAPER fill is non-finite, empty, or outside monetary precision", { intentId: intent.id });
+    }
+
     await assertNotDuplicate(this.guard, intent.id);
 
     const orderId = generateOrderId();
@@ -54,18 +85,8 @@ export class PaperExecutionRouter implements ExecutionRouter {
     sm.transition("CONFIRMING");
     sm.transition("CONFIRMED");
 
-    // Synthetic fill: apply half the max slippage as simulated cost
-    const slippageFactor = 1 - (intent.maxSlippageBps / 2) / 10_000;
-    const filledPrice = intent.side === "BUY"
-      ? currentPriceUsd / slippageFactor
-      : currentPriceUsd * slippageFactor;
-
-    const inputAmount = BigInt(Math.round(intent.positionSizeUsd * 1e6));
-    const outputAmount = BigInt(Math.round(
-      intent.side === "BUY"
-        ? (intent.positionSizeUsd / filledPrice) * 1e9
-        : intent.positionSizeUsd * slippageFactor * 1e6,
-    ));
+    const inputAmount = intent.side === "BUY" ? BigInt(inputUsdMicro) : intent.paperTokenQuantity!;
+    const outputAmount = BigInt(output);
 
     const result: ExecutionResult = {
       tradeIntentId: intent.id,

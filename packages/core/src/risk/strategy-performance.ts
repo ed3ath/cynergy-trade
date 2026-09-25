@@ -5,6 +5,9 @@
 export interface TradeOutcome {
   strategyId: string;
   pnlUsd: number;
+  /** Authoritative fill-net outcome for a completed position. When present,
+   *  fees and slippage are already included and are not deducted again. */
+  netPnlUsd?: number;
   feesUsd: number;
   slippageUsd: number;
   durationMs: number;
@@ -31,6 +34,11 @@ export class StrategyPerformanceTracker {
   private outcomes = new Map<string, TradeOutcome[]>();
 
   record(outcome: TradeOutcome): void {
+    if (![outcome.pnlUsd, outcome.netPnlUsd ?? outcome.pnlUsd, outcome.feesUsd,
+      outcome.slippageUsd, outcome.durationMs, outcome.timestamp.getTime()].every(Number.isFinite)
+        || outcome.feesUsd < 0 || outcome.slippageUsd < 0 || outcome.durationMs < 0) {
+      throw new Error("Invalid strategy performance outcome");
+    }
     const list = this.outcomes.get(outcome.strategyId) ?? [];
     list.push(outcome);
     this.outcomes.set(outcome.strategyId, list);
@@ -44,7 +52,7 @@ export class StrategyPerformanceTracker {
       return neutralStats(strategyId);
     }
 
-    const netPnls = trades.map((t) => t.pnlUsd - t.feesUsd - t.slippageUsd);
+    const netPnls = trades.map((t) => t.netPnlUsd ?? (t.pnlUsd - t.feesUsd - t.slippageUsd));
     const wins = netPnls.filter((p) => p > 0);
     const losses = netPnls.filter((p) => p <= 0);
 

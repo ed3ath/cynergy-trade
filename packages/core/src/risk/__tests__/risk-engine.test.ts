@@ -296,4 +296,44 @@ describe("RiskEngine", () => {
     }));
     expect(result.rejectionReasons.length).toBeGreaterThan(2);
   });
+
+  it.each([NaN, Infinity, -Infinity])("rejects non-finite financial inputs (%s) before sizing", (bad) => {
+    const inputs = [
+      makeInput({ strategyConfidence: bad }),
+      makeInput({ strategyPerformanceMultiplier: bad }),
+      makeInput({ dailyLossUsd: bad }),
+      makeInput({ currentDrawdownPct: bad }),
+      makeInput({ existingTokenExposureUsd: bad }),
+      makeInput({ intent: makeIntent({ positionSizeUsd: bad }) }),
+      makeInput({ portfolio: { ...GOOD_PORTFOLIO, totalValueUsd: bad } }),
+      makeInput({ portfolio: { ...GOOD_PORTFOLIO, availableCapitalUsd: bad } }),
+      makeInput({ liquidity: { ...GOOD_LIQUIDITY, liquidityUsd: bad } }),
+      makeInput({ liquidity: { ...GOOD_LIQUIDITY, estimatedSlippageBps50: bad } }),
+      makeInput({ security: { ...SAFE_SECURITY, confidence: bad } }),
+    ];
+    for (const input of inputs) {
+      const result = engine.evaluate(input);
+      expect(result.decision).toBe("REJECTED");
+      expect(result.approvedSizeUsd).toBe(0);
+      expect(result.rejectionReasons.some((r) => r.startsWith("INVALID_FINANCIAL_INPUT"))).toBe(true);
+    }
+  });
+
+  it("rejects mismatched token and chain observations", () => {
+    expect(engine.evaluate(makeInput({ liquidity: { ...GOOD_LIQUIDITY, chain: "ton" } })).rejectionReasons)
+      .toContain("SNAPSHOT_IDENTITY_MISMATCH");
+    expect(engine.evaluate(makeInput({ security: { ...SAFE_SECURITY, tokenAddress: "other" } })).rejectionReasons)
+      .toContain("SNAPSHOT_IDENTITY_MISMATCH");
+  });
+
+  it("rejects invalid expiry, zero sizing and malformed counts", () => {
+    expect(engine.evaluate(makeInput({ intent: makeIntent({ expiresAt: new Date(NaN) }) })).rejectionReasons)
+      .toContain("INVALID_INTENT_EXPIRY");
+    for (const input of [
+      makeInput({ intent: makeIntent({ positionSizeUsd: 0 }) }),
+      makeInput({ openPositionCount: 0.5 }),
+      makeInput({ strategyConfidence: 1.1 }),
+      makeInput({ portfolio: { ...GOOD_PORTFOLIO, allocatedUsd: -1 } }),
+    ]) expect(engine.evaluate(input).decision).toBe("REJECTED");
+  });
 });

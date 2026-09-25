@@ -52,7 +52,7 @@ export function startHttpServer(opts: {
   logger: Logger;
   getStatus: () => StatusPayload;
   getMetrics: () => Record<string, number>;
-  getReport?: () => unknown;
+  getReport?: () => unknown | Promise<unknown>;
   /** Equity-curve points for GET /history. */
   getHistory?: () => Promise<unknown>;
   /** Closed-position trade history for GET /trades. */
@@ -221,7 +221,7 @@ export function startHttpServer(opts: {
 
       if (req.method === "GET" && path === "/report") {
         if (!getReport) return respond(res, 404, { error: "reporting not enabled" });
-        return respond(res, 200, getReport());
+        return respond(res, 200, await getReport());
       }
 
       if (req.method === "GET" && path === "/metrics") {

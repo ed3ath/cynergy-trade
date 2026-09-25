@@ -265,6 +265,10 @@ export interface TradeIntent {
   strategyVersion: string;
   riskVersion: string;
   positionSizeUsd: number;
+  /** PAPER SELL only: exact synthetic token-nano quantity (1 token = 1e9).
+   *  SHADOW/LIVE amounts remain in their provider's native units. */
+  paperTokenQuantity?: bigint;
+  positionId?: string;
   maxSlippageBps: number;
   maxPriceImpactBps: number;
   reason: string;
@@ -303,6 +307,16 @@ export interface ExecutionResult {
   mode: TradeMode;
 }
 
+/** Confirmed PAPER cash flow. Null realization fields mean legacy accounting
+ *  cannot be reconciled; they must never be interpreted as zero net PnL. */
+export interface PaperFillAccounting {
+  cashDeltaUsd: number;
+  realizedPnlDeltaUsd: number | null;
+  realizedGrossPnlDeltaUsd: number | null;
+  soldCostBasisUsd: number | null;
+  allocatedEntryFeeUsd: number | null;
+}
+
 // ─── Position ─────────────────────────────────────────────────────────────────
 export interface Position {
   id: string;
@@ -313,8 +327,23 @@ export interface Position {
   strategyId: string;
   entryPrice: number;
   currentPrice: number;
+  /** Remaining cost basis, excluding entry fees. */
   sizeUsd: number;
+  /** Remaining quantity; synthetic token-nano only in PAPER mode. */
   sizeTokens: bigint;
+  /** Absent/1 is legacy, never implicitly upgraded during restoration. */
+  accountingVersion?: 1 | 2;
+  initialSizeUsd?: number;
+  initialSizeTokens?: bigint;
+  entryFeeUsd?: number;
+  remainingEntryFeeUsd?: number;
+  realizedPnlUsd?: number;
+  realizedGrossPnlUsd?: number;
+  totalFeesUsd?: number;
+  entryOrderId?: string;
+  exitOrderId?: string;
+  closedAt?: Date;
+  dataQuality?: string[];
   stopLoss: number;
   takeProfit1?: number;
   takeProfit2?: number;

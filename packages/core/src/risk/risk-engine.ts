@@ -57,6 +57,50 @@ export class RiskEngine {
   evaluate(input: RiskEngineInput): RiskEngineOutput {
     const rejections: string[] = [];
 
+    // NaN comparisons are false: validate before any gate or sizing arithmetic.
+    const nonNegative = {
+      positionSizeUsd: input.intent.positionSizeUsd,
+      maxSlippageBps: input.intent.maxSlippageBps,
+      maxPriceImpactBps: input.intent.maxPriceImpactBps,
+      totalValueUsd: input.portfolio.totalValueUsd,
+      allocatedUsd: input.portfolio.allocatedUsd,
+      liquidityUsd: input.liquidity.liquidityUsd,
+      slippage50: input.liquidity.estimatedSlippageBps50,
+      slippage500: input.liquidity.estimatedSlippageBps500,
+      slippage5000: input.liquidity.estimatedSlippageBps5000,
+      dailyLossUsd: input.dailyLossUsd,
+      weeklyLossUsd: input.weeklyLossUsd,
+      currentDrawdownPct: input.currentDrawdownPct,
+      existingTokenExposureUsd: input.existingTokenExposureUsd,
+      existingStrategyExposureUsd: input.existingStrategyExposureUsd,
+      strategyPerformanceMultiplier: input.strategyPerformanceMultiplier,
+    };
+    for (const [name, value] of Object.entries(nonNegative)) {
+      if (!Number.isFinite(value) || value < 0) rejections.push(`INVALID_FINANCIAL_INPUT:${name}`);
+    }
+    if (!Number.isFinite(input.portfolio.availableCapitalUsd)) rejections.push("INVALID_FINANCIAL_INPUT:availableCapitalUsd");
+    if (input.intent.positionSizeUsd === 0 || input.portfolio.totalValueUsd === 0) rejections.push("INVALID_FINANCIAL_INPUT:zero_size_or_equity");
+    if (!Number.isInteger(input.openPositionCount) || input.openPositionCount < 0) rejections.push("INVALID_FINANCIAL_INPUT:openPositionCount");
+    for (const [name, value] of Object.entries({
+      strategyConfidence: input.strategyConfidence,
+      securityConfidence: input.security.confidence,
+      liquidityConfidence: input.liquidity.confidence,
+    })) {
+      if (!Number.isFinite(value) || value < 0 || value > 1) rejections.push(`INVALID_FINANCIAL_INPUT:${name}`);
+    }
+    if (!Number.isFinite(input.intent.expiresAt.getTime())) rejections.push("INVALID_INTENT_EXPIRY");
+    if (!["BULL", "BEAR", "LOW_VOLATILITY", "HIGH_VOLATILITY", "RISK_OFF", "UNKNOWN"].includes(input.marketRegime)) {
+      rejections.push("INVALID_MARKET_REGIME");
+    }
+    if ([input.liquidity, input.security].some((s) =>
+      s.chain !== input.intent.chain || s.tokenAddress !== input.intent.tokenAddress)) {
+      rejections.push("SNAPSHOT_IDENTITY_MISMATCH");
+    }
+    if (Object.values(this.config).some((v) => typeof v === "number" && (!Number.isFinite(v) || v <= 0))) {
+      rejections.push("INVALID_RISK_CONFIG");
+    }
+    if (rejections.length > 0) return this.rejected(input, rejections);
+
     // ── Hard gate 1: kill switch ─────────────────────────────────────────────
     if (this.killSwitchFn()) {
       rejections.push("KILL_SWITCH_ACTIVE");

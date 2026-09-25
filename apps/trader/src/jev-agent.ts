@@ -17,7 +17,7 @@
  * input-only credits; drop its real pricing in if it dominates the budget.
  */
 import type { AIConfig, Logger } from "@autonomous-trader/shared";
-import type { AiCandidate } from "./ai-agent.js";
+import { withAiDeadline, type AiCandidate, type AiConversationOptions } from "./ai-agent.js";
 import type { AiBudget } from "./ai-budget.js";
 
 const MAX_CANDIDATES = 20; // API allows 64 questions; 3 per candidate + token cap say keep it lean
@@ -92,89 +92,93 @@ export class JevAgent {
   ) {}
 
   /** Review candidates → JevReview keyed `${chain}:${token}`. Empty map on
-   *  any failure — callers treat unreviewed as pass-through. */
-  async score(candidates: AiCandidate[]): Promise<Map<string, JevReview>> {
+   *  any failure — callers treat unreviewed as pass-through. The optional
+   *  proposal deadline also bounds fetch and response-body reads. */
+  async score(candidates: AiCandidate[], options: AiConversationOptions = {}): Promise<Map<string, JevReview>> {
     if (candidates.length === 0 || this.budget.overCostCap()) return new Map();
-    const picked = candidates.slice(0, MAX_CANDIDATES);
-    const questions: Record<string, { type: string; instructions: string; criteria?: string[] }> = {};
-    picked.forEach((c, i) => {
-      const t = `candidate ${i} (${card(c, i).token}${c.symbol ? " " + c.symbol : ""})`;
-      questions[`s${i}`] = {
-        type: "score",
-        instructions:
-          `Score ${t} as an entry RIGHT NOW. Rubric: 6 prime = deep liquidity (>$100k), top10 <25%, ` +
-          "clean security, healthy fresh momentum (ch1h roughly +2..+20%). 4 decent = solid liquidity, " +
-          "minor flags. 3 marginal = thin liquidity or mixed signals. 2 weak = poor liquidity, stale or " +
-          "negative momentum. 1 avoid = structural scam flags, <$10k liquidity, or already exit-pumped.",
-        criteria: SCORE_LEVELS,
-      };
-      questions[`rug${i}`] = {
-        type: "noul",
-        instructions:
-          `Does ${t} show STRUCTURAL scam evidence — honeypot/malicious contract, creator or insider ` +
-          "concentration >30%, snipers/bundlers, liquidity-pull setup? Old age, flat price, or unverified " +
-          "security data alone is NOT rug.",
-      };
-      questions[`mom${i}`] = {
-        type: "noul",
-        instructions:
-          `Is ${t} momentum entry-safe: rising or basing with two-way flow (buyers ≈ sellers, liquidity ` +
-          "stable), not already pumped >30% in 1h and not collapsing?",
-      };
-    });
-
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.cfg.jevTimeoutMs);
     try {
-      const res = await fetch(`${this.cfg.jevBaseUrl.replace(/\/$/, "")}/systemone`, {
-        method: "POST",
-        signal: controller.signal,
-        headers: {
-          "content-type": "application/json",
-          ...(this.cfg.jevApiKey ? { authorization: `Bearer ${this.cfg.jevApiKey}` } : {}),
-        },
-        body: JSON.stringify({
+      return await withAiDeadline(this.cfg.jevTimeoutMs, options, async (signal, check) => {
+        const picked = candidates.slice(0, MAX_CANDIDATES);
+        const questions: Record<string, { type: string; instructions: string; criteria?: string[] }> = {};
+        picked.forEach((c, i) => {
+          const t = `candidate ${i} (${card(c, i).token}${c.symbol ? " " + c.symbol : ""})`;
+          questions[`s${i}`] = {
+            type: "score",
+            instructions:
+              `Score ${t} as an entry RIGHT NOW. Rubric: 6 prime = deep liquidity (>$100k), top10 <25%, ` +
+              "clean security, healthy fresh momentum (ch1h roughly +2..+20%). 4 decent = solid liquidity, " +
+              "minor flags. 3 marginal = thin liquidity or mixed signals. 2 weak = poor liquidity, stale or " +
+              "negative momentum. 1 avoid = structural scam flags, <$10k liquidity, or already exit-pumped.",
+            criteria: SCORE_LEVELS,
+          };
+          questions[`rug${i}`] = {
+            type: "noul",
+            instructions:
+              `Does ${t} show STRUCTURAL scam evidence — honeypot/malicious contract, creator or insider ` +
+              "concentration >30%, snipers/bundlers, liquidity-pull setup? Old age, flat price, or unverified " +
+              "security data alone is NOT rug.",
+          };
+          questions[`mom${i}`] = {
+            type: "noul",
+            instructions:
+              `Is ${t} momentum entry-safe: rising or basing with two-way flow (buyers ≈ sellers, liquidity ` +
+              "stable), not already pumped >30% in 1h and not collapsing?",
+          };
+        });
+        const requestBody = JSON.stringify({
           state: JSON.stringify({ context: STATE_CONTEXT, tokens: picked.map(card) }),
           model: this.cfg.jevModel,
           questions,
-        }),
-      });
-      if (!res.ok) {
-        const detail = await res.text().then((t) => t.slice(0, 200)).catch(() => "");
-        throw new Error(`HTTP ${res.status}${detail ? `: ${detail}` : ""}`);
-      }
-      const body = (await res.json()) as {
-        answers?: Record<string, { type?: string; score?: unknown; noul?: unknown }>;
-        usage?: { input_tokens?: number };
-      };
-      this.budget.trackCost({ prompt_tokens: body.usage?.input_tokens ?? 0, completion_tokens: 0 });
-      const prob = (v: unknown): number | undefined => {
-        if (typeof v !== "number" || !Number.isFinite(v)) return undefined;
-        return Math.min(1, Math.max(0, v));
-      };
-      const reviews = new Map<string, JevReview>();
-      picked.forEach((c, i) => {
-        const raw = body.answers?.[`s${i}`]?.score;
-        if (typeof raw !== "number" || !Number.isFinite(raw)) return; // no score → pass-through
-        const review: JevReview = {
-          score: Math.min(1, Math.max(0, raw / (SCORE_LEVELS.length - 1))),
+        });
+        check();
+        if (this.budget.overCostCap()) return new Map<string, JevReview>();
+        const acknowledge = this.budget.beginRequest();
+        const res = await fetch(`${this.cfg.jevBaseUrl.replace(/\/$/, "")}/systemone`, {
+          method: "POST",
+          signal,
+          headers: {
+            "content-type": "application/json",
+            ...(this.cfg.jevApiKey ? { authorization: `Bearer ${this.cfg.jevApiKey}` } : {}),
+          },
+          body: requestBody,
+        });
+        if (!res.ok) {
+          const detail = await res.text().then((t) => t.slice(0, 200)).catch(() => "");
+          throw new Error(`HTTP ${res.status}${detail ? `: ${detail}` : ""}`);
+        }
+        const body = (await res.json()) as {
+          answers?: Record<string, { type?: string; score?: unknown; noul?: unknown }>;
+          usage?: { input_tokens?: number };
         };
-        const rug = prob(body.answers?.[`rug${i}`]?.noul);
-        if (rug !== undefined) review.rugProb = rug;
-        const mom = prob(body.answers?.[`mom${i}`]?.noul);
-        if (mom !== undefined) review.momentumProb = mom;
-        reviews.set(`${c.chain}:${c.tokenAddress}`, review);
+        const inputTokens = body.usage?.input_tokens;
+        if (inputTokens !== undefined) acknowledge({ prompt_tokens: inputTokens, completion_tokens: 0 });
+        check();
+        const prob = (v: unknown): number | undefined => {
+          if (typeof v !== "number" || !Number.isFinite(v)) return undefined;
+          return Math.min(1, Math.max(0, v));
+        };
+        const reviews = new Map<string, JevReview>();
+        picked.forEach((c, i) => {
+          const raw = body.answers?.[`s${i}`]?.score;
+          if (typeof raw !== "number" || !Number.isFinite(raw)) return; // no score → pass-through
+          const review: JevReview = {
+            score: Math.min(1, Math.max(0, raw / (SCORE_LEVELS.length - 1))),
+          };
+          const rug = prob(body.answers?.[`rug${i}`]?.noul);
+          if (rug !== undefined) review.rugProb = rug;
+          const mom = prob(body.answers?.[`mom${i}`]?.noul);
+          if (mom !== undefined) review.momentumProb = mom;
+          reviews.set(`${c.chain}:${c.tokenAddress}`, review);
+        });
+        if (reviews.size === 0) this.log.warn("Jev returned no usable reviews — pass-through");
+        return reviews;
       });
-      if (reviews.size === 0) this.log.warn("Jev returned no usable reviews — pass-through");
-      return reviews;
     } catch (err) {
-      const e = err as Error;
+      const e = err instanceof Error ? err : new Error(String(err));
       this.log.warn("Jev call failed — pass-through", {
         error: e.name === "AbortError" ? "timeout" : e.message,
       });
       return new Map(); // all-or-nothing: a partial map would filter on garbage
-    } finally {
-      clearTimeout(timer);
     }
   }
 }

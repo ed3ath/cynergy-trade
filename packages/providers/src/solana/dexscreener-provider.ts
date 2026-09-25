@@ -37,6 +37,14 @@ export class DexScreenerProvider extends AbstractProvider
   /** market + liquidity are fetched from the same pair payload — cache it briefly. */
   private readonly pairCache = new Map<string, { at: number; pair: DexPair | null }>();
   private readonly pairCacheMs: number;
+  /** market + liquidity fire concurrently for one token — dedup to one request. */
+  private readonly inflight = new Map<string, Promise<DexPair | null>>();
+  // Circuit breaker: 429s must not be retried — hammering a throttled
+  // DexScreener extends the penalty (same lesson as the GoPlus/GT backoffs).
+  // Consecutive rate-limit hits escalate the lockout; any success resets it.
+  private cooldownUntil = 0;
+  private rateHits = 0;
+  private static readonly RATE_BACKOFF_MS = [15_000, 30_000, 60_000, 120_000] as const;
 
   constructor(
     private readonly baseUrl = "https://api.dexscreener.com",
@@ -161,34 +169,56 @@ export class DexScreenerProvider extends AbstractProvider
 
   /** Highest-liquidity pair on the configured chain; throws on no data (→ UNKNOWN, never SAFE). */
   private async bestPair(tokenAddress: string): Promise<DexPair> {
-    const cached = this.pairCache.get(tokenAddress);
-    if (cached && Date.now() - cached.at < this.pairCacheMs) {
-      if (!cached.pair) throw new ProviderError(`DexScreener: no pair for ${tokenAddress}`, this.name);
-      return cached.pair;
-    }
-
-    const pair = await this.withRetry(async () => {
-      const res = await fetch(`${this.baseUrl}/latest/dex/tokens/${tokenAddress}`, {
-        headers: { accept: "application/json" },
-        signal: AbortSignal.timeout(10_000),
-      });
-      if (res.status === 429) throw new ProviderError("DexScreener rate limited", this.name);
-      if (!res.ok) {
-        throw new ProviderError(`DexScreener HTTP ${res.status}`, this.name);
-      }
-      const body = (await res.json()) as { pairs?: DexPair[] };
-      const chainPairs = (body.pairs ?? []).filter((p) => p.chainId === this.chainFilter);
-      if (chainPairs.length === 0) {
-        return null; // unknown token — cache the miss too
-      }
-      return chainPairs.reduce((best, p) =>
-        (p.liquidity?.usd ?? 0) > (best.liquidity?.usd ?? 0) ? p : best);
-    }, { maxRetries: 2 });
-
-    this.pairCache.set(tokenAddress, { at: Date.now(), pair });
+    const pair = await this.fetchPair(tokenAddress);
     if (!pair || !pair.priceUsd) {
       throw new ProviderError(`DexScreener: no price for ${tokenAddress}`, this.name);
     }
     return pair;
+  }
+
+  private fetchPair(tokenAddress: string): Promise<DexPair | null> {
+    const cached = this.pairCache.get(tokenAddress);
+    if (cached && Date.now() - cached.at < this.pairCacheMs) return Promise.resolve(cached.pair);
+    if (Date.now() < this.cooldownUntil) {
+      return Promise.reject(new ProviderError("DexScreener cooling down after rate limit", this.name));
+    }
+    const running = this.inflight.get(tokenAddress);
+    if (running) return running;
+
+    const run = (async () => {
+      try {
+        // ponytail: single attempt, no withRetry — a retry storm during a
+        // throttle is worse than one lost refresh (scanner keeps last
+        // snapshot). Re-add bounded retry for 5xx only if blips hurt.
+        const res = await this.call(() =>
+          fetch(`${this.baseUrl}/latest/dex/tokens/${tokenAddress}`, {
+            headers: { accept: "application/json" },
+            signal: AbortSignal.timeout(10_000),
+          }));
+        if (res.status === 429) {
+          const backoff = DexScreenerProvider.RATE_BACKOFF_MS[
+            Math.min(this.rateHits, DexScreenerProvider.RATE_BACKOFF_MS.length - 1)]!;
+          this.rateHits++;
+          this.cooldownUntil = Date.now() + backoff;
+          throw new ProviderError("DexScreener rate limited", this.name);
+        }
+        this.rateHits = 0; // any success ends the breaker escalation
+        if (!res.ok) {
+          throw new ProviderError(`DexScreener HTTP ${res.status}`, this.name);
+        }
+        const body = (await res.json()) as { pairs?: DexPair[] };
+        const chainPairs = (body.pairs ?? []).filter((p) => p.chainId === this.chainFilter);
+        const pair = chainPairs.length === 0
+          ? null // unknown token — cache the miss too
+          : chainPairs.reduce((best, p) =>
+              (p.liquidity?.usd ?? 0) > (best.liquidity?.usd ?? 0) ? p : best);
+        this.pairCache.set(tokenAddress, { at: Date.now(), pair });
+        return pair;
+      } finally {
+        this.inflight.delete(tokenAddress);
+      }
+    })();
+    this.inflight.set(tokenAddress, run);
+    return run;
   }
 }

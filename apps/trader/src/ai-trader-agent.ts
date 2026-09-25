@@ -16,9 +16,10 @@
  * throws and never blocks the deterministic loop.
  */
 import { CHAIN_VALUES, type AIConfig, type Chain, type Logger } from "@autonomous-trader/shared";
-import type { AiCandidate, AiToolContext, ChatMessage, ChatResponse } from "./ai-agent.js";
-import { TOOL_DEFS, type ToolDef, parseChatCompletion } from "./ai-agent.js";
+import type { AiCandidate, AiConversationOptions, AiToolContext, ChatMessage, ChatResponse } from "./ai-agent.js";
+import { TOOL_DEFS, type ToolDef, parseChatCompletion, withAiDeadline } from "./ai-agent.js";
 import { AiBudget } from "./ai-budget.js";
+import type { LossStats } from "./loss-stats.js";
 
 export interface AiAction {
   type: "ENTER" | "EXIT" | "TIGHTEN";
@@ -79,19 +80,14 @@ export interface AiTraderSnapshot {
     exitReason: string | null;
     heldMin: number;
   }[];
-  /** Aggregate over the last 200 closed trades — what keeps you honest. */
-  lossStats?: {
-    sampleSize: number;
-    winRatePct: number;
-    avgWinPct: number;
-    avgLossPct: number;
-    expectancyPct: number;
-    lossReasons: { reason: string; count: number; avgPnlPct: number }[];
-    weakStrategies: { strategyId: string; trades: number; winRatePct: number }[];
-    repeatLoserTokens: string[];
-  };
+  /** Scoped reconciled outcomes, with missing data and sample limits explicit. */
+  lossStats?: LossStats;
   /** Your own persisted lessons from past losses — read, apply, refine. */
   lessons?: string[];
+  /** Host-enforced constraints and previous application outcomes. */
+  entryRules?: { minimumLiquidityUsd: number; copyTradingEnabled: boolean };
+  entryBlocks?: { chain: Chain; reasons: string[] }[];
+  actionOutcomes?: { type: string; token: string; chain: Chain; outcome: string; at: string; reason?: string }[];
   /** Recent swaps by tracked high-PNL wallets (copy-trade feed), newest last.
    *  BUYs are candidate entries for the agent's own analysis; SELLs of held
    *  tokens are take-profit hints. */
@@ -125,24 +121,29 @@ const SYSTEM_PROMPT =
   "Scores and strategyViews are GUIDANCE, not gates: they tell you what the quantitative " +
   "screens see; jevScore, when present, is an independent classifier's 0-1 entry score from " +
   "a rug/momentum review — " +
-  "same deal — and when your own evidence-based thesis says a trade has positive expected " +
-  "value you ENTER it even if scores are middling or every strategy declined — the goal is " +
-  "net positive PnL, and passing on a good setup loses money just like a bad entry does. " +
+  "the same advisory role. ENTER only with evidence of positive expected net value after " +
+  "trading fees, slippage, and AI operating costs. Abstention preserves capital when evidence " +
+  "or the after-cost opportunity is insufficient; there is no requirement to trade. " +
   "You may call the provided read-only data tools to refresh data on any token before acting. " +
+  "Always specify the token's chain in tool calls. Provider errors, missing pairs, and unknown " +
+  "data are missing evidence, not verified liquidity collapse or a rug. " +
   "You respond with a list of actions, executed only after the deterministic risk engine approves them — " +
   "a risk-engine refusal (security, liquidity, exposure caps) is final, not a signal to retry. " +
+  "Respect entryRules and entryBlocks; blocked entries do not prevent protective exits. " +
+  "Use actionOutcomes to avoid repeating refused actions. An unseen token is a discovery lead " +
+  "and must finish scanner screening before entry. Omit profile for ordinary AI entries; " +
+  "profile is allowed only for a verified fresh TON copy BUY when entryRules.copyTradingEnabled is true. " +
   "Rules: never ENTER a token your own ai-autonomous slot already holds — other slots " +
   "on it are fine, each strategy holds its own slot (copy-trade slots excepted too: you may add ONE " +
   "extra, smaller position when copying a tracked wallet's fresh BUY); every ENTER needs a " +
   "concrete evidence-based thesis — a tracked wallet's BUY is a lead to verify (tools), not a reason " +
   "by itself, and their SELL of a token you hold is a take-profit hint; you may EXIT any position or " +
   "TIGHTEN its exits (raise stop, lower take-profit/trailing) but you can " +
-  "never loosen risk; prefer higher-conviction actions over marginal ones, and remember an " +
-  "empty action list means passing on every opportunity — only send it when nothing offers " +
-  "positive expected value. " +
-  "LEARNING — the goal is >=80% win rate with positive net PnL. Exits are asymmetric (take-profit " +
-  "near +3%, hard stop -10%), so one loss erases roughly three wins: refuse marginal entries that " +
-  "match your loss lessons, and use EXIT/TIGHTEN early on positions resembling past losers. " +
+  "never loosen risk; prefer evidence-backed actions over marginal ones. An empty action list " +
+  "is a valid, cost-aware decision. Avoid repeated research without new decision-relevant evidence. " +
+  "LEARNING: evaluate reconciled net outcomes rather than a target win rate; a small sample " +
+  "does not establish an edge. Refuse marginal entries that match supported loss lessons, " +
+  "and use EXIT/TIGHTEN only on current evidence, not unknown provider data. " +
   "Every cycle, apply your lessons; when recentTrades/lossStats reveal a new loss pattern, or a " +
   "lesson no longer holds, return an updated lessons array (max 10, each one short actionable rule " +
   "with its evidence, replacing stale ones). Omit lessons when nothing changed. " +
@@ -168,80 +169,79 @@ export class AiTraderAgent {
   }
 
   /** One AI cycle. Empty actions on any failure — never throws. */
-  async propose(snapshot: AiTraderSnapshot): Promise<AiTraderCycleResult> {
+  async propose(snapshot: AiTraderSnapshot, options: AiConversationOptions = {}): Promise<AiTraderCycleResult> {
     if (this.cfg.provider === "mock") return { actions: [], summary: "mock provider" };
-    return this.exchange(snapshot);
+    return this.exchange(snapshot, options);
   }
 
   /** The full multi-round conversation. One absolute deadline covers every round. */
-  private async exchange(snapshot: AiTraderSnapshot): Promise<AiTraderCycleResult> {
+  private async exchange(snapshot: AiTraderSnapshot, options: AiConversationOptions): Promise<AiTraderCycleResult> {
     const empty = (summary: string): AiTraderCycleResult => ({ actions: [], summary });
 
     if (this.budget.overCostCap()) return empty("daily AI cost cap reached");
 
-    const messages: ChatMessage[] = [
-      { role: "system", content: SYSTEM_PROMPT },
-      { role: "user", content: JSON.stringify(snapshot) },
-    ];
-    const deadline = Date.now() + this.cfg.timeoutMs;
-
     try {
-      for (let round = 0; round <= MAX_TOOL_ROUNDS; round++) {
-        const remaining = deadline - Date.now();
-        if (remaining <= 0) return empty("deadline exceeded");
+      return await withAiDeadline(this.cfg.timeoutMs, options, async (signal, check) => {
+        const messages: ChatMessage[] = [
+          { role: "system", content: SYSTEM_PROMPT },
+          { role: "user", content: JSON.stringify(snapshot) },
+        ];
+        for (let round = 0; round <= MAX_TOOL_ROUNDS; round++) {
+          check();
+          if (this.budget.overCostCap()) return empty("daily AI cost cap reached");
+          const body = await this.request(messages, signal);
+          check();
 
-        const body = await this.request(messages, remaining);
-        this.budget.trackCost(body.usage);
-
-        const msg = body.choices?.[0]?.message;
-        const calls = msg?.tool_calls ?? [];
-        if (calls.length > 0 && round < MAX_TOOL_ROUNDS) {
-          messages.push({ role: "assistant", content: msg?.content ?? "", tool_calls: calls });
-          for (const tc of calls) {
-            messages.push({ role: "tool", tool_call_id: tc.id, content: await this.runTool(tc) });
+          const msg = body.choices?.[0]?.message;
+          const calls = msg?.tool_calls ?? [];
+          if (calls.length > 0 && round < MAX_TOOL_ROUNDS) {
+            messages.push({ role: "assistant", content: msg?.content ?? "", tool_calls: calls });
+            for (const tc of calls) {
+              check();
+              const content = await this.runTool(tc);
+              check();
+              messages.push({ role: "tool", tool_call_id: tc.id, content });
+            }
+            continue;
           }
-          continue; // model re-answers with the tool results in context
-        }
 
-        return this.parse(msg?.content) ?? empty("malformed AI response");
-      }
-      return empty("no final answer after tool rounds");
+          return this.parse(msg?.content) ?? empty("malformed AI response");
+        }
+        return empty("no final answer after tool rounds");
+      });
     } catch (err) {
-      const e = err as Error;
+      const e = err instanceof Error ? err : new Error(String(err));
       this.log.warn("AI trader call error", { error: e.message });
       return empty(e.name === "AbortError" ? "timeout" : "network error");
     }
   }
 
-  private async request(messages: ChatMessage[], timeoutMs: number): Promise<ChatResponse> {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-    try {
-      const res = await fetch(`${this.cfg.baseUrl.replace(/\/$/, "")}/chat/completions`, {
-        method: "POST",
-        signal: controller.signal,
-        headers: {
-          "content-type": "application/json",
-          ...(this.cfg.apiKey ? { authorization: `Bearer ${this.cfg.apiKey}` } : {}),
-        },
-        body: JSON.stringify({
-          model: this.cfg.model,
-          temperature: 0,
-          // reasoning models spend tokens on thinking before the actions JSON
-          max_tokens: 4000,
-          messages,
-          ...this.toolField(),
-        }),
-      });
-      if (!res.ok) {
-        const detail = await res.text().then((t) => t.slice(0, 200)).catch(() => "");
-        this.log.warn("AI trader call failed", { status: res.status, error: detail });
-        throw new Error(`HTTP ${res.status}${detail ? `: ${detail}` : ""}`);
-      }
-      return parseChatCompletion(await res.text());
-    } finally {
-      clearTimeout(timer);
+  private async request(messages: ChatMessage[], signal: AbortSignal): Promise<ChatResponse> {
+    const acknowledge = this.budget.beginRequest();
+    const res = await fetch(`${this.cfg.baseUrl.replace(/\/$/, "")}/chat/completions`, {
+      method: "POST",
+      signal,
+      headers: {
+        "content-type": "application/json",
+        ...(this.cfg.apiKey ? { authorization: `Bearer ${this.cfg.apiKey}` } : {}),
+      },
+      body: JSON.stringify({
+        model: this.cfg.model,
+        temperature: 0,
+        // reasoning models spend tokens on thinking before the actions JSON
+        max_tokens: 4000,
+        messages,
+        ...this.toolField(),
+      }),
+    });
+    if (!res.ok) {
+      const detail = await res.text().then((t) => t.slice(0, 200)).catch(() => "");
+      this.log.warn("AI trader call failed", { status: res.status, error: detail });
+      throw new Error(`HTTP ${res.status}${detail ? `: ${detail}` : ""}`);
     }
+    const body = parseChatCompletion(await res.text());
+    acknowledge(body.usage);
+    return body;
   }
 
   /** `tools` only when enabled AND at least one tool is actually wired. */
@@ -255,24 +255,27 @@ export class AiTraderAgent {
   private async runTool(tc: NonNullable<ChatMessage["tool_calls"]>[number]): Promise<string> {
     const name = tc.function.name as keyof AiToolContext;
     const fn = this.tools[name];
-    if (typeof fn !== "function") return `error: unknown tool ${tc.function.name}`;
+    if (!this.cfg.toolsEnabled || !TOOL_DEFS.some((t) => t.function.name === name) || typeof fn !== "function") return `error: unknown tool ${tc.function.name}`;
     let args: { token?: unknown; chain?: unknown } = {};
     try {
-      args = JSON.parse(tc.function.arguments || "{}") as { token?: unknown; chain?: unknown };
+      const parsed: unknown = JSON.parse(tc.function.arguments || "{}");
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) args = parsed;
+      else return "error: tool arguments must be an object";
     } catch {
-      // malformed arguments → no token to call with
+      return "error: malformed tool arguments";
     }
-    const token = typeof args.token === "string" && args.token.length > 0 ? args.token : null;
+    const token = typeof args.token === "string" && args.token.trim().length > 0 ? args.token.trim() : null;
     if (!token) return "error: missing token argument";
-    const chain = (CHAIN_VALUES as readonly string[]).includes(args.chain as string)
-      ? (args.chain as Chain)
-      : "solana";
+    if (typeof args.chain !== "string" || !(CHAIN_VALUES as readonly string[]).includes(args.chain)) {
+      return `error: missing or invalid chain argument; expected one of ${CHAIN_VALUES.join(", ")}`;
+    }
+    const chain = args.chain as Chain;
     try {
       const result = await fn(token, chain);
       const text = JSON.stringify(result ?? null);
       return text.length > TOOL_RESULT_MAX_CHARS ? text.slice(0, TOOL_RESULT_MAX_CHARS) : text;
     } catch (err) {
-      return `error: ${(err as Error).message}`;
+      return `error: ${err instanceof Error ? err.message : String(err)}`;
     }
   }
 
@@ -301,11 +304,12 @@ export class AiTraderAgent {
       summary: typeof parsed.summary === "string" ? parsed.summary.slice(0, TEXT_MAX) : "",
     };
     if (Array.isArray(parsed.lessons)) {
-      const lessons = parsed.lessons
+      // An explicit empty array clears stale lessons; the host gates that on a
+      // newly reconciled close so idle cycles cannot erase memory.
+      result.lessons = parsed.lessons
         .filter((l): l is string => typeof l === "string" && l.trim().length > 0)
         .map((l) => l.trim().slice(0, LESSON_MAX))
         .slice(0, 10);
-      if (lessons.length > 0) result.lessons = lessons;
     }
     return result;
   }

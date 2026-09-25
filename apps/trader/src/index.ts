@@ -29,11 +29,10 @@ import {
   type PortfolioSnapshot,
   type TradeIntent,
   type Position,
-  type FeatureSet,
   type StrategyDecision,
   type MarketSnapshot,
-  type LiquiditySnapshot,
-  type SecurityAssessment,
+  type ExecutionResult,
+  type PaperFillAccounting,
 } from "@autonomous-trader/shared";
 import {
   RiskEngine,
@@ -56,7 +55,8 @@ import {
   EVM_CHAINS,
   type ProviderRegistry,
 } from "@autonomous-trader/providers";
-import { Scanner, type ScannerConfig } from "@autonomous-trader/scanner";
+import { Scanner, createCandidate, computeMarketFeatures, computeLiquidityFeatures, computeHolderFeatures, computeSecurityFeatures,
+  mergeFeatures, type ScannerConfig, type TokenCandidate } from "@autonomous-trader/scanner";
 import { StrategyEngine, FreshMomentumStrategy, MicroScalpStrategy, BreakoutContinuationStrategy, DipReversionStrategy, type StrategyContext } from "@autonomous-trader/strategy";
 import {
   createExecutionRouter,
@@ -66,8 +66,13 @@ import {
   RedisIdempotencyGuard,
   type ExecutionRouter,
 } from "@autonomous-trader/execution";
-import { PositionManager, type ExitSignal } from "@autonomous-trader/position";
+import { PositionManager, EMERGENCY_LIQUIDITY_FLOOR_USD, type ExitSignal } from "@autonomous-trader/position";
 import { summarizeClosedTrades } from "./loss-stats.js";
+import { PaperBook } from "./paper-book.js";
+import { currentObservation, entryCooldownActive, entryDataQuality, entryRejections, resolveActionPosition, tokenKey } from "./trade-guards.js";
+import { ExitObservations, withinDeadline } from "./exit-observations.js";
+import { AiProposalRunner } from "./ai-proposal-runner.js";
+import { ReportTracker, buildDailyReport, formatReportText, previousUtcDate, utcReportWindow, type DailyReportData, type ReportAiCost } from "./report.js";
 
 // ─── Bootstrap ────────────────────────────────────────────────────────────────
 import { join } from "node:path";
@@ -77,6 +82,8 @@ const config = loadConfig();
 configureLogger({ level: config.log.level, pretty: config.log.pretty ?? true });
 const log = createLogger({ service: "trader", mode: config.trading.mode });
 const aiLog = log.child({ component: "ai" });
+const reportTracker = new ReportTracker();
+let shuttingDown = false;
 
 // Structured decision events → dashboard Activity feed (GET /activity SSE)
 const { ActivityBus } = await import("./activity-bus.js");
@@ -210,6 +217,13 @@ interface ChainRuntime {
   sampler: SolPriceSampler;
   regime: RegimeResult;
   flagship: string;
+  paperBook: PaperBook | null;
+  accountingIssues: string[];
+  legacyPositions: number;
+  bookIssue: string | null;
+  pendingFills: Map<string, { result: ExecutionResult; intent: TradeIntent; position: Position; facts: PaperFillAccounting }>;
+  exitObservations: ExitObservations;
+  exitIssues: Map<string, string>;
 }
 
 const scannerConfig: ScannerConfig = {
@@ -274,8 +288,8 @@ async function buildChainRuntime(chain: Chain): Promise<ChainRuntime> {
 
   // ── Equity book: per-chain portfolio + restart recovery ────────────────────
   let portfolio: PortfolioSnapshot = {
-    totalValueUsd: 10_000 / config.trading.chains.length,
-    availableCapitalUsd: 10_000 / config.trading.chains.length,
+    totalValueUsd: legacyTotalUsd / config.trading.chains.length,
+    availableCapitalUsd: legacyTotalUsd / config.trading.chains.length,
     allocatedUsd: 0,
     openPositions: 0,
     dailyPnlUsd: 0,
@@ -283,7 +297,7 @@ async function buildChainRuntime(chain: Chain): Promise<ChainRuntime> {
     monthlyPnlUsd: 0,
     allTimePnlUsd: 0,
     currentDrawdownPct: 0,
-    peakValueUsd: 10_000 / config.trading.chains.length,
+    peakValueUsd: legacyTotalUsd / config.trading.chains.length,
     snapshotAt: new Date(),
   };
   let baseCapitalUsd = legacyTotalUsd / config.trading.chains.length;
@@ -303,6 +317,11 @@ async function buildChainRuntime(chain: Chain): Promise<ChainRuntime> {
     router,
     log.child({ component: "position", chain }),
   );
+  portfolio.totalValueUsd = portfolio.availableCapitalUsd = portfolio.peakValueUsd = baseCapitalUsd;
+
+  let paperBook = config.trading.mode === "PAPER" ? new PaperBook(baseCapitalUsd) : null;
+  const accountingIssues: string[] = [];
+  let legacyPositions = 0;
 
   if (db) {
     try {
@@ -317,6 +336,21 @@ async function buildChainRuntime(chain: Chain): Promise<ChainRuntime> {
       portfolio.allocatedUsd = positions.getTotalExposureUsd();
       portfolio.openPositions = positions.getOpenPositions().length;
       portfolio.availableCapitalUsd = portfolio.totalValueUsd - portfolio.allocatedUsd;
+      if (paperBook) {
+        const state = await journal.getPaperAccountingState(chain);
+        legacyPositions = state.legacyPositions;
+        accountingIssues.push(...state.issues);
+        if (!state.complete) {
+          if (accountingIssues.length === 0) accountingIssues.push("PAPER history is not reconciled");
+          paperBook = null;
+        } else {
+          for (const fill of state.fills) {
+            if (fill.accountingVersion !== 2 || fill.realizedPnlDeltaUsd === null) throw new Error("Unreconciled PAPER fill in recovery");
+            paperBook.record({ ...fill, realizedPnlDeltaUsd: fill.realizedPnlDeltaUsd });
+          }
+          portfolio = paperBook.snapshot(positions.getExposurePositions(), new Date(), portfolio.peakValueUsd);
+        }
+      }
 
       if (restored.length > 0) {
         log.warn("State restored after restart", {
@@ -335,12 +369,26 @@ async function buildChainRuntime(chain: Chain): Promise<ChainRuntime> {
         });
       }
     } catch (err) {
-      log.error("State restore failed — continuing with fresh portfolio (positions in DB unmanaged!)", {
+      paperBook = null;
+      accountingIssues.push(`State restore failed: ${(err as Error).message}`);
+      log.error("State restore failed - new entries blocked; existing records preserved", {
         chain,
         error: (err as Error).message,
       });
     }
   }
+
+  if (accountingIssues.length > 0) log.error("Accounting reconciliation required - new entries blocked", { chain, issues: accountingIssues });
+  if (paperBook && !db) portfolio = paperBook.snapshot([], new Date(), baseCapitalUsd);
+  const exitIssues = new Map<string, string>();
+  const exitObservations = new ExitObservations({
+    market: (token, c) => market.getMarketSnapshot(token, c),
+    liquidity: (token, c) => liquidity.getLiquiditySnapshot(token, c),
+    security: (token, c) => security.analyzeToken(token, c),
+  }, config.dataFreshness, (token, kind, error) => {
+    exitIssues.set(`${token}:${kind}`, `${kind} unavailable: ${String(error)}`);
+    log.warn("Exit observation unavailable; other exit checks remain active", { chain, token, kind, error: String(error) });
+  });
 
   return {
     chain,
@@ -355,6 +403,13 @@ async function buildChainRuntime(chain: Chain): Promise<ChainRuntime> {
     sampler: new SolPriceSampler(60, 60_000),
     regime: { regime: "UNKNOWN", solTrendPct1h: 0, volatilityPct: 0, confidence: 0, reasons: ["not yet sampled"] },
     flagship: flagshipAddress(chain),
+    paperBook,
+    accountingIssues,
+    legacyPositions,
+    bookIssue: null,
+    pendingFills: new Map(),
+    exitObservations,
+    exitIssues,
   };
 }
 
@@ -390,7 +445,39 @@ const [maybePrimary] = runtimes;
 if (maybePrimary === undefined) throw new Error("TRADING_CHAIN resolved to zero chains — refusing to start");
 const primary: ChainRuntime = maybePrimary;
 function runtimeFor(chain: Chain): ChainRuntime {
-  return runtimes.find((r) => r.chain === chain) ?? primary;
+  const runtime = runtimes.find((r) => r.chain === chain);
+  if (!runtime) throw new Error(`Chain ${chain} is not configured`);
+  return runtime;
+}
+
+function accountingProblems(rt: ChainRuntime): string[] {
+  return [...rt.accountingIssues, ...(rt.bookIssue ? [rt.bookIssue] : []),
+    ...[...rt.exitIssues.entries()].filter(([key]) => key.endsWith(":journal")).map(([, issue]) => issue),
+    ...(rt.pendingFills.size ? [`${rt.pendingFills.size} confirmed fill(s) awaiting persistence`] : [])];
+}
+
+function refreshPortfolio(rt: ChainRuntime): void {
+  const held = rt.positions.getExposurePositions();
+  if (rt.paperBook) {
+    try {
+      rt.portfolio = rt.paperBook.snapshot(held, new Date(), rt.portfolio.peakValueUsd);
+      rt.bookIssue = null;
+    } catch (err) {
+      rt.bookIssue = (err as Error).message;
+    }
+    return;
+  }
+  // Legacy/non-PAPER figures remain explicitly unverified. Never rebase them
+  // into v2 or permit a new PAPER entry based on these approximate balances.
+  const unrealized = held.reduce((sum, p) => sum + p.unrealizedPnlUsd, 0);
+  rt.portfolio.totalValueUsd = rt.baseCapitalUsd + rt.portfolio.allTimePnlUsd + unrealized;
+  rt.portfolio.peakValueUsd = Math.max(rt.portfolio.peakValueUsd, rt.portfolio.totalValueUsd);
+  rt.portfolio.currentDrawdownPct = rt.portfolio.peakValueUsd > 0
+    ? Math.max(0, (rt.portfolio.peakValueUsd - rt.portfolio.totalValueUsd) / rt.portfolio.peakValueUsd * 100) : 0;
+  rt.portfolio.openPositions = held.length;
+  rt.portfolio.allocatedUsd = rt.positions.getTotalExposureUsd();
+  rt.portfolio.availableCapitalUsd = rt.portfolio.totalValueUsd - rt.portfolio.allocatedUsd;
+  rt.portfolio.snapshotAt = new Date();
 }
 
 /** Aggregate portfolio: sum of per-chain books (display/metrics only). */
@@ -401,7 +488,7 @@ function aggregatePortfolio(): PortfolioSnapshot {
     totalValueUsd: sum((p) => p.totalValueUsd),
     availableCapitalUsd: sum((p) => p.availableCapitalUsd),
     allocatedUsd: sum((p) => p.allocatedUsd),
-    openPositions: runtimes.reduce((s, rt) => s + rt.positions.getOpenPositions().length, 0),
+    openPositions: runtimes.reduce((s, rt) => s + rt.positions.getExposurePositions().length, 0),
     dailyPnlUsd: sum((p) => p.dailyPnlUsd),
     weeklyPnlUsd: sum((p) => p.weeklyPnlUsd),
     monthlyPnlUsd: sum((p) => p.monthlyPnlUsd),
@@ -423,6 +510,24 @@ strategyEngine.register(new BreakoutContinuationStrategy());
 strategyEngine.register(new DipReversionStrategy());
 
 const performanceTracker = new StrategyPerformanceTracker();
+if (db && config.trading.mode === "PAPER") {
+  for (const rt of runtimes) {
+    try {
+      const closed = await journal.getClosedTrades("PAPER", rt.chain, null, { accountingVersion: 2 });
+      for (const trade of closed) {
+        if (trade.pnlUsd === null || !Number.isFinite(trade.pnlUsd)) {
+          rt.accountingIssues.push(`Invalid reconciled trade outcome ${trade.id}`);
+          continue;
+        }
+        performanceTracker.record({ strategyId: trade.strategyId, pnlUsd: trade.pnlUsd, netPnlUsd: trade.pnlUsd,
+          feesUsd: trade.totalFeesUsd ?? 0, slippageUsd: 0,
+          durationMs: (trade.closedAt?.getTime() ?? 0) - trade.openedAt.getTime(), timestamp: trade.closedAt ?? trade.openedAt });
+      }
+    } catch (err) {
+      rt.accountingIssues.push(`Performance history unavailable: ${(err as Error).message}`);
+    }
+  }
+}
 const riskEngine = new RiskEngine(
   config.risk,
   () => emergency.isKillSwitchActive(),
@@ -431,7 +536,8 @@ const riskEngine = new RiskEngine(
 
 // ─── AI agents (optional LLM: veto second opinion + autonomous trader) ───────
 import type { AiCandidate } from "./ai-agent.js";
-import type { AiAction, AiTraderSnapshot } from "./ai-trader-agent.js";
+import type { AiAction, AiTraderSnapshot, AiTraderCycleResult } from "./ai-trader-agent.js";
+import type { AiBudgetState } from "./ai-budget.js";
 import type { CopyTradeSignal } from "./copytrade-tracker.js";
 // OpenAI-compatible /chat/completions endpoint. The veto agent can only REJECT
 // strategy candidates. The autonomous trader (AI_AUTONOMY=auto) proposes
@@ -447,14 +553,42 @@ const aiTools = {
   getMarketSnapshot: (t: string, chain: Chain) => runtimeFor(chain).providers.marketData.getMarketSnapshot(t, chain),
   getSecurityAnalysis: (t: string, chain: Chain) => runtimeFor(chain).providers.security.analyzeToken(t, chain),
   getLiquiditySnapshot: (t: string, chain: Chain) => runtimeFor(chain).providers.liquidity.getLiquiditySnapshot(t, chain),
-  getMarketHistory: async (t: string, _chain: Chain) => {
+  getMarketHistory: async (t: string, chain: Chain) => {
+    runtimeFor(chain);
     if (!db) return [];
-    // last 30 snapshots, compact — bounded token spend per tool call
-    return ((journal as JournalRepository).getMarketSnapshotHistory(t) as Promise<unknown[]>)
-      .then((rows) => rows.slice(-30));
+    return journal.getMarketSnapshotHistory(t, 30, chain);
   },
 };
-const aiBudget = new AiBudget(config.ai, log.child({ component: "ai" }));
+const budgetBootDay = utcDayKey(new Date());
+const budgetCoverage = new Map<string, boolean>();
+let budgetPersistenceIssue: string | null = null;
+let budgetRestoreIssue: string | null = null;
+const aiBudget = new AiBudget(config.ai, log.child({ component: "ai" }), {
+  onChange: async (state: AiBudgetState) => {
+    if (!db) return;
+    try {
+      await journal.setSystemState(`ai:budget:${state.day}`, JSON.stringify({ ...state,
+        coverageComplete: budgetCoverage.get(state.day) ?? state.day > budgetBootDay }));
+      budgetPersistenceIssue = null;
+    } catch (err) {
+      budgetPersistenceIssue = `AI usage persistence failed: ${(err as Error).message}`;
+      throw err;
+    }
+  },
+});
+if (db) {
+  try {
+    const raw = await journal.getSystemState(`ai:budget:${budgetBootDay}`);
+    if (raw !== null) {
+      const state = JSON.parse(raw) as AiBudgetState & { coverageComplete?: boolean };
+      if (!aiBudget.importState(state)) throw new Error("Invalid saved AI usage state");
+      budgetCoverage.set(state.day, state.coverageComplete === true);
+    }
+  } catch (err) {
+    budgetRestoreIssue = `AI usage restoration failed: ${(err as Error).message}`;
+    aiLog.error("AI proposals paused; deterministic exits remain active", { error: budgetRestoreIssue });
+  }
+}
 // Jev-ai second opinion (auto mode): cheap classifier pre-filter + ENTER
 // confidence damper. Absent key = off; any failure = pass-through.
 const { JevAgent } = await import("./jev-agent.js");
@@ -488,7 +622,8 @@ if (aiTrader) {
 // The agent owns the content; the host only sanitizes, stores, replays it.
 // ponytail: upgrade to per-chain lessons + embedding retrieval when the flat
 // list (max 10) stops fitting the loss patterns the agent needs to recall.
-const AI_LESSONS_KEY = "ai:loss-lessons";
+const AI_POLICY_VERSION = "safer-auto-accounting-v2";
+const AI_LESSONS_KEY = `ai:loss-lessons:${config.trading.mode}:${AI_POLICY_VERSION}`;
 let aiLessons: string[] = [];
 if (db && aiTrader) {
   try {
@@ -597,18 +732,75 @@ if (copyTracker) {
 }
 
 // ─── Reporting ────────────────────────────────────────────────────────────────
-const { ReportTracker, buildDailyReport, formatReportText } = await import("./report.js");
-const reportTracker = new ReportTracker();
+let currentReport: ReturnType<typeof buildDailyReport> | null = null;
+let reportRefreshInFlight = false;
+let reportTimer: ReturnType<typeof setTimeout> | undefined;
 
-function emitDailyReport(): void {
-  const report = buildDailyReport(
-    reportTracker, aggregatePortfolio(),
-    runtimes.flatMap((rt) => rt.positions.getOpenPositions()),
-    performanceTracker, config.trading.mode,
-  );
+async function reportAiCost(date: string): Promise<ReportAiCost> {
+  if (!config.ai.enabled || config.ai.autonomy === "off") {
+    // A disabled current configuration says nothing about earlier usage.
+    if (date === budgetBootDay && !db) return { day: date, estimatedCostUsd: 0, complete: false, issues: ["Session-only AI cost coverage"] };
+  }
+  try {
+    if (date === utcDayKey(new Date())) {
+      const state = aiBudget.snapshot();
+      const covered = Boolean(db) && (budgetCoverage.get(date) ?? date > budgetBootDay);
+      const issues = [!covered ? "Full UTC-day usage history is not established" : null, budgetPersistenceIssue, budgetRestoreIssue]
+        .filter((s): s is string => s !== null);
+      return { ...state, complete: state.complete && covered && issues.length === 0, issues };
+    }
+    const raw = db ? await journal.getSystemState(`ai:budget:${date}`) : null;
+    if (raw) {
+      const state = JSON.parse(raw) as AiBudgetState & { coverageComplete?: boolean };
+      if (state.version === 1 && state.day === date
+          && (state.estimatedCostUsd === null || (Number.isFinite(state.estimatedCostUsd) && state.estimatedCostUsd >= 0))) {
+        return { ...state, complete: state.complete && state.coverageComplete === true,
+          issues: state.coverageComplete === true ? [] : ["Full UTC-day usage history is not established"] };
+      }
+    }
+  } catch (err) {
+    return { day: date, estimatedCostUsd: null, complete: false, issues: [`AI cost history unavailable: ${String(err)}`] };
+  }
+  return { day: date, estimatedCostUsd: null, complete: false, issues: ["No durable AI usage record for this UTC date"] };
+}
+
+async function buildReport(date = utcDayKey(new Date())): Promise<ReturnType<typeof buildDailyReport>> {
+  const query = { date, mode: config.trading.mode, chains: config.trading.chains };
+  const { from, to } = utcReportWindow(date);
+  let data: DailyReportData = reportTracker.readReportData(query);
+  if (db) {
+    try {
+      const records = await Promise.all(runtimes.map(async (rt) => ({
+        fills: await journal.getAccountingFills({ mode: config.trading.mode, chain: rt.chain, from, to }),
+        closed: await journal.getClosedTrades(config.trading.mode, rt.chain, null, { from, to }),
+      })));
+      const issues = runtimes.flatMap((rt) => accountingProblems(rt).map((issue) => `${rt.chain}: ${issue}`));
+      data = { fills: records.flatMap((r) => r.fills), completedPositions: records.flatMap((r) => r.closed),
+        coverage: { source: "durable", complete: config.trading.mode === "PAPER" && issues.length === 0,
+          issues, legacyPositions: runtimes.reduce((sum, rt) => sum + rt.legacyPositions, 0),
+          unreconciledPositions: runtimes.reduce((sum, rt) => sum + rt.positions.getExposurePositions().filter((p) => p.status !== "OPEN" && p.status !== "PARTIAL_EXIT").length, 0) } };
+    } catch (err) {
+      data = { ...data, coverage: { ...data.coverage, complete: false,
+        issues: [...(data.coverage.issues ?? []), `Durable report unavailable: ${(err as Error).message}`] } };
+    }
+  }
+  data.aiCost = await reportAiCost(date);
+  return buildDailyReport({ ...query, data, portfolio: aggregatePortfolio(),
+    openPositions: runtimes.flatMap((rt) => rt.positions.getExposurePositions()) });
+}
+
+function refreshReport(): void {
+  if (reportRefreshInFlight || shuttingDown) return;
+  reportRefreshInFlight = true;
+  void buildReport().then((report) => { if (!shuttingDown) currentReport = report; }, (err: unknown) =>
+    log.warn("Report refresh failed", { error: String(err) })).finally(() => { reportRefreshInFlight = false; });
+}
+
+async function emitDailyReport(): Promise<void> {
+  const report = await buildReport(previousUtcDate());
   log.info("Daily report", { report: JSON.stringify(report) });
   console.info(formatReportText(report));
-  void journal.recordSystemEvent("DAILY_REPORT", formatReportText(report), {
+  await journal.recordSystemEvent("DAILY_REPORT", formatReportText(report), {
     netPnlUsd: report.netPnlUsd,
     trades: report.trades,
   }).catch(() => undefined);
@@ -618,8 +810,8 @@ function emitDailyReport(): void {
 function scheduleDailyReport(): void {
   const now = new Date();
   const next = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1, 0, 1));
-  setTimeout(() => {
-    emitDailyReport();
+  reportTimer = setTimeout(() => {
+    void emitDailyReport().catch((err: unknown) => log.warn("Daily report failed", { error: String(err) }));
     scheduleDailyReport(); // 24h apart — DST-immune via UTC recompute
   }, next.getTime() - now.getTime());
 }
@@ -683,7 +875,6 @@ async function updateRegime(rt: ChainRuntime): Promise<void> {
 let killSwitchAlerted = false;
 let pnlDayKey = utcDayKey(new Date());
 let pnlWeekKey = utcWeekKey(new Date());
-let performanceTrades = 0;
 
 function utcDayKey(d: Date): string {
   return d.toISOString().slice(0, 10);
@@ -703,45 +894,28 @@ function utcWeekKey(d: Date): string {
 }
 
 async function decisionCycle(rt: ChainRuntime): Promise<void> {
-  // 0. Refresh market regime (flagship trend/vol + drawdown state)
-  await updateRegime(rt);
-
-  // 0.5 Evaluate matured shadow decisions (signal-quality evidence)
-  await rt.shadow.evaluateDue();
-
-  // 1. Portfolio: mark-to-market
+  await flushPendingFills(rt);
+  refreshPortfolio(rt);
   const openPositions = rt.positions.getOpenPositions();
-
-  // Mark-to-market: unrealized swings now feed drawdown/loss gates immediately
-  const unrealizedTotal = openPositions.reduce((s, p) => s + p.unrealizedPnlUsd, 0);
-  rt.portfolio.totalValueUsd = rt.baseCapitalUsd + rt.portfolio.allTimePnlUsd + unrealizedTotal;
-  if (rt.portfolio.totalValueUsd > rt.portfolio.peakValueUsd) {
-    rt.portfolio.peakValueUsd = rt.portfolio.totalValueUsd;
-  }
-  rt.portfolio.currentDrawdownPct = rt.portfolio.peakValueUsd > 0
-    ? Math.max(0, ((rt.portfolio.peakValueUsd - rt.portfolio.totalValueUsd) / rt.portfolio.peakValueUsd) * 100)
-    : 0;
-
-  rt.portfolio.openPositions = openPositions.length;
-  rt.portfolio.allocatedUsd = rt.positions.getTotalExposureUsd();
-  rt.portfolio.availableCapitalUsd = rt.portfolio.totalValueUsd - rt.portfolio.allocatedUsd;
 
   // 2. Monitor exits for open positions
   for (const position of openPositions) {
     try {
-      const marketSnap = await rt.providers.marketData.getMarketSnapshot(position.tokenAddress, position.chain);
-      const liqSnap    = await rt.providers.liquidity.getLiquiditySnapshot(position.tokenAddress, position.chain);
-
-      const exitSignal = rt.positions.updateAndCheckExit(position.id, {
-        market: marketSnap,
-        liquidity: liqSnap,
-        timestampMs: Date.now(),
-      });
+      const observations = await rt.exitObservations.observe(position);
+      const marketSnap = observations.market;
+      rt.exitIssues.delete(`${position.tokenAddress}:market`);
+      if (observations.liquidity) rt.exitIssues.delete(`${position.tokenAddress}:liquidity`);
+      if (observations.security) rt.exitIssues.delete(`${position.tokenAddress}:security`);
+      const exitSignal = rt.positions.updateAndCheckExit(position.id, observations);
 
       // Persist evolving state each tick — restart restores the tightened
       // exits and trailing peak, not the entry-time snapshot
-      void journal.updatePosition(position).catch((e: unknown) =>
-        log.warn("Position state write-back failed", { positionId: position.id, error: (e as Error).message }));
+      if (![...rt.pendingFills.values()].some((f) => f.position.id === position.id)) {
+        await journal.updatePosition(position).then(() => rt.exitIssues.delete(`${position.tokenAddress}:journal`), (err: unknown) => {
+          rt.exitIssues.set(`${position.tokenAddress}:journal`, `Position persistence failed: ${String(err)}`);
+          log.error("Position persistence failed - exits remain active", { positionId: position.id, error: String(err) });
+        });
+      }
 
       if (exitSignal) {
         log.info("Exit signal triggered", {
@@ -769,12 +943,17 @@ async function decisionCycle(rt: ChainRuntime): Promise<void> {
         }
       }
     } catch (err) {
+      rt.exitIssues.set(`${position.tokenAddress}:market`, (err as Error).message);
       log.error("Position monitoring error", { chain: rt.chain, positionId: position.id, error: (err as Error).message });
       alerter.alert("CRITICAL", `position-monitor-error:${position.id}`,
         `[${rt.chain}] Position monitoring FAILED for ${position.tokenAddress}: ${(err as Error).message}. ` +
         `Position is unmanaged until this resolves — investigate immediately.`);
     }
   }
+
+  refreshPortfolio(rt);
+  await updateRegime(rt);
+  await rt.shadow.evaluateDue();
 
   // 3. Evaluate new trade candidates (if not stopped)
   if (emergency.isStopNewEntries()) return;
@@ -804,7 +983,7 @@ async function decisionCycle(rt: ChainRuntime): Promise<void> {
       // Same-strategy re-entry goes through the scanner's CLOSED→WATCHLIST
       // cooldown path after the position exits; the per-strategy check also
       // stops a restart re-seed from re-promoting into a pyramid.
-      const heldStrategies = new Set(rt.positions.getOpenPositions()
+      const heldStrategies = new Set(rt.positions.getExposurePositions()
         .filter((p) => p.tokenAddress === candidate.tokenAddress)
         .map((p) => p.strategyId));
 
@@ -903,12 +1082,11 @@ async function decisionCycle(rt: ChainRuntime): Promise<void> {
         const entered = await executeEntry(rt, {
           tokenAddress: candidate.tokenAddress,
           chain: candidate.chain,
-          features: candidate.features,
           decision: strategyDecision,
           currentPrice: candidate.market?.priceUsd ?? 0.000001,
           markEntered: true,
         });
-        if (entered) performanceTrades++;
+        if (entered) refreshReport();
       }
 
     } catch (err) {
@@ -925,13 +1103,60 @@ async function decisionCycle(rt: ChainRuntime): Promise<void> {
 
 /** TP1 partial path: sell half, journal + realize the half's PnL, keep the
  *  remainder managed (stop/trailing/TP2/time-stop still armed). */
-async function executePartialTp1(
-  rt: ChainRuntime,
-  position: Position,
-  exitSignal: ExitSignal,
-  marketSnap: MarketSnapshot,
-): Promise<void> {
-  const soldUsd = position.sizeUsd * 0.5;
+async function flushPendingFills(rt: ChainRuntime): Promise<void> {
+  for (const [id, pending] of rt.pendingFills) {
+    try {
+      await journal.recordTradeIntent(pending.intent);
+      await journal.recordConfirmedPaperFill(pending.result, pending.intent, pending.position, pending.facts);
+      rt.pendingFills.delete(id);
+      rt.exitIssues.delete(`${pending.position.tokenAddress}:journal`);
+    } catch (err) {
+      log.error("Confirmed fill persistence pending - entries blocked, execution will NOT repeat", {
+        chain: rt.chain, orderId: id, error: (err as Error).message,
+      });
+      break;
+    }
+  }
+}
+
+async function recordPaperFill(rt: ChainRuntime, result: ExecutionResult, intent: TradeIntent, position: Position): Promise<PaperFillAccounting> {
+  const facts = rt.positions.getLastAccounting(position.id);
+  if (!facts || result.status !== "CONFIRMED" || !result.confirmedAt) throw new Error("Missing confirmed PAPER accounting facts");
+  const fill = { ...facts, orderId: result.orderId, tradeIntentId: intent.id, positionId: position.id,
+    tokenAddress: position.tokenAddress, chain: position.chain, strategyId: position.strategyId, mode: position.mode,
+    side: intent.side, accountingVersion: position.accountingVersion ?? 1, inputAmount: result.inputAmount,
+    outputAmount: result.outputAmount, feeUsd: result.feeUsd, confirmedAt: result.confirmedAt,
+    dataQuality: position.dataQuality ?? ["legacy-accounting"] };
+  if (rt.paperBook && facts.realizedPnlDeltaUsd !== null) {
+    rt.paperBook.record({ ...fill, realizedPnlDeltaUsd: facts.realizedPnlDeltaUsd });
+  } else if (facts.realizedPnlDeltaUsd !== null) {
+    rt.portfolio.dailyPnlUsd += facts.realizedPnlDeltaUsd;
+    rt.portfolio.weeklyPnlUsd += facts.realizedPnlDeltaUsd;
+    rt.portfolio.monthlyPnlUsd += facts.realizedPnlDeltaUsd;
+    rt.portfolio.allTimePnlUsd += facts.realizedPnlDeltaUsd;
+  }
+  reportTracker.recordFill(fill);
+  if (db) {
+    rt.pendingFills.set(result.orderId, structuredClone({ result, intent, position, facts }));
+    await flushPendingFills(rt);
+  }
+  refreshPortfolio(rt);
+  return facts;
+}
+
+async function executePartialTp1(rt: ChainRuntime, position: Position, exitSignal: ExitSignal, marketSnap: MarketSnapshot): Promise<void> {
+  await executeSale(rt, position, exitSignal, marketSnap, 0.5);
+}
+
+async function executeExit(rt: ChainRuntime, position: Position, exitSignal: ExitSignal, marketSnap: MarketSnapshot): Promise<void> {
+  await executeSale(rt, position, exitSignal, marketSnap, 1);
+}
+
+async function executeSale(rt: ChainRuntime, position: Position, exitSignal: ExitSignal, marketSnap: MarketSnapshot, fraction: 0.5 | 1): Promise<void> {
+  if (shuttingDown) return;
+  if (!currentObservation(marketSnap, position.tokenAddress, position.chain, config.dataFreshness.priceMs)
+      || !Number.isFinite(marketSnap.priceUsd) || marketSnap.priceUsd <= 0) throw new Error("Exit has no fresh valid price");
+  const before = structuredClone(position);
   const intent: TradeIntent = {
     id: generateTradeIntentId(),
     tokenAddress: position.tokenAddress,
@@ -941,73 +1166,9 @@ async function executePartialTp1(
     strategyId: position.strategyId,
     strategyVersion: "1.0.0",
     riskVersion: config.risk.version,
-    positionSizeUsd: soldUsd,
-    maxSlippageBps: config.risk.maxSlippageBps,
-    maxPriceImpactBps: config.risk.maxPriceImpactBps,
-    reason: exitSignal.reason,
-    createdAt: new Date(),
-    expiresAt: new Date(Date.now() + 30_000),
-  };
-
-  const { result, position: reduced } =
-    await rt.positions.reducePosition(position.id, 0.5, marketSnap.priceUsd, intent);
-
-  await journal.recordTradeIntent(intent);
-  await journal.recordExecutionResult(result, intent);
-  rt.fillCalibrator?.record(intent, result);
-  await journal.updatePosition(reduced);
-  await journal.recordPositionEvent(position.id, "PARTIAL_EXIT", result.executedPrice,
-    soldUsd - soldUsd / (1 + position.unrealizedPnlPct / 100), {
-      reason: exitSignal.reason,
-      soldUsd,
-      remainingUsd: reduced.sizeUsd,
-    });
-
-  // Realize the sold half's PnL into the ledgers (proportional to the
-  // position-level unrealized PnL); the remainder stays mark-to-market.
-  const realizedPnl = position.unrealizedPnlUsd * 0.5;
-  rt.portfolio.dailyPnlUsd += realizedPnl;
-  rt.portfolio.weeklyPnlUsd += realizedPnl;
-  rt.portfolio.monthlyPnlUsd += realizedPnl;
-  rt.portfolio.allTimePnlUsd += realizedPnl;
-  performanceTracker.record({
-    strategyId: position.strategyId,
-    pnlUsd: realizedPnl,
-    feesUsd: result.feeUsd,
-    slippageUsd: soldUsd * (result.actualSlippageBps / 10_000),
-    durationMs: Date.now() - position.openedAt.getTime(),
-    timestamp: new Date(),
-  });
-
-  log.info("TP1 partial exit", {
-    chain: rt.chain,
+    positionSizeUsd: position.sizeUsd * fraction,
     positionId: position.id,
-    token: position.tokenAddress,
-    soldUsd: soldUsd.toFixed(2),
-    realizedPnlUsd: realizedPnl.toFixed(2),
-    remainingUsd: reduced.sizeUsd.toFixed(2),
-  });
-  activity.publish("exit", `tp1 half out · +${position.unrealizedPnlPct.toFixed(1)}% → ${realizedPnl >= 0 ? "+" : ""}${realizedPnl.toFixed(2)} USD, half still riding`,
-    { token: position.tokenAddress, chain: position.chain, data: { realizedPnlUsd: realizedPnl } });
-}
-
-/** Full exit path: intent → router → journal → PnL ledgers → trackers. */
-async function executeExit(
-  rt: ChainRuntime,
-  position: Position,
-  exitSignal: ExitSignal,
-  marketSnap: MarketSnapshot,
-): Promise<void> {
-  const exitIntent: TradeIntent = {
-    id: generateTradeIntentId(),
-    tokenAddress: position.tokenAddress,
-    chain: position.chain,
-    side: "SELL",
-    mode: config.trading.mode,
-    strategyId: position.strategyId,
-    strategyVersion: "1.0.0",
-    riskVersion: config.risk.version,
-    positionSizeUsd: position.sizeUsd,
+    ...(position.mode === "PAPER" ? { paperTokenQuantity: fraction === 1 ? position.sizeTokens : position.sizeTokens / 2n } : {}),
     maxSlippageBps: config.risk.maxSlippageBps,
     maxPriceImpactBps: config.risk.maxPriceImpactBps,
     reason: exitSignal.reason,
@@ -1015,54 +1176,57 @@ async function executeExit(
     expiresAt: new Date(Date.now() + 30_000),
   };
 
-  const exitResult = await rt.positions.exitPosition(position.id, exitSignal, marketSnap.priceUsd, exitIntent);
-
-  // Record exit in journal
-  await journal.recordTradeIntent(exitIntent);
-  await journal.recordExecutionResult(exitResult, exitIntent);
-  rt.fillCalibrator?.record(exitIntent, exitResult); // C2: real quote vs paper fill
-  const closedPosition = rt.positions.getPosition(position.id);
-  if (closedPosition) {
-    await journal.updatePosition(closedPosition);
-    await journal.recordPositionEvent(position.id, "EXIT", marketSnap.priceUsd, exitResult.executedPrice * Number(exitResult.outputAmount) / 1e6 - position.sizeUsd, {
-      reason: exitSignal.reason,
-      urgency: exitSignal.urgency,
-    });
+  try {
+    await journal.recordTradeIntent(intent);
+  } catch (err) {
+    if (position.mode !== "PAPER") throw err;
+    rt.exitIssues.set(`${position.tokenAddress}:journal`, `Exit intent persistence pending: ${String(err)}`);
+    log.error("PAPER exit intent retained in memory; fill persistence will retry without execution", { intentId: intent.id });
   }
+  let result: ExecutionResult;
+  try {
+    result = fraction === 1 ? await rt.positions.exitPosition(position.id, exitSignal, marketSnap.priceUsd, intent)
+      : (await rt.positions.reducePosition(position.id, fraction, marketSnap.priceUsd, intent)).result;
+  } catch (err) {
+    // Persist an unresolved real transaction before a restart can retry it.
+    if (position.status === "CLOSING") await journal.updatePosition(position);
+    throw err;
+  }
+  const facts = position.mode === "PAPER" ? await recordPaperFill(rt, result, intent, position) : null;
+  if (!facts) {
+    await journal.recordExecutionResult(result, intent);
+    await journal.updatePosition(position);
+    const legacyMark = before.unrealizedPnlUsd * fraction;
+    rt.portfolio.dailyPnlUsd += legacyMark;
+    rt.portfolio.weeklyPnlUsd += legacyMark;
+    rt.portfolio.monthlyPnlUsd += legacyMark;
+    rt.portfolio.allTimePnlUsd += legacyMark;
+  }
+  rt.fillCalibrator?.record(intent, result);
+  const realizedPnl = facts?.realizedPnlDeltaUsd ?? null;
+  await journal.recordPositionEvent(position.id, fraction === 1 ? "EXIT" : "PARTIAL_EXIT", result.executedPrice,
+    realizedPnl ?? before.unrealizedPnlUsd * fraction,
+    { orderId: result.orderId, reason: exitSignal.reason, urgency: exitSignal.urgency,
+      accountingVersion: position.accountingVersion ?? 1, netPnlUsd: realizedPnl }).catch((err: unknown) =>
+    log.warn("Position audit event unavailable", { positionId: position.id, error: String(err) }));
 
-  // Walk token SM to CLOSED and queue cooldown-gated watchlist re-entry.
-  // A gap-through hard stop (≤ -20% vs the -10% stop) means the exit
-  // infrastructure failed on this token — rug-tier behavior. Same evidence
-  // class as an AI-veto REJECT: never trade it again.
-  const catastrophic = exitSignal.reason.startsWith("Hard stop") && position.unrealizedPnlPct <= -20;
-  rt.scanner.markExited(position.tokenAddress, exitSignal.reason, catastrophic);
-  if (catastrophic) blacklist.add(position.tokenAddress, position.chain,
-    `hard stop gap ${position.unrealizedPnlPct.toFixed(1)}% — rug-tier exit`);
-
-  // Realize PnL into the PnL ledgers. totalValue/drawdown are NOT touched
-  // here — the mark-to-market formula in step 1 owns them (unrealized was
-  // already reflected; realized just moves it into allTimePnlUsd).
-  const realizedPnl = position.unrealizedPnlUsd;
-  rt.portfolio.dailyPnlUsd += realizedPnl;
-  rt.portfolio.weeklyPnlUsd += realizedPnl;
-  rt.portfolio.monthlyPnlUsd += realizedPnl;
-  rt.portfolio.allTimePnlUsd += realizedPnl;
-
-  // Feed the performance tracker (drives sizing multipliers with shrinkage)
-  performanceTracker.record({
-    strategyId: position.strategyId,
-    pnlUsd: realizedPnl,
-    feesUsd: exitResult.feeUsd,
-    slippageUsd: position.sizeUsd * (exitResult.actualSlippageBps / 10_000),
-    durationMs: Date.now() - position.openedAt.getTime(),
-    timestamp: new Date(),
-  });
-  reportTracker.recordClose({
-    strategyId: position.strategyId,
-    pnlUsd: realizedPnl,
-    feesUsd: exitResult.feeUsd,
-    closedAt: new Date(),
-  });
+  if (fraction === 1) {
+    const fillReturnPct = (result.executedPrice / before.entryPrice - 1) * 100;
+    const catastrophic = exitSignal.reason.startsWith("Hard stop") && fillReturnPct <= -20;
+    rt.scanner.markExited(position.tokenAddress, exitSignal.reason, catastrophic);
+    aiCooldowns.set(tokenKey(position.chain, position.tokenAddress), Date.now() + (scannerConfig.reentryCooldownMs ?? 30 * 60_000));
+    if (catastrophic) blacklist.add(position.tokenAddress, position.chain, `hard stop gap ${fillReturnPct.toFixed(1)}%`);
+    if (position.accountingVersion === 2 && position.realizedPnlUsd !== undefined) {
+      performanceTracker.record({ strategyId: position.strategyId, pnlUsd: position.realizedPnlUsd, netPnlUsd: position.realizedPnlUsd,
+        feesUsd: position.totalFeesUsd ?? 0, slippageUsd: 0, durationMs: Date.now() - position.openedAt.getTime(), timestamp: result.confirmedAt ?? new Date() });
+    }
+    reportTracker.recordCompletedPosition({ id: position.id, mode: position.mode, chain: position.chain, strategyId: position.strategyId,
+      accountingVersion: position.accountingVersion ?? 1, closedAt: position.closedAt ?? result.confirmedAt ?? null,
+      pnlUsd: position.accountingVersion === 2 ? position.realizedPnlUsd ?? null : before.unrealizedPnlUsd,
+      realizedGrossPnlUsd: position.realizedGrossPnlUsd ?? null, totalFeesUsd: position.totalFeesUsd ?? null,
+      dataQuality: position.dataQuality ?? ["legacy-accounting"] });
+  }
+  refreshPortfolio(rt);
 
   // Daily loss limit → stop new entries. Deliberately global: one chain
   // blowing its book halts entries everywhere (fail-safe over throughput).
@@ -1078,39 +1242,75 @@ async function executeExit(
       `[${rt.chain}] Daily loss limit hit: ${rt.portfolio.dailyPnlUsd.toFixed(2)} USD. New entries stopped automatically.`);
   }
 
-  log.info("Position closed", {
+  log.info(fraction === 1 ? "Position closed" : "TP1 partial exit", {
     chain: rt.chain,
     positionId: position.id,
-    realizedPnlUsd: realizedPnl.toFixed(2),
-    pnlPct: position.unrealizedPnlPct.toFixed(2),
+    realizedPnlUsd: realizedPnl,
+    accountingVersion: position.accountingVersion ?? 1,
     totalValue: rt.portfolio.totalValueUsd.toFixed(2),
   });
   activity.publish("exit",
-    `closed · ${realizedPnl >= 0 ? "+" : ""}$${realizedPnl.toFixed(2)} (${position.unrealizedPnlPct.toFixed(1)}%)`,
+    `${fraction === 1 ? "closed" : "half sold"} - ${realizedPnl === null ? "legacy PnL unverified" : `net $${realizedPnl.toFixed(4)}`}`,
     { token: position.tokenAddress, chain: position.chain, data: { realizedPnlUsd: realizedPnl, reason: exitSignal.reason } });
+  refreshReport();
 }
 
 /** Full entry path: intent → risk gate → journal → router → position → trackers.
  *  Returns true when a position was opened. Risk engine owns sizing — the
  *  decision's confidence only feeds the sizing multiplier, never a bypass. */
+async function freshEntryCandidate(rt: ChainRuntime, token: string, chain: Chain, allowHeldCopySlot = false, synthesize = false): Promise<TokenCandidate | undefined> {
+  const observed = rt.scanner.getCandidate(token);
+  if (!observed && !synthesize) {
+    if (seedMatchesChain(token, chain)) rt.scanner.seedToken(token, chain);
+    return undefined;
+  }
+  const heldCopy = allowHeldCopySlot && observed?.status === "ENTERED"
+    && rt.positions.getExposurePositions().some((p) => p.tokenAddress === token && p.chain === chain);
+  if (observed && observed.status !== "TRADE_CANDIDATE" && !heldCopy && !synthesize) return observed;
+  const candidate = observed ?? createCandidate(token, chain, "copy-trade");
+  const [market, liquidity, security, holders] = await withinDeadline(Promise.all([
+    rt.providers.marketData.getMarketSnapshot(token, chain), rt.providers.liquidity.getLiquiditySnapshot(token, chain),
+    rt.providers.security.analyzeToken(token, chain), rt.providers.holders.getHolderSnapshot(token, chain),
+  ]), config.dataFreshness.priceMs);
+  return { ...candidate, status: "TRADE_CANDIDATE", market, liquidity, security, holders,
+    features: mergeFeatures(computeMarketFeatures(market), computeLiquidityFeatures(liquidity),
+      computeHolderFeatures(holders), computeSecurityFeatures(security)) };
+}
+
 async function executeEntry(
   rt: ChainRuntime,
   input: {
     tokenAddress: string;
     chain: Chain;
-    features: FeatureSet;
     decision: StrategyDecision;
-    /** Carried by strategy candidates; fetched fresh when absent. */
-    liqSnap?: LiquiditySnapshot;
-    secAssess?: SecurityAssessment;
     currentPrice: number;
     /** Only scanner-known tokens get the scanner state walk. */
     markEntered: boolean;
     /** Per-position time stop — copy-trade profiles. */
     timeStopMs?: number;
+    candidate?: TokenCandidate;
+    proposalExpiresAt?: number;
+    audit?: Record<string, unknown>;
   },
 ): Promise<boolean> {
   try {
+    refreshPortfolio(rt);
+    const problems = accountingProblems(rt);
+    if (problems.length > 0 || (config.trading.mode === "PAPER" && !rt.paperBook)) {
+      activity.publish("reject", "accounting reconciliation required; exits remain managed", { token: input.tokenAddress, chain: input.chain });
+      return false;
+    }
+    const candidate = input.candidate ?? await freshEntryCandidate(rt, input.tokenAddress, input.chain);
+    const rejections = entryRejections(candidate, input, config.market, config.dataFreshness,
+      Math.max(config.risk.minLiquidityUsd, EMERGENCY_LIQUIDITY_FLOOR_USD));
+    if (rejections.length > 0 || !candidate?.market || !candidate.liquidity || !candidate.security) {
+      activity.publish("reject", `entry screening: ${rejections.join("; ")}`, { token: input.tokenAddress, chain: input.chain });
+      return false;
+    }
+    const price = candidate.market.priceUsd;
+    if (input.proposalExpiresAt !== undefined && Date.now() >= input.proposalExpiresAt) return false;
+    if (input.decision.suggestedStopLoss !== undefined && (!Number.isFinite(input.decision.suggestedStopLoss)
+        || input.decision.suggestedStopLoss <= 0 || input.decision.suggestedStopLoss >= price)) return false;
     const stats = performanceTracker.getStats(input.decision.strategyId);
 
     // Build intent
@@ -1132,8 +1332,8 @@ async function executeEntry(
     };
 
     // Risk gate
-    const liqSnap = input.liqSnap ?? await rt.providers.liquidity.getLiquiditySnapshot(input.tokenAddress, input.chain);
-    const secAssess = input.secAssess ?? await rt.providers.security.analyzeToken(input.tokenAddress, input.chain);
+    const liqSnap = candidate.liquidity;
+    const secAssess = candidate.security;
 
     const riskResult = riskEngine.evaluate({
       intent,
@@ -1143,12 +1343,12 @@ async function executeEntry(
       marketRegime: rt.regime.regime,
       strategyConfidence: input.decision.confidence,
       strategyPerformanceMultiplier: stats.performanceMultiplier,
-      openPositionCount: rt.portfolio.openPositions,
+      openPositionCount: rt.positions.getExposurePositions().length,
       dailyLossUsd: Math.max(0, -rt.portfolio.dailyPnlUsd),
       weeklyLossUsd: Math.max(0, -rt.portfolio.weeklyPnlUsd),
       currentDrawdownPct: rt.portfolio.currentDrawdownPct,
       existingTokenExposureUsd: rt.positions.getTokenExposureUsd(input.tokenAddress),
-      existingStrategyExposureUsd: rt.positions.getOpenPositions()
+      existingStrategyExposureUsd: rt.positions.getExposurePositions()
         .filter((p) => p.strategyId === input.decision.strategyId)
         .reduce((sum, p) => sum + p.sizeUsd, 0),
     });
@@ -1156,6 +1356,12 @@ async function executeEntry(
     // Journal intent + risk decision BEFORE execution (crash-safe audit trail)
     await journal.recordTradeIntent(intent);
     await journal.recordRiskDecision(riskResult.riskDecision);
+    if (input.audit) {
+      await journal.recordStrategyDecision(input.decision, { features: candidate.features,
+        dataQuality: entryDataQuality(candidate), intentId: intent.id, mode: config.trading.mode,
+        accountingVersion: config.trading.mode === "PAPER" ? 2 : 1, model: config.ai.model,
+        policyVersion: AI_POLICY_VERSION, ...input.audit, riskDecision: riskResult.riskDecision }, input.chain);
+    }
 
     if (riskResult.decision === "REJECTED") {
       log.debug("Trade rejected by risk engine", {
@@ -1171,35 +1377,46 @@ async function executeEntry(
     // Adjust intent size to risk-approved amount
     intent.positionSizeUsd = riskResult.approvedSizeUsd;
     intent.maxSlippageBps = riskResult.maxSlippageBps;
+    if (input.proposalExpiresAt !== undefined && Date.now() >= input.proposalExpiresAt) return false;
+    if (!currentObservation(candidate.market, input.tokenAddress, input.chain, config.dataFreshness.priceMs)) return false;
+    if (emergency.isKillSwitchActive() || emergency.isStopNewEntries() || shuttingDown) return false;
 
     // Execute
-    const execResult = await rt.router.execute(intent, input.currentPrice);
-    await journal.recordExecutionResult(execResult, intent);
-    rt.fillCalibrator?.record(intent, execResult); // C2: real quote vs paper fill
+    const execResult = await rt.router.execute(intent, price);
+    if (execResult.status !== "CONFIRMED") throw new Error(`Entry execution not confirmed (${execResult.status})`);
 
     // Open position
     const position = rt.positions.openPosition(
       execResult,
       intent,
-      input.decision.suggestedStopLoss ?? input.currentPrice * 0.90,
+      input.decision.suggestedStopLoss ?? price * 0.90,
       input.decision.suggestedTakeProfit1,
       input.decision.suggestedTakeProfit2,
       input.decision.suggestedTrailingStopPct ?? 15, // scalps trail tighter
       input.timeStopMs,
     );
+    position.dataQuality = entryDataQuality(candidate);
+    intent.positionId = position.id;
 
-    rt.portfolio.allocatedUsd += riskResult.approvedSizeUsd;
-    rt.portfolio.availableCapitalUsd -= riskResult.approvedSizeUsd;
-    rt.portfolio.openPositions++;
-
-    // Journal the position
-    await journal.insertPosition(position);
+    if (config.trading.mode === "PAPER") await recordPaperFill(rt, execResult, intent, position);
+    else {
+      await journal.recordExecutionResult(execResult, intent);
+      await journal.insertPosition(position);
+      rt.portfolio.allocatedUsd += riskResult.approvedSizeUsd;
+      rt.portfolio.availableCapitalUsd -= riskResult.approvedSizeUsd;
+      rt.portfolio.openPositions++;
+    }
+    rt.fillCalibrator?.record(intent, execResult);
     await journal.recordPositionEvent(position.id, "ENTRY", position.entryPrice, 0, {
       strategy: input.decision.strategyId,
       stopLoss: position.stopLoss,
       takeProfit1: position.takeProfit1 ?? null,
       sizeUsd: position.sizeUsd,
-    });
+      intentId: intent.id,
+      orderId: execResult.orderId,
+      accountingVersion: position.accountingVersion ?? 1,
+      dataQuality: position.dataQuality,
+    }).catch((err: unknown) => log.warn("Entry audit event unavailable", { positionId: position.id, error: String(err) }));
 
     log.info("Trade entered", {
       chain: rt.chain,
@@ -1223,6 +1440,7 @@ async function executeEntry(
 
     // Mark candidate as entered in scanner
     if (input.markEntered) rt.scanner.markEntered(input.tokenAddress);
+    refreshReport();
     return true;
   } catch (err) {
     log.error("Entry execution error", {
@@ -1237,28 +1455,45 @@ async function executeEntry(
 // ─── Autonomous AI trader cycle (AI_AUTONOMY=auto) ────────────────────────────
 
 const AI_STRATEGY_ID = "ai-autonomous";
-/** token → epoch ms before which the AI may not act on it again. In-memory —
- *  worst case after restart is one extra risk-gated AI cycle. */
+/** Entry-only, chain-qualified cooldown. Protective actions never consult it. */
 const aiCooldowns = new Map<string, number>();
-let aiTicks = 0;
-const aiTicksPerCycle = Math.max(1, Math.round(config.ai.cycleSec / 10));
-/** Lessons may only be rewritten after a trade CLOSES — otherwise the model
- *  re-hallucinates "lessons" every idle cycle (observed: 7 rewrites / 16 min,
- *  zero trades). 0 = not yet baselined (first cycle baselines, never persists). */
-let lastLessonsClosedAtMs = 0;
+type AiCandidateHint = Pick<AiCandidate, "tokenAddress" | "chain" | "jevScore">;
+interface PendingAiProposal extends AiTraderCycleResult {
+  candidates: AiCandidateHint[];
+  closedIds: string[];
+  dataComplete: boolean;
+}
+const recentAiOutcomes: NonNullable<AiTraderSnapshot["actionOutcomes"]> = [];
+const aiProposals = new AiProposalRunner<PendingAiProposal>({ timeoutMs: config.ai.timeoutMs, maxAgeMs: config.ai.cycleSec * 1000 });
+let nextAiAt = Date.now() + config.ai.cycleSec * 1000;
+let lessonsBaseline: Set<string> | null = null;
+if (db) {
+  const now = Date.now();
+  const cooldownMs = scannerConfig.reentryCooldownMs ?? 30 * 60_000;
+  for (const rt of runtimes) {
+    try {
+      const closes = await journal.getClosedTrades(config.trading.mode, rt.chain, null, { from: new Date(now - cooldownMs) });
+      for (const close of closes) if (close.closedAt) {
+        const key = tokenKey(close.chain, close.tokenAddress);
+        aiCooldowns.set(key, Math.max(aiCooldowns.get(key) ?? 0, close.closedAt.getTime() + cooldownMs));
+      }
+    } catch (err) { rt.accountingIssues.push(`Re-entry history unavailable: ${String(err)}`); }
+  }
+}
 
 /** One autonomous cycle: snapshot → propose → guarded dispatch. Never throws;
  *  any failure degrades to a no-op for that cycle. */
-async function runAiCycle(): Promise<void> {
-  if (!aiTrader) return;
-  if (!config.ai.liveEnabled && config.trading.mode === "LIVE") return;
+async function buildAiProposal({ signal, deadlineAt }: { signal: AbortSignal; snapshotAt: number; deadlineAt: number }): Promise<PendingAiProposal> {
+  const empty = (summary: string): PendingAiProposal => ({ actions: [], summary, candidates: [], closedIds: [], dataComplete: false });
+  if (!aiTrader || shuttingDown) return empty("AI inactive");
+  if (!config.ai.liveEnabled && config.trading.mode === "LIVE") return empty("AI LIVE disabled");
 
   try {
     const agg = aggregatePortfolio();
-    const openPositions = runtimes.flatMap((rt) => rt.positions.getOpenPositions());
+    const openPositions = runtimes.flatMap((rt) => rt.positions.getExposurePositions());
     const candidates: AiCandidate[] = runtimes.flatMap((rt) =>
       rt.scanner.getTradeCandidates().slice(0, 5).map((c) => {
-        const aiCand: AiCandidate = { ...c };
+        const aiCand: AiCandidate = structuredClone(c);
         const views = strategyViewsFor(rt.chain, c.tokenAddress);
         if (views) aiCand.strategyViews = views;
         return aiCand;
@@ -1268,7 +1503,8 @@ async function runAiCycle(): Promise<void> {
     // (guidance for the model, sizing damper for the host). Failures = no
     // scores = pass-through, so a dead Jev never blocks entries.
     if (jevAgent && candidates.length > 0) {
-      const jevReviews = await jevAgent.score(candidates);
+      const jevReviews = await jevAgent.score(candidates, { signal, deadlineAt });
+      signal.throwIfAborted();
       const pct = (p: number | undefined): string => (p === undefined ? "?" : Math.round(p * 100) + "%");
       let kept = 0;
       let filtered = 0;
@@ -1299,12 +1535,14 @@ async function runAiCycle(): Promise<void> {
     }
     // Closed-trade window: 200 per chain feeds the loss stats, the newest 20
     // ride along as recentTrades for concrete pattern-matching.
-    const closed = db
+    const closed = db && config.trading.mode === "PAPER"
       ? (await Promise.all(runtimes.map((rt) =>
-          (journal as JournalRepository).getClosedTrades(config.trading.mode, rt.chain, 200))))
+          journal.getClosedTrades("PAPER", rt.chain, 200, { accountingVersion: 2 }))))
           .flat()
+          .filter((r): r is typeof r & { pnlUsd: number } => r.pnlUsd !== null && Number.isFinite(r.pnlUsd))
           .sort((a, b) => (b.closedAt?.getTime() ?? 0) - (a.closedAt?.getTime() ?? 0))
       : [];
+    signal.throwIfAborted();
     const recentTrades = closed.slice(0, 20).map((r) => ({
       token: r.tokenAddress,
       chain: r.chain,
@@ -1318,6 +1556,10 @@ async function runAiCycle(): Promise<void> {
     }));
     const lossStats = summarizeClosedTrades(closed.map((r) => ({
       token: r.tokenAddress,
+      chain: r.chain,
+      mode: r.mode,
+      accountingVersion: r.accountingVersion,
+      dataQuality: r.dataQuality,
       strategyId: r.strategyId,
       pnlUsd: r.pnlUsd,
       pnlPct: r.pnlPct,
@@ -1346,77 +1588,93 @@ async function runAiCycle(): Promise<void> {
       })),
       candidates,
       recentTrades,
+      actionOutcomes: recentAiOutcomes.map((outcome) => ({ ...outcome })),
+      entryRules: { minimumLiquidityUsd: Math.max(config.market.minLiquidityUsd, config.risk.minLiquidityUsd, EMERGENCY_LIQUIDITY_FLOOR_USD),
+        copyTradingEnabled: config.copytrade.enabled },
+      entryBlocks: runtimes.map((rt) => ({ chain: rt.chain, reasons: accountingProblems(rt) })).filter((r) => r.reasons.length > 0),
     };
     if (lossStats.sampleSize > 0) snapshot.lossStats = lossStats;
     if (aiLessons.length > 0) snapshot.lessons = aiLessons;
-    const copySignals = copyTracker?.recentActivity(10).map((s) => ({
+    const copySignals = config.copytrade.enabled ? copyTracker?.recentActivity(10).map((s) => ({
       token: s.swap.jettonMaster,
       chain: "ton" as const,
       side: s.swap.side,
       symbol: s.swap.symbol,
       walletLabel: s.label,
       ageMin: Math.max(0, Math.round((Date.now() / 1000 - s.swap.timestampSec) / 60)),
-    }));
+    })) : undefined;
     if (copySignals && copySignals.length > 0) snapshot.copySignals = copySignals;
 
-    const { actions, summary, lessons } = await aiTrader.propose(snapshot);
-    aiLog.info("AItrader cycle", { actions: actions.length, summary });
-    for (const action of actions) {
-      await runAiAction(action, candidates);
-    }
-
-    // Persist refined lessons — the agent's long-term memory across restarts.
-    // Gated on a new closed trade: idle cycles must not rewrite memory.
-    const newestClosedMs = closed[0]?.closedAt?.getTime() ?? 0;
-    const closedSinceLast = newestClosedMs > lastLessonsClosedAtMs;
-    if (lastLessonsClosedAtMs === 0) lastLessonsClosedAtMs = newestClosedMs; // baseline
-    if (lessons && lessons.length > 0 && closedSinceLast
-        && JSON.stringify(lessons) !== JSON.stringify(aiLessons)) {
-      lastLessonsClosedAtMs = newestClosedMs;
-      aiLessons = lessons;
-      if (db) {
-        void journal.setSystemState(AI_LESSONS_KEY, JSON.stringify(lessons))
-          .then(() => aiLog.info("AIloss lessons updated", { count: lessons.length }))
-          .catch((err: unknown) => aiLog.warn("AIlessons persist failed", { error: (err as Error).message }));
-      }
-      activity.publish("info", `ai learned · ${lessons.length} lesson(s) stored`, {
-        data: { lessons: lessons.length },
-      });
-    }
+    const result = await aiTrader.propose(snapshot, { signal, deadlineAt });
+    signal.throwIfAborted();
+    return { ...result, dataComplete: true, closedIds: closed.map((r) => r.id), candidates: candidates.map((c) => ({
+      tokenAddress: c.tokenAddress, chain: c.chain, ...(c.jevScore !== undefined ? { jevScore: c.jevScore } : {}),
+    })) };
   } catch (err) {
     aiLog.warn("AItrader cycle failed", { error: (err as Error).message });
+    return empty("AI research unavailable");
   }
 }
 
-async function runAiAction(action: AiAction, candidates: AiCandidate[]): Promise<void> {
+async function applyReadyAiProposal(): Promise<void> {
+  const ready = aiProposals.takeReady();
+  if (!ready || shuttingDown || emergency.isKillSwitchActive()) return;
+  const { actions, candidates, summary, lessons, closedIds, dataComplete } = ready.value;
+  aiLog.info("AItrader proposal ready", { actions: actions.length, summary, snapshotAt: ready.snapshotAt });
+  for (const action of actions) {
+    if (Date.now() >= ready.expiresAt || shuttingDown || emergency.isKillSwitchActive()) break;
+    await runAiAction(action, candidates, ready.snapshotAt, ready.expiresAt);
+  }
+  const newClose = dataComplete && lessonsBaseline !== null && closedIds.some((id) => !lessonsBaseline!.has(id));
+  // A failed research cycle is not a new baseline and must not clear memory.
+  if (dataComplete) lessonsBaseline = new Set(closedIds);
+  if (newClose && lessons !== undefined && JSON.stringify(lessons) !== JSON.stringify(aiLessons)) {
+    aiLessons = [...lessons];
+    if (db) await journal.setSystemState(AI_LESSONS_KEY, JSON.stringify(aiLessons))
+      .catch((err: unknown) => aiLog.warn("AI lessons persist failed", { error: String(err) }));
+  }
+}
+
+async function runAiAction(action: AiAction, candidates: readonly AiCandidateHint[], snapshotAt: number, expiresAt: number): Promise<void> {
+  const audit = (outcome: string, details: Record<string, unknown> = {}): void => {
+    recentAiOutcomes.push({ type: action.type, token: action.tokenAddress, chain: action.chain, outcome,
+      at: new Date().toISOString(), ...(typeof details.reason === "string" ? { reason: details.reason } : {}) });
+    if (recentAiOutcomes.length > 20) recentAiOutcomes.splice(0, recentAiOutcomes.length - 20);
+    void journal.recordSystemEvent("AI_ACTION", outcome, { action, snapshotAt, expiresAt,
+      policyVersion: AI_POLICY_VERSION, model: config.ai.model, mode: config.trading.mode, ...details })
+      .catch((err: unknown) => aiLog.warn("AI action evidence unavailable", { error: String(err) }));
+  };
   const skip = (reason: string): void => {
     aiLog.info("AIaction skipped", { type: action.type, token: action.tokenAddress, reason });
     activity.publish("info", `ai skip · ${reason}`, { token: action.tokenAddress, chain: action.chain });
+    audit("skipped", { reason });
   };
-  const cooldownUntil = (): number => aiCooldowns.get(action.tokenAddress) ?? 0;
-  const onCooldown = cooldownUntil() > Date.now();
+  if (Date.now() >= expiresAt || shuttingDown) return skip("proposal expired");
+  const onCooldown = entryCooldownActive(action, aiCooldowns);
 
   // ── ENTER ─────────────────────────────────────────────────────────────────
   if (action.type === "ENTER") {
     const rt = runtimes.find((r) => r.chain === action.chain);
     if (!rt) return skip(`chain ${action.chain} not trading`);
     if (emergency.isStopNewEntries()) return skip("new entries stopped");
+    if (accountingProblems(rt).length > 0) return skip("accounting reconciliation required");
     // One slot per (token, strategy): core strategies holding the token don't
     // block the AI's own slot — only an existing ai-autonomous position does.
-    const held = rt.positions.getOpenPositions().filter((p) => p.tokenAddress === action.tokenAddress);
+    const held = rt.positions.getExposurePositions().filter((p) => p.tokenAddress === action.tokenAddress);
     if (held.some((p) => p.strategyId === AI_STRATEGY_ID)) return skip("ai slot already held");
     if (blacklist.isListed(action.tokenAddress)) return skip("token blacklisted (sus)");
     if (onCooldown) return skip("token cooldown");
+    if (action.profile && (!config.copytrade.enabled || action.chain !== "ton")) return skip("copy profile not enabled");
     // Profiles are for copy-trade slots only: honored when the token traces to a
     // fresh (age-filtered) tracked-wallet BUY, not just because the model asked —
     // otherwise `profile:"scalp"` on any token would bypass AI_MAX_OPEN_POSITIONS.
     const nowSec = Date.now() / 1000;
     const trackedBuys = new Set(
-      (copyTracker?.recentActivity(50) ?? [])
-        .filter((s) => s.swap.side === "BUY" && nowSec - s.swap.timestampSec <= config.copytrade.maxSignalAgeSec)
+      (config.copytrade.enabled ? copyTracker?.recentActivity(50) ?? [] : [])
+        .filter((s) => s.swap.side === "BUY" && nowSec >= s.swap.timestampSec && nowSec - s.swap.timestampSec <= config.copytrade.maxSignalAgeSec)
         .map((s) => s.swap.jettonMaster),
     );
-    const profile = action.profile && trackedBuys.has(action.tokenAddress)
+    const profile = action.chain === "ton" && action.profile && trackedBuys.has(action.tokenAddress)
       ? COPYTRADE_PROFILES[action.profile]
       : null;
     if (profile) {
@@ -1425,28 +1683,29 @@ async function runAiAction(action: AiAction, candidates: AiCandidate[]): Promise
         return skip(`copy slot cap (${config.copytrade.maxSlotsPerToken})`);
       }
       const copyTotal = runtimes.reduce(
-        (s, r) => s + r.positions.getOpenPositions().filter((p) => copytradeProfileFor(p.strategyId)).length, 0);
+        (s, r) => s + r.positions.getExposurePositions().filter((p) => copytradeProfileFor(p.strategyId)).length, 0);
       if (copyTotal >= config.copytrade.maxPositions) {
         return skip(`copy position cap (${config.copytrade.maxPositions})`);
       }
     }
     const aiOpen = runtimes.reduce(
-      (s, r) => s + r.positions.getOpenPositions().filter((p) => p.strategyId === AI_STRATEGY_ID).length, 0);
+      (s, r) => s + r.positions.getExposurePositions().filter((p) => p.strategyId === AI_STRATEGY_ID).length, 0);
     if (!profile && aiOpen >= config.ai.maxOpenPositions) {
       return skip(`AI position cap (${config.ai.maxOpenPositions})`);
     }
 
     // UNKNOWN discipline: any data-fetch failure skips the action
-    let marketSnap: MarketSnapshot, liqSnap: LiquiditySnapshot, secAssess: SecurityAssessment;
+    let candidate: TokenCandidate | undefined;
     try {
-      marketSnap = await rt.providers.marketData.getMarketSnapshot(action.tokenAddress, action.chain);
-      liqSnap = await rt.providers.liquidity.getLiquiditySnapshot(action.tokenAddress, action.chain);
-      secAssess = await rt.providers.security.analyzeToken(action.tokenAddress, action.chain);
+      candidate = await freshEntryCandidate(rt, action.tokenAddress, action.chain, Boolean(profile));
     } catch (err) {
       return skip(`data fetch failed: ${(err as Error).message}`);
     }
-    const price = marketSnap.priceUsd;
-    if (!(price > 0)) return skip("no live price");
+    const rejections = entryRejections(candidate, action, config.market, config.dataFreshness,
+      Math.max(config.risk.minLiquidityUsd, EMERGENCY_LIQUIDITY_FLOOR_USD));
+    if (rejections.length || !candidate?.market || !candidate.liquidity || !candidate.security) return skip(rejections.join("; "));
+    if (Date.now() >= expiresAt) return skip("proposal expired during data refresh");
+    const price = candidate.market.priceUsd;
 
     // Jev second opinion damps sizing confidence only — never inflates it:
     // jevScore 0 → half confidence, 1 → unchanged, unscored → as-is.
@@ -1471,43 +1730,38 @@ async function runAiAction(action: AiAction, candidates: AiCandidate[]): Promise
         : {}),
       evaluatedAt: new Date(),
     };
-    await journal.recordStrategyDecision(decision, {}, action.chain);
     const entered = await executeEntry(rt, {
       tokenAddress: action.tokenAddress,
       chain: action.chain,
-      features: {},
       decision,
-      liqSnap,
-      secAssess,
+      candidate,
       currentPrice: price,
-      // AI-named tokens the scanner has never seen have no lifecycle state to walk
-      markEntered: candidates.some((c) => c.tokenAddress === action.tokenAddress && c.chain === action.chain),
+      markEntered: rt.scanner.getCandidate(action.tokenAddress)?.status === "TRADE_CANDIDATE",
+      proposalExpiresAt: expiresAt,
+      audit: { action, snapshotAt, expiresAt },
       ...(profile ? { timeStopMs: profile.timeStopMs } : {}),
     });
-    aiCooldowns.set(action.tokenAddress, Date.now() + config.ai.tokenCooldownSec * 1000);
+    aiCooldowns.set(tokenKey(action.chain, action.tokenAddress), Date.now() + config.ai.tokenCooldownSec * 1000);
+    audit(entered ? "entered" : "entry-rejected");
     if (!entered) aiLog.info("AIentry not opened", { token: action.tokenAddress });
     return;
   }
 
   // ── EXIT / TIGHTEN: resolve the position across all chains ────────────────
-  let target: { rt: ChainRuntime; position: Position } | null = null;
-  for (const rt of runtimes) {
-    const match = rt.positions.getOpenPositions().find((p) =>
-      action.positionId ? p.id === action.positionId : p.tokenAddress === action.tokenAddress && p.chain === action.chain);
-    if (match) { target = { rt, position: match }; break; }
-  }
-  if (!target) return skip("position not found");
-  const { rt, position } = target;
+  const resolved = resolveActionPosition(action, runtimes.flatMap((rt) => rt.positions.getExposurePositions()));
+  if (!resolved.position) return skip(resolved.reason);
+  const position = resolved.position;
+  const rt = runtimeFor(position.chain);
 
   try {
     if (action.type === "EXIT") {
-      if (onCooldown) return skip("token cooldown");
-      const marketSnap = await rt.providers.marketData.getMarketSnapshot(action.tokenAddress, action.chain);
+      const marketSnap = await withinDeadline(rt.providers.marketData.getMarketSnapshot(position.tokenAddress, position.chain), config.dataFreshness.priceMs);
+      if (Date.now() >= expiresAt || shuttingDown || emergency.isKillSwitchActive()) return skip("proposal expired or halted");
       aiLog.info("AIexiting position", { positionId: position.id, token: action.tokenAddress, rationale: action.rationale });
       await executeExit(rt, position,
         { reason: `AI exit · ${action.rationale ?? "no rationale"}`, urgency: "NORMAL", suggestedSellPct: 100 },
         marketSnap);
-      aiCooldowns.set(action.tokenAddress, Date.now() + config.ai.tokenCooldownSec * 1000);
+      audit("exited", { positionId: position.id, orderId: position.exitOrderId ?? null });
       return;
     }
 
@@ -1526,19 +1780,29 @@ async function runAiAction(action: AiAction, candidates: AiCandidate[]): Promise
 
     const result = rt.positions.tightenExits(position.id, opts);
     if (Object.keys(result.applied).length > 0) {
-      // Tightened exits survive restart — write through immediately
-      await journal.updatePosition(position);
+      const pending = [...rt.pendingFills.values()].filter((fill) => fill.position.id === position.id);
+      for (const fill of pending) {
+        fill.position.stopLoss = position.stopLoss;
+        if (position.takeProfit1 === undefined) delete fill.position.takeProfit1;
+        else fill.position.takeProfit1 = position.takeProfit1;
+        if (position.takeProfit2 !== undefined) fill.position.takeProfit2 = position.takeProfit2;
+        if (position.trailingStopPct !== undefined) fill.position.trailingStopPct = position.trailingStopPct;
+        fill.position.updatedAt = new Date(position.updatedAt);
+      }
+      if (pending.length > 0) await flushPendingFills(rt);
+      else await journal.updatePosition(position);
     }
-    const marketSnap = await rt.providers.marketData.getMarketSnapshot(action.tokenAddress, action.chain);
-    await journal.recordPositionEvent(position.id, "ADJUST", marketSnap.priceUsd, 0, {
+    await journal.recordPositionEvent(position.id, "ADJUST", position.currentPrice, 0, {
       by: "ai", applied: result.applied, clamped: result.clamped,
       rationale: action.rationale ?? "",
     });
     activity.publish("info",
       `ai tighten · ${Object.keys(result.applied).join("+") || "none"}${result.clamped.length ? ` (clamped: ${result.clamped.join("; ")})` : ""}`,
       { token: action.tokenAddress, chain: action.chain });
+    audit("tightened", { positionId: position.id, applied: result.applied, clamped: result.clamped });
   } catch (err) {
     aiLog.warn("AIaction failed", { type: action.type, token: action.tokenAddress, error: (err as Error).message });
+    audit("failed", { reason: (err as Error).message });
   }
 }
 
@@ -1574,21 +1838,22 @@ async function runCopyEntry(signal: CopyTradeSignal): Promise<void> {
   if (copyTotal >= config.copytrade.maxPositions) {
     return skip(`copy position cap (${config.copytrade.maxPositions})`);
   }
-  const copySlots = rt.positions.getOpenPositions()
+  const copySlots = rt.positions.getExposurePositions()
     .filter((p) => p.tokenAddress === swap.jettonMaster && copytradeProfileFor(p.strategyId)).length;
   if (copySlots >= config.copytrade.maxSlotsPerToken) {
     return skip(`copy slot cap (${config.copytrade.maxSlotsPerToken})`);
   }
 
   // UNKNOWN discipline: any data-fetch failure skips the entry
-  let marketSnap: MarketSnapshot, liqSnap: LiquiditySnapshot, secAssess: SecurityAssessment;
+  let candidate: TokenCandidate;
   try {
-    marketSnap = await rt.providers.marketData.getMarketSnapshot(swap.jettonMaster, "ton");
-    liqSnap = await rt.providers.liquidity.getLiquiditySnapshot(swap.jettonMaster, "ton");
-    secAssess = await rt.providers.security.analyzeToken(swap.jettonMaster, "ton");
+    candidate = (await freshEntryCandidate(rt, swap.jettonMaster, "ton", false, true))!;
   } catch (err) {
     return skip(`data fetch failed: ${(err as Error).message}`);
   }
+  const marketSnap = candidate.market!;
+  const liqSnap = candidate.liquidity!;
+  const secAssess = candidate.security!;
   const price = marketSnap.priceUsd;
   if (!(price > 0)) return skip("no live price");
 
@@ -1653,10 +1918,8 @@ async function runCopyEntry(signal: CopyTradeSignal): Promise<void> {
   const entered = await executeEntry(rt, {
     tokenAddress: swap.jettonMaster,
     chain: "ton",
-    features: {},
     decision,
-    liqSnap,
-    secAssess,
+    candidate,
     currentPrice: price,
     markEntered: false, // scanner has never seen a copy-trade token
     timeStopMs: profile.timeStopMs,
@@ -1666,18 +1929,23 @@ async function runCopyEntry(signal: CopyTradeSignal): Promise<void> {
 
 /** Outer cycle: emergency check + PnL window rollover (all books), then chains. */
 let cycleInFlight = false;
+let activeCycle: Promise<void> | null = null;
 async function decisionCycleAll(): Promise<void> {
   // Overlap guard: a cycle with inline AI veto calls can exceed CYCLE_INTERVAL_MS,
   // and setInterval fire-and-forget would then start a second concurrent cycle —
   // both read the same stale open-position state and double-enter the same token
   // (seen 2026-09-23: two micro-scalp slots on one rug, -$6 instead of -$3).
   // Skip, don't queue: a piled-up queue is worse than a missed tick.
-  if (cycleInFlight) return;
+  if (cycleInFlight || shuttingDown) return;
   cycleInFlight = true;
   try {
-    await decisionCycleAllInner();
+    activeCycle = decisionCycleAllInner();
+    await activeCycle;
+  } catch (err) {
+    log.error("Decision cycle failed; no overlapping cycle will be started", { error: String(err) });
   } finally {
     cycleInFlight = false;
+    activeCycle = null;
   }
 }
 
@@ -1709,16 +1977,11 @@ async function decisionCycleAllInner(): Promise<void> {
 
   for (const rt of runtimes) await decisionCycle(rt);
 
-  // Autonomous AI trader — inline every Nth tick (single-threaded interleave:
-  // no concurrent portfolio mutation with the 10s loop; worst case one slow
-  // tick per AI cycle, bounded by AI_TIMEOUT_MS).
-  // ponytail: move to a worker + action queue if AI latency ever hurts ticks.
-  if (aiTrader) {
-    aiTicks++;
-    if (aiTicks >= aiTicksPerCycle) {
-      aiTicks = 0;
-      await runAiCycle();
-    }
+  // Research is read-only and single-flight. Only this serialized tick can
+  // consume proposals and mutate financial state, after deterministic exits.
+  await applyReadyAiProposal();
+  if (aiTrader && !shuttingDown && !budgetRestoreIssue && !budgetPersistenceIssue && Date.now() >= nextAiAt) {
+    if (aiProposals.start(buildAiProposal)) nextAiAt = Date.now() + config.ai.cycleSec * 1000;
   }
 
   // Copy-trade wallet polling — same single-threaded interleave. The tracker
@@ -1731,6 +1994,7 @@ async function decisionCycleAllInner(): Promise<void> {
       await runCopyCycle();
     }
   }
+  refreshReport();
 }
 
 // ─── HTTP monitoring + emergency control ──────────────────────────────────────
@@ -1758,7 +2022,15 @@ const httpServerOpts: Parameters<typeof startHttpServer>[0] = {
   logger: log.child({ component: "http" }),
   getStatus: () => ({
     portfolio: aggregatePortfolio(),
-    positions: runtimes.flatMap((rt) => rt.positions.getOpenPositions()),
+    positions: runtimes.flatMap((rt) => rt.positions.getExposurePositions()),
+    accounting: {
+      version: config.trading.mode === "PAPER" ? 2 : 1,
+      source: db ? "durable" : "session-only",
+      complete: Boolean(db) && runtimes.every((rt) => rt.paperBook !== null && accountingProblems(rt).length === 0),
+      issues: runtimes.flatMap((rt) => accountingProblems(rt).map((issue) => `${rt.chain}: ${issue}`)),
+      legacyPositions: runtimes.reduce((sum, rt) => sum + rt.legacyPositions, 0),
+      exitIssues: runtimes.flatMap((rt) => [...rt.exitIssues.values()].map((issue) => `${rt.chain}: ${issue}`)),
+    },
     emergency: {
       killSwitch: emergency.isKillSwitchActive(),
       stopNewEntries: emergency.isStopNewEntries(),
@@ -1776,7 +2048,9 @@ const httpServerOpts: Parameters<typeof startHttpServer>[0] = {
     chains: runtimes.map((rt) => ({
       chain: rt.chain,
       equityUsd: round(rt.portfolio.totalValueUsd),
-      positions: rt.positions.getOpenPositions().length,
+      positions: rt.positions.getExposurePositions().length,
+      accountingComplete: Boolean(db) && rt.paperBook !== null && accountingProblems(rt).length === 0,
+      accountingIssues: accountingProblems(rt),
       regime: rt.regime.regime,
       watchlist: rt.scanner.getWatchlist().length,
     })),
@@ -1794,6 +2068,7 @@ const httpServerOpts: Parameters<typeof startHttpServer>[0] = {
   getMetrics: () => {
     const portfolio = aggregatePortfolio();
     const shadowStats = runtimes.map((rt) => rt.shadow.getStats());
+    const shadowEvaluated = shadowStats.reduce((sum, x) => sum + x.evaluated, 0);
     return {
       portfolio_total_value_usd: round(portfolio.totalValueUsd),
       portfolio_available_usd: round(portfolio.availableCapitalUsd),
@@ -1803,18 +2078,16 @@ const httpServerOpts: Parameters<typeof startHttpServer>[0] = {
       open_positions: portfolio.openPositions,
       watchlist_size: runtimes.reduce((s, rt) => s + rt.scanner.getWatchlist().length, 0),
       kill_switch_active: emergency.isKillSwitchActive() ? 1 : 0,
-      trades_today: performanceTrades,
+      trades_today: currentReport?.date === utcDayKey(new Date()) ? currentReport.entries : NaN,
+      trades_today_complete: currentReport?.date === utcDayKey(new Date()) && currentReport.coverage.complete ? 1 : 0,
+      accounting_pending_fills: runtimes.reduce((sum, rt) => sum + rt.pendingFills.size, 0),
       shadow_signals_total: shadowStats.reduce((s, x) => s + x.signals, 0),
-      shadow_evaluated_total: shadowStats.reduce((s, x) => s + x.evaluated, 0),
-      shadow_avg_return_pct: round(shadowStats.reduce((s, x) => s + x.avgReturnPct, 0) / shadowStats.length),
-      shadow_signal_win_rate: round(shadowStats.reduce((s, x) => s + x.winRate, 0) / shadowStats.length * 100),
+      shadow_evaluated_total: shadowEvaluated,
+      shadow_avg_return_pct: shadowEvaluated ? round(shadowStats.reduce((s, x) => s + x.avgReturnPct * x.evaluated, 0) / shadowEvaluated) : 0,
+      shadow_signal_win_rate: shadowEvaluated ? round(shadowStats.reduce((s, x) => s + x.winRate * x.evaluated, 0) / shadowEvaluated * 100) : 0,
     };
   },
-  getReport: () => buildDailyReport(
-    reportTracker, aggregatePortfolio(),
-    runtimes.flatMap((rt) => rt.positions.getOpenPositions()),
-    performanceTracker, config.trading.mode,
-  ),
+  getReport: () => buildReport(),
   getHistory: async () => {
     if (!db) return [];
     const histories = await Promise.all(
@@ -1929,11 +2202,19 @@ const snapshotTimer = setInterval(() => {
 
 // ─── Graceful shutdown ────────────────────────────────────────────────────────
 async function shutdown(signal: string): Promise<void> {
+  if (shuttingDown) return;
+  shuttingDown = true;
   log.info("Shutting down", { signal });
   clearInterval(cycleTimer);
   clearInterval(snapshotTimer);
+  if (reportTimer !== undefined) clearTimeout(reportTimer);
+  aiProposals.dispose();
+  await activeCycle?.catch((err: unknown) => log.error("Active cycle ended during shutdown", { error: String(err) }));
+  for (const rt of runtimes) await flushPendingFills(rt);
+  await aiBudget.flush().catch((err: unknown) => log.error("AI usage persistence incomplete at shutdown", { error: String(err) }));
   httpServer.close();
   for (const rt of runtimes) {
+    rt.exitObservations.dispose();
     await rt.scanner.stop();
     const { discovery, marketData: market, liquidity, security, holders, quote, execution, monitoring } = rt.providers;
     await Promise.all([
@@ -1969,5 +2250,6 @@ process.on("uncaughtException", (err) => {
 
 // Run one cycle immediately on startup
 await decisionCycleAll();
+refreshReport();
 scheduleDailyReport();
 log.info("Initial decision cycle complete — running autonomously");

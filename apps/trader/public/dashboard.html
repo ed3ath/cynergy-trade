@@ -353,7 +353,7 @@
 
 <main class="grid">
   <section class="panel p-equity">
-    <div class="ph"><h2>Equity — wallet value (paper)</h2></div>
+    <div class="ph"><h2 id="equity-title">Equity - wallet value (paper)</h2><span class="count" title="Latest 1440 snapshots per chain, approximately 4 hours at 10-second ticks. Gaps can extend the time span. Drawdown on this chart is window-local, not lifetime.">Recent ~4h, not lifetime</span></div>
     <div id="equity-wrap">
       <svg id="equity-svg" role="img" aria-label="Equity curve"></svg>
       <div id="tooltip"></div>
@@ -368,11 +368,13 @@
       <button id="tab-positions" class="on">Positions</button>
       <button id="tab-trades">Trades</button>
       <button id="tab-traders">Traders</button>
+      <button id="tab-report">Report</button>
     </div>
     <div class="pbody">
       <div id="positions"></div>
       <div id="trades" hidden></div>
       <div id="traders" hidden></div>
+      <div id="report" hidden></div>
     </div>
   </section>
 
@@ -427,6 +429,7 @@ const rate = () => (currency === "USD" ? 1 : Number(fxRates[currency]) || 1);
 const sym = () => SYM[currency] ?? "$";
 const toCur = (usd) => usd * rate();
 const fmtUsd = (n) => sym() + toCur(n).toLocaleString("en-US", { maximumFractionDigits: 2 });
+const fmtReportMoney = (n) => Number.isFinite(n) ? sym() + toCur(n).toLocaleString("en-US", { maximumFractionDigits: 6 }) : "unknown";
 const fmtUsdInt = (n) => (n < 0 ? "-" : "") + sym() + Math.round(Math.abs(toCur(n))).toLocaleString("en-US");
 const fmtPct = (n) => (n >= 0 ? "+" : "") + n.toFixed(2) + "%";
 // never scientific notation: toPrecision() prints "1.23e-8" for memecoin prices
@@ -530,6 +533,7 @@ function tile(label, value, delta) {
     h("div", { class: "label", text: label }),
     h("div", { class: "value", text: value }));
   if (delta) t.append(h("div", { class: "delta" + (delta.cls ? " " + delta.cls : ""), text: delta.text }));
+  t.title = delta?.title || label;
   return t;
 }
 
@@ -585,6 +589,7 @@ function renderAll() {
   if (window.__lastStatus) renderStatus(window.__lastStatus);
   if (lastMarket) renderMarket(lastMarket);
   if (lastTrades) renderTrades(lastTrades);
+  renderReport(lastReport);
   drawEquity();
   void refreshOpenDetail();
 }
@@ -634,16 +639,18 @@ function renderStatus(status) {
     } else banner.style.display = "none";
 
     const daily = p.dailyPnlUsd;
+    const paper = status.emergency.tradingMode === "PAPER";
+    $("equity-title").textContent = `Equity - wallet value (${paper ? "paper" : status.emergency.tradingMode.toLowerCase()})`;
     const tiles = $("tiles");
     tiles.replaceChildren(
-      tile("Wallet", fmtUsdInt(p.totalValueUsd), { hero: true, cls: daily >= 0 ? "up" : "down", text: `daily ${fmtUsd(daily)}` }),
+      tile(paper ? "Wallet (paper)" : "Wallet", fmtUsdInt(p.totalValueUsd), { hero: true, cls: daily >= 0 ? "up" : "down", text: `realized today UTC ${fmtUsd(daily)}`, title: "Cash plus marked holdings. AI operating cost is separate, not deducted from this wallet. See Report for accounting coverage." }),
       tile("Drawdown", p.currentDrawdownPct.toFixed(3) + "%"),
       tile("Open positions", String(p.openPositions)),
       tile("Cash", fmtUsd(p.availableCapitalUsd), { text: `in positions ${fmtUsd(p.allocatedUsd)}` }),
-      tile("All-time PnL", fmtUsd(p.allTimePnlUsd), { cls: p.allTimePnlUsd >= 0 ? "up" : "down", text: `weekly ${fmtUsd(p.weeklyPnlUsd)}` }),
-      tile("Shadow win rate", m.shadow_signal_win_rate != null ? m.shadow_signal_win_rate.toFixed(1) + "%" : "—",
+      tile("Realized (book)", fmtUsd(p.allTimePnlUsd), { cls: p.allTimePnlUsd >= 0 ? "up" : "down", text: `weekly ${fmtUsd(p.weeklyPnlUsd)}`, title: "Recorded book realized PnL; legacy or incomplete history is not audited lifetime performance. See Report for coverage and partial realizations." }),
+      tile("Shadow signals", m.shadow_signal_win_rate != null ? m.shadow_signal_win_rate.toFixed(1) + "%" : "—",
         { cls: (m.shadow_avg_return_pct || 0) >= 0 ? "up" : "down",
-          text: m.shadow_avg_return_pct != null ? `avg ${fmtPct(m.shadow_avg_return_pct)}` : "" }),
+          text: "Advisory, not AI trades", title: `Deterministic shadow signal outcomes, not executed AI performance.${m.shadow_avg_return_pct != null ? ` Average signal return ${fmtPct(m.shadow_avg_return_pct)}.` : ""}` }),
     );
 
     // wallet split across chain books (only meaningful when several trade)
@@ -668,8 +675,8 @@ function renderStatus(status) {
     else {
       const tbl = h("table");
       tbl.append(h("tr", {}, h("th", { text: "Token" }), h("th", { class: "num", text: "Holding" }),
-        h("th", { class: "num", text: "Value" }), h("th", { class: "num", text: "PnL %" }),
-        h("th", { class: "num", text: "PnL $" }), h("th", { class: "col-opened", text: "Opened" })));
+        h("th", { class: "num", text: "Value" }), h("th", { class: "num", text: "Open PnL %" }),
+        h("th", { class: "num", text: "Open PnL" }), h("th", { class: "col-opened", text: "Opened" })));
       for (const x of status.positions) {
         const sym = symByToken.get(x.tokenAddress)?.symbol;
         tbl.append(h("tr", {},
@@ -677,7 +684,8 @@ function renderStatus(status) {
           h("td", { class: "num mono", text: fmtTokens(x.sizeTokens) + (sym ? " " + sym : ""), title: "tokens held · opened " + relTime(x.openedAt) }),
           h("td", { class: "num", text: fmtUsd(x.sizeUsd + x.unrealizedPnlUsd), title: `entry ${fmtUsd(x.sizeUsd)}` }),
           h("td", { class: "num", text: fmtPct(x.unrealizedPnlPct), style: `color: var(--${x.unrealizedPnlPct >= 0 ? "good" : "critical"})` }),
-          h("td", { class: "num", text: fmtUsd(x.unrealizedPnlUsd) }),
+          h("td", { class: "num", title: "Current open mark-to-market, not realized proceeds. " + accountingLabel(x) },
+            h("div", { text: fmtUsd(x.unrealizedPnlUsd) }), accountingBadge(x)),
           h("td", { class: "col-opened", text: relTime(x.openedAt) })));
       }
       pos.replaceChildren(tbl);
@@ -698,7 +706,7 @@ function renderStatus(status) {
 }
 
 // Book tabs — panes stay rendered, only visibility flips
-const BOOK_TABS = [["tab-positions", "positions"], ["tab-trades", "trades"], ["tab-traders", "traders"]];
+const BOOK_TABS = [["tab-positions", "positions"], ["tab-trades", "trades"], ["tab-traders", "traders"], ["tab-report", "report"]];
 for (const [tab, pane] of BOOK_TABS) {
   $(tab).addEventListener("click", () => {
     for (const [t, p] of BOOK_TABS) {
@@ -719,6 +727,8 @@ async function refreshStatus() {
 // ── /history → equity line ────────────────────────────────────────────────────
 let history = [];
 let lastTrades = null; // last /trades frame — re-rendered on currency switch
+let lastReport = null;
+let reportStale = false;
 let lastMarket = null; // last /market frame — same
 let lastCopyTrades = null; // last /copytrade frame — same
 async function refreshHistory() {
@@ -731,6 +741,13 @@ async function refreshHistory() {
   } catch { /* keep last frame */ }
   renderTrades(lastTrades);
   try {
+    const response = await fetch("/report");
+    if (!response.ok) throw new Error("report unavailable");
+    lastReport = await response.json();
+    reportStale = false;
+  } catch { reportStale = true; }
+  renderReport(lastReport);
+  try {
     lastMarket = await fetch("/market").then((r) => r.json());
   } catch { /* keep last frame */ }
   renderMarket(lastMarket);
@@ -742,8 +759,9 @@ async function refreshHistory() {
 }
 function renderTrades(trades) {
   const el = $("trades");
-  if (!trades || !trades.length) {
-    el.replaceChildren(h("div", { class: "empty", text: "No closed trades yet" }));
+  const note = h("div", { class: "empty", text: "Latest completed positions: up to 50 per chain, not lifetime. Partial realizations are in Report. Legacy/unknown data remains visible." });
+  if (!Array.isArray(trades) || !trades.length) {
+    el.replaceChildren(note, h("div", { class: "empty", text: "No completed positions in this history window; see Report for coverage." }));
     return;
   }
   const tbl = h("table");
@@ -751,7 +769,7 @@ function renderTrades(trades) {
     h("th", { text: "Token" }),
     h("th", { class: "num", text: "Amount" }),
     h("th", { class: "num col-entry", text: "Entry" }),
-    h("th", { class: "num", text: "PnL" }),
+    h("th", { class: "num", text: "Realized PnL" }),
     h("th", { text: "Exit" }), h("th", { class: "col-closed", text: "Closed" })));
   for (const t of trades) {
     const sym = symByToken.get(t.tokenAddress)?.symbol;
@@ -761,12 +779,74 @@ function renderTrades(trades) {
         title: `size at entry ${fmtUsd(t.sizeUsd)}` }),
       h("td", { class: "num col-entry", text: fmtPrice(t.entryPrice), title: `entry ${fmtPrice(t.entryPrice)}` }),
       // one merged cell keeps both PnL figures visible at every width
-      h("td", { class: "num", text: `${fmtUsd(t.pnlUsd)} · ${fmtPct(t.pnlPct)}`,
-        style: `color: var(--${t.pnlUsd >= 0 ? "good" : "critical"})` }),
+      h("td", { class: "num", title: `${accountingLabel(t)}. Gross ${fmtReportMoney(t.realizedGrossPnlUsd)}; total transaction fees ${fmtReportMoney(t.totalFeesUsd)}. AI costs excluded.`,
+        style: `color: var(--${Number.isFinite(t.pnlUsd) ? t.pnlUsd >= 0 ? "good" : "critical" : "muted"})` },
+        h("div", { text: `${Number.isFinite(t.pnlUsd) ? fmtUsd(t.pnlUsd) : "unknown"} · ${Number.isFinite(t.pnlPct) ? fmtPct(t.pnlPct) : "unknown %"}` }), accountingBadge(t)),
       h("td", { text: t.exitReason ?? "—", title: `closed ${t.closedAt ? relTime(t.closedAt) : "—"}` }),
       h("td", { class: "col-closed", text: t.closedAt ? relTime(t.closedAt) : "—" })));
   }
-  el.replaceChildren(tbl);
+  el.replaceChildren(note, tbl);
+}
+
+function accountingLabel(row) {
+  const basis = row.accountingVersion === 2 ? "v2 fill-net accounting" : "legacy/unreconciled recorded PnL";
+  const quality = !Array.isArray(row.dataQuality) ? "data quality unknown"
+    : row.dataQuality.length ? "unverified: " + row.dataQuality.join(", ") : "no recorded data-quality flags";
+  return basis + "; " + quality;
+}
+function accountingBadge(row) {
+  const legacy = row.accountingVersion !== 2;
+  const unknown = !Array.isArray(row.dataQuality);
+  const unverified = unknown || row.dataQuality.length > 0;
+  return h("div", {}, h("span", { class: "pill" + (legacy || unverified ? " pill-warn" : ""),
+    text: legacy ? "legacy" : unknown ? "v2 / unknown" : unverified ? "v2 / unverified" : "v2", title: accountingLabel(row) }));
+}
+function renderReport(r) {
+  const el = $("report");
+  if (!r?.coverage || !Array.isArray(r.cohorts)) {
+    el.replaceChildren(h("div", { class: "empty", text: "Accounting report unavailable on this connection/version. Recorded book values may be legacy or incomplete; missing history/cost is not zero." }));
+    return;
+  }
+  const ai = r.aiCost || {};
+  const coverage = `${r.coverage.source || "unknown source"} / ${r.coverage.complete ? "complete accounting" : "INCOMPLETE"}`;
+  const notes = [
+    ...(r.coverage.issues || []), ...(ai.issues || []),
+    "PnL includes all supplied executed observations, including unverified losses. Legacy values are retained, not relabeled as corrected net.",
+    "At least 100 completed positions per mode/chain/strategy/accounting-version cohort is a minimum, not proof. PF >1.3 and positive expectancy need AI-cost sensitivity and full-cohort drawdown review. No LIVE promotion.",
+  ];
+  const cohorts = h("table");
+  cohorts.append(h("tr", {}, h("th", { text: "Cohort" }), h("th", { class: "num", text: "Closes" }),
+    h("th", { class: "num", text: "Recorded expectancy" }), h("th", { class: "num", text: "PF" }), h("th", { text: "Evaluation" })));
+  for (const c of r.cohorts) {
+    cohorts.append(h("tr", {}, h("td", { text: `${c.mode}/${c.chain}/${c.strategyId}/v${c.accountingVersion} (${c.accounting})` }),
+      h("td", { class: "num", text: `${c.trades}${c.unknownOutcomes ? ` (${c.unknownOutcomes} unknown)` : ""}` }),
+      h("td", { class: "num", text: fmtReportMoney(c.trades > 0 && c.unknownOutcomes === c.trades ? null : c.expectancyUsd) }),
+      h("td", { class: "num", text: Number.isFinite(c.profitFactor) ? c.profitFactor.toFixed(2) : "undefined", title: "Undefined without observed losses, not infinity or a pass. Trading costs included; AI costs not allocated per cohort." }),
+      h("td", { text: c.evaluation?.status || "not validated", title: (c.evaluation?.reasons || []).join(" ") })));
+  }
+  el.replaceChildren(
+    h("div", { class: "empty", text: `${r.date} UTC / ${r.mode} / ${coverage}${reportStale ? " / refresh failed, last cached report" : ""}` }),
+    kvTable([
+      ["Known realized trading net (partials included)", fmtReportMoney(r.netPnlUsd)],
+      ["Realized gross, fill-price slippage included", fmtReportMoney(r.grossPnlUsd)],
+      [`${r.feeModel || "Reported"} fees allocated to realization`, fmtReportMoney(r.totalFeesUsd)],
+      ["Transaction fees paid in this UTC day (BUY + SELL)", fmtReportMoney(r.transactionFeesPaidUsd)],
+      ["Entries / SELL realizations", `${r.entries ?? "unknown"} / ${r.realizations ?? "unknown"}`],
+      ["Completed positions / reconciled samples", `${r.trades} / ${r.reconciledTrades ?? "unknown"}`],
+      ["Reconciled wins / losses / breakevens", `${r.wins} / ${r.losses} / ${r.breakevens ?? "unknown"}`],
+      ["Completed-position lifetime net (not daily fills)", fmtReportMoney(r.completedPositionsNetPnlUsd)],
+      ["Legacy closes / recorded PnL (unreconciled)", `${r.legacy?.trades ?? "unknown"} / ${fmtReportMoney(r.legacy?.recordedPnlUsd)}`],
+      ["All recorded closed PnL (mixed, not audited net)", fmtReportMoney(r.allRecordedCompletedPnlUsd)],
+      ["Closed positions with unknown recorded PnL", String(r.unknownOutcomes ?? "unknown")],
+      ["AI operating cost estimate (outside wallet)", `${fmtReportMoney(ai.estimatedCostUsd)} / ${ai.complete ? "covered estimate" : "incomplete/unknown"}`],
+      ["Net after AI operating cost estimate", fmtReportMoney(r.netAfterAiCostUsd)],
+      ["Current open mark-to-market (not realized)", fmtReportMoney(r.openPnlUsd)],
+      ["Wallet context timestamp (not day-end)", r.portfolioContextAt || "unknown"],
+      ["Unverified positions / invalid records", `${r.coverage.unverifiedPositions ?? "unknown"} / ${r.coverage.invalidRecords ?? "unknown"}`],
+    ]),
+    ...notes.map((text) => h("div", { class: "empty", text })),
+    cohorts,
+  );
 }
 // ── /copytrade → tracked-wallet swap records (Traders tab, TON feed) ────────
 function renderTraders(data) {

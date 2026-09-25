@@ -10,13 +10,13 @@ import {
 } from "@autonomous-trader/shared";
 import type { ExecutionRouter } from "@autonomous-trader/execution";
 
-function execResult(price: number): ExecutionResult {
+function execResult(price: number, intent: TradeIntent): ExecutionResult {
   return {
-    tradeIntentId: generateTradeIntentId(),
-    orderId: "order-1",
+    tradeIntentId: intent.id,
+    orderId: `order-${generateTradeIntentId()}`,
     status: "CONFIRMED",
-    inputAmount: 100n,
-    outputAmount: 1_000_000n,
+    inputAmount: 50_000_000n,
+    outputAmount: BigInt(Math.round(50 / price * 1e9)),
     executedPrice: price,
     actualSlippageBps: 50,
     feesLamports: 5000n,
@@ -54,9 +54,12 @@ describe("multiple concurrent positions per token", () => {
   it("holds scalp + shortterm + core slots side by side on one mint", () => {
     const m = new PositionManager({} as ExecutionRouter, createLogger({ t: "test" }));
     const t0 = Date.now();
-    const scalp = m.openPosition(execResult(1), intent("TokT", "copytrade-scalp"), 0.95, 1.03, 1.06, 8, 20 * 60_000);
-    const swing = m.openPosition(execResult(1), intent("TokT", "copytrade-shortterm"), 0.90, 1.05, 1.10, 15, 2 * 60 * 60_000);
-    const core = m.openPosition(execResult(1), intent("TokT", "fresh-momentum"), 0.90, 1.05, 1.10, 15);
+    const scalpIntent = intent("TokT", "copytrade-scalp");
+    const swingIntent = intent("TokT", "copytrade-shortterm");
+    const coreIntent = intent("TokT", "fresh-momentum");
+    const scalp = m.openPosition(execResult(1, scalpIntent), scalpIntent, 0.95, 1.03, 1.06, 8, 20 * 60_000);
+    const swing = m.openPosition(execResult(1, swingIntent), swingIntent, 0.90, 1.05, 1.10, 15, 2 * 60 * 60_000);
+    const core = m.openPosition(execResult(1, coreIntent), coreIntent, 0.90, 1.05, 1.10, 15);
     expect(m.getOpenPositions()).toHaveLength(3);
     expect(m.getTokenExposureUsd("TokT")).toBe(150); // aggregate caps work per token
 

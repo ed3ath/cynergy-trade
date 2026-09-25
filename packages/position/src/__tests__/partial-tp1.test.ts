@@ -8,12 +8,12 @@ import {
 } from "@autonomous-trader/shared";
 import type { ExecutionRouter } from "@autonomous-trader/execution";
 
-function execResult(price: number, outputAmount = 1_000_000n): ExecutionResult {
+function execResult(intent: TradeIntent, price: number, outputAmount = 1_000_000n): ExecutionResult {
   return {
-    tradeIntentId: generateTradeIntentId(),
-    orderId: "order-1",
+    tradeIntentId: intent.id,
+    orderId: `order-${generateTradeIntentId()}`,
     status: "CONFIRMED",
-    inputAmount: 100n,
+    inputAmount: intent.side === "BUY" ? BigInt(Math.round(intent.positionSizeUsd * 1e6)) : intent.paperTokenQuantity!,
     outputAmount,
     executedPrice: price,
     actualSlippageBps: 50,
@@ -44,13 +44,15 @@ function buyIntent(sizeUsd: number): TradeIntent {
 
 /** Fake router: SELL always confirms at `sellPrice`. */
 function router(sellPrice: number): ExecutionRouter {
-  return { execute: async () => execResult(sellPrice) } as unknown as ExecutionRouter;
+  return { execute: async (intent) => execResult(intent, sellPrice,
+    BigInt(Math.round(Number(intent.paperTokenQuantity) / 1e9 * sellPrice * 1e6))) };
 }
 
 /** $50 position @ $1, TP1 +3%, TP2 +10%, stop -10%. */
 function managerAtTp1(router_: ExecutionRouter): PositionManager {
   const m = new PositionManager(router_, createLogger({ t: "test" }));
-  m.openPosition(execResult(1, 50_000_000_000n), buyIntent(50), 0.9, 1.03, 1.1, 15);
+  const intent = buyIntent(50);
+  m.openPosition(execResult(intent, 1, 50_000_000_000n), intent, 0.9, 1.03, 1.1, 15);
   return m;
 }
 
@@ -71,8 +73,7 @@ describe("PositionManager TP1 partial exit", () => {
     expect(position.takeProfit1).toBeUndefined();
     expect(position.status).toBe("PARTIAL_EXIT");
     expect(m.getOpenPositions().map((p) => p.id)).toContain(id); // still managed
-    // tokens: sold 25 USD @ 1.03 = ~24.27e9 nano; 50e9 - 24.27e9 > 0
-    expect(position.sizeTokens).toBeGreaterThan(0n);
+    expect(position.sizeTokens).toBe(25_000_000_000n);
   });
 
   it("TP1 never re-fires after the partial; TP2 still closes the remainder", async () => {
@@ -113,7 +114,7 @@ describe("PositionManager TP1 partial exit", () => {
 
   it("rejects bad fractions and unconfirmed fills leave size unchanged", async () => {
     const failing: ExecutionRouter = {
-      execute: async () => ({ ...execResult(1.03), status: "FAILED" }),
+      execute: async (intent: TradeIntent) => ({ ...execResult(intent, 1.03), status: "FAILED" }),
     } as unknown as ExecutionRouter;
     const m = managerAtTp1(failing);
     const id = m.getOpenPositions()[0]!.id;
@@ -125,11 +126,12 @@ describe("PositionManager TP1 partial exit", () => {
     expect(m.getPosition(id)!.status).toBe("OPEN");
   });
 
-  it("restorePosition keeps PARTIAL_EXIT status (restart keeps TP1 spent)", () => {
+  it("restorePosition keeps PARTIAL_EXIT status (restart keeps TP1 spent)", async () => {
     const m = managerAtTp1(router(1.03));
     const snapshot = m.getOpenPositions()[0]!;
+    await m.reducePosition(snapshot.id, 0.5, 1.03, sellIntent(25));
     const fresh = new PositionManager(router(1.03), createLogger({ t: "test" }));
-    fresh.restorePosition({ ...snapshot, status: "PARTIAL_EXIT" });
+    fresh.restorePosition({ ...snapshot });
     expect(fresh.getOpenPositions()[0]!.status).toBe("PARTIAL_EXIT");
   });
 });

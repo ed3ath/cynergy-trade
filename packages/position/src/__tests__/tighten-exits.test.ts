@@ -8,13 +8,13 @@ import {
 } from "@autonomous-trader/shared";
 import type { ExecutionRouter } from "@autonomous-trader/execution";
 
-function execResult(price: number): ExecutionResult {
+function execResult(price: number, intent: TradeIntent): ExecutionResult {
   return {
-    tradeIntentId: generateTradeIntentId(),
+    tradeIntentId: intent.id,
     orderId: "order-1",
     status: "CONFIRMED",
-    inputAmount: 100n,
-    outputAmount: 1_000_000n,
+    inputAmount: 50_000_000n,
+    outputAmount: BigInt(Math.round(50 / price * 1e9)),
     executedPrice: price,
     actualSlippageBps: 50,
     feesLamports: 5000n,
@@ -44,7 +44,8 @@ function intent(token: string): TradeIntent {
 
 function managerWithPosition(): PositionManager {
   const m = new PositionManager({} as ExecutionRouter, createLogger({ t: "test" }));
-  m.openPosition(execResult(1), intent("TokT"), 0.9, 1.05, 1.1, 15);
+  const buy = intent("TokT");
+  m.openPosition(execResult(1, buy), buy, 0.9, 1.05, 1.1, 15);
   return m;
 }
 

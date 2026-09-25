@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { AiVetoAgent, parseChatCompletion, type AiCandidate } from "../ai-agent.js";
-import { createLogger, type AIConfig } from "@autonomous-trader/shared";
+import { AiBudget } from "../ai-budget.js";
+import { CHAIN_VALUES, createLogger, type AIConfig } from "@autonomous-trader/shared";
 
 function candidate(): AiCandidate {
   return {
@@ -36,6 +37,7 @@ function okResponse(content: string, usage = { prompt_tokens: 100, completion_to
 
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.useRealTimers();
 });
 
 describe("AiVetoAgent", () => {
@@ -172,6 +174,9 @@ describe("AiVetoAgent", () => {
     const [, firstInit] = fetchSpy.mock.calls[0] as [string, RequestInit];
     const offered = JSON.parse(String(firstInit.body)).tools as { function: { name: string } }[];
     expect(offered.map((t: { function: { name: string } }) => t.function.name)).toEqual(["getSecurityAnalysis"]);
+    expect(offered[0]).toMatchObject({ function: { parameters: {
+      required: ["token", "chain"], properties: { chain: { type: "string", enum: [...CHAIN_VALUES] } },
+    } } });
 
     fetchSpy.mockClear();
     const bare = new AiVetoAgent(cfg(), createLogger({ t: "test" })); // no context
@@ -213,6 +218,88 @@ describe("AiVetoAgent", () => {
       .mockImplementation(async () => toolCallResponse("getMarketSnapshot", '{"token":"TokenXXX"}'));
     const agent = new AiVetoAgent(cfg(), createLogger({ t: "test" }), { getMarketSnapshot: vi.fn().mockResolvedValue({ priceUsd: 1 }) });
     expect((await agent.veto(candidate())).verdict).toBe("UNKNOWN");
+  });
+
+  it.each(["ton", "bsc", "base", "solana"] as const)("keeps veto tools on candidate chain %s despite invalid model routing", async (chain) => {
+    const tool = vi.fn().mockResolvedValue({ status: "UNKNOWN" });
+    const fetchSpy = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(toolCallResponse("getSecurityAnalysis", '{"token":"TokenXXX","chain":"not-a-chain"}'))
+      .mockResolvedValueOnce(okResponse('{"verdict":"APPROVE","confidence":0.5,"reason":"no verified flags"}'));
+    const agent = new AiVetoAgent(cfg(), createLogger({ t: "test" }), { getSecurityAnalysis: tool });
+    expect((await agent.veto({ ...candidate(), chain })).verdict).toBe("APPROVE");
+    expect(tool).toHaveBeenCalledWith("TokenXXX", chain);
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not share a cached verdict for the same address on different chains", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(okResponse('{"verdict":"REJECT","confidence":1,"reason":"verified flag"}'))
+      .mockResolvedValueOnce(okResponse('{"verdict":"APPROVE","confidence":0.5,"reason":"different chain"}'));
+    const agent = new AiVetoAgent(cfg(), createLogger({ t: "test" }));
+    expect((await agent.veto({ ...candidate(), chain: "bsc" })).verdict).toBe("REJECT");
+    expect((await agent.veto({ ...candidate(), chain: "base" })).verdict).toBe("APPROVE");
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it("checks the shared budget before another paid tool round", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(toolCallResponse("getMarketSnapshot", "{}"));
+    const agent = new AiVetoAgent(cfg({ costPer1kTokensUsd: 1, maxCostPerDayUsd: 0.1 }), createLogger({ t: "test" }), {
+      getMarketSnapshot: vi.fn().mockResolvedValue({ priceUsd: 1 }),
+    });
+    const result = await agent.veto(candidate());
+    expect(result).toMatchObject({ verdict: "UNKNOWN" });
+    expect(result.reason).toContain("cost cap");
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("bounds a non-abortable model call, accounts late usage, and never publishes its late verdict", async () => {
+    vi.useFakeTimers();
+    let finish!: (response: Response) => void;
+    vi.spyOn(globalThis, "fetch").mockImplementation(() => new Promise<Response>((resolve) => { finish = resolve; }));
+    const config = cfg({ timeoutMs: 20, costPer1kTokensUsd: 1 });
+    const log = createLogger({ t: "test" });
+    const budget = new AiBudget(config, log);
+    const agent = new AiVetoAgent(config, log, {}, budget);
+    const pending = agent.veto(candidate());
+    await vi.advanceTimersByTimeAsync(20);
+    expect(await pending).toMatchObject({ verdict: "UNKNOWN", reason: "timeout" });
+    expect(budget.snapshot()).toMatchObject({ calls: 1, estimatedCostUsd: null, complete: false });
+    finish(okResponse('{"verdict":"REJECT","confidence":1,"reason":"late"}'));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(budget.snapshot()).toMatchObject({ calls: 1, estimatedCostUsd: 0.15, complete: true });
+    expect((await agent.veto(candidate())).verdict).toBe("UNKNOWN");
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("bounds a hung tool and stops before any subsequent tool or paid request", async () => {
+    vi.useFakeTimers();
+    let finish!: (value: unknown) => void;
+    const history = vi.fn().mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+    const market = vi.fn().mockResolvedValue({ priceUsd: 1 });
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(new Response(JSON.stringify({
+      choices: [{ message: { content: null, tool_calls: [
+        { id: "one", type: "function", function: { name: "getMarketHistory", arguments: "{}" } },
+        { id: "two", type: "function", function: { name: "getMarketSnapshot", arguments: "{}" } },
+      ] } }], usage: { prompt_tokens: 1, completion_tokens: 1 },
+    })));
+    const agent = new AiVetoAgent(cfg({ timeoutMs: 20 }), createLogger({ t: "test" }), { getMarketHistory: history, getMarketSnapshot: market });
+    const pending = agent.veto(candidate());
+    await vi.advanceTimersByTimeAsync(20);
+    expect(await pending).toMatchObject({ verdict: "UNKNOWN", reason: "timeout" });
+    finish([]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(history).toHaveBeenCalledTimes(1);
+    expect(market).not.toHaveBeenCalled();
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not make a paid request when its parent is already cancelled", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    const controller = new AbortController();
+    controller.abort();
+    const agent = new AiVetoAgent(cfg(), createLogger({ t: "test" }));
+    expect((await agent.veto(candidate(), { signal: controller.signal })).verdict).toBe("UNKNOWN");
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 });
 

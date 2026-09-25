@@ -1,12 +1,14 @@
-/**
- * Loss statistics for the AI trader's memory — a pure summary over closed
- * trades. Wins/losses are classified by pnlUsd (fees already realized into
- * it); UNKNOWN-shaped rows (no pnl) are ignored.
+/** Pure feedback over completed positions supplied by the host, never partial fills.
+ * pnlUsd must be cumulative trading NET; do not deduct fees/slippage again here.
+ * The host owns the corrected PAPER namespace and new-close learning gate.
  */
 
 export interface ClosedTradeLite {
   token: string;
   chain?: string;
+  mode?: string;
+  accountingVersion?: number;
+  dataQuality?: readonly string[];
   strategyId?: string | null;
   pnlUsd: number;
   pnlPct?: number;
@@ -17,24 +19,57 @@ export interface ClosedTradeLite {
 export interface LossStats {
   sampleSize: number;
   winRatePct: number;
-  avgWinPct: number;
-  avgLossPct: number;
-  /** mean pnlPct per trade — the number the 80% win-rate goal lives on */
-  expectancyPct: number;
+  breakevens: number;
+  avgWinPct: number | null;
+  avgLossPct: number | null;
+  /** Mean of observed percentages only; null when nonempty rows have none. */
+  expectancyPct: number | null;
+  percentageSampleSize: number;
+  netPnlUsd: number;
+  expectancyUsd: number;
+  profitFactor: number | null;
+  invalidPnlRows: number;
+  legacyRows: number;
+  unverifiedRows: number;
+  /** A supplied recent-history window is not lifetime evidence. */
+  scope: "supplied-completed-positions";
+  feedbackEligible: boolean;
+  evaluationStatus: "insufficient-samples" | "cohort-only" | "not-validated";
+  costCaution: string;
   /** exit-reason histogram over LOSING trades, worst avg pnl first */
-  lossReasons: { reason: string; count: number; avgPnlPct: number }[];
+  lossReasons: { reason: string; count: number; avgPnlPct: number | null }[];
   /** strategies with ≥3 trades and <40% win rate */
-  weakStrategies: { strategyId: string; trades: number; winRatePct: number }[];
-  /** tokens losing ≥2 times */
+  weakStrategies: { strategyId: string; trades: number; winRatePct: number; mode?: string; chain?: string; accountingVersion?: number }[];
+  /** Tokens losing >=2 times within the SAME mode/chain/accounting cohort. */
   repeatLoserTokens: string[];
+  cohorts: {
+    mode: string;
+    chain: string;
+    strategyId: string;
+    accountingVersion: number;
+    sampleSize: number;
+    netPnlUsd: number;
+    expectancyUsd: number;
+    profitFactor: number | null;
+    winRatePct: number;
+    evaluationStatus: "insufficient-samples" | "not-validated";
+  }[];
 }
 
 export function summarizeClosedTrades(trades: ClosedTradeLite[]): LossStats {
   const rows = trades.filter((t) => Number.isFinite(t.pnlUsd));
   const wins = rows.filter((t) => t.pnlUsd > 0);
-  const losses = rows.filter((t) => t.pnlUsd <= 0);
-  const pct = (t: ClosedTradeLite): number => (Number.isFinite(t.pnlPct) ? t.pnlPct as number : 0);
-  const avg = (xs: ClosedTradeLite[]): number => (xs.length === 0 ? 0 : xs.reduce((s, t) => s + pct(t), 0) / xs.length);
+  const losses = rows.filter((t) => t.pnlUsd < 0);
+  const avg = (xs: ClosedTradeLite[]): number | null => {
+    const known = xs.filter((t) => Number.isFinite(t.pnlPct));
+    return known.length ? known.reduce((s, t) => s + (t.pnlPct as number), 0) / known.length : xs.length ? null : 0;
+  };
+  const round1 = (n: number | null): number | null => n === null ? null : Math.round(n * 10) / 10;
+  const net = (xs: ClosedTradeLite[]): number => xs.reduce((s, t) => s + t.pnlUsd, 0);
+  const profitFactor = (xs: ClosedTradeLite[]): number | null => {
+    const lost = -net(xs.filter((t) => t.pnlUsd < 0));
+    return lost > 0 ? net(xs.filter((t) => t.pnlUsd > 0)) / lost : null;
+  };
 
   const byReason = new Map<string, ClosedTradeLite[]>();
   for (const l of losses) {
@@ -42,18 +77,22 @@ export function summarizeClosedTrades(trades: ClosedTradeLite[]): LossStats {
     byReason.set(key, [...(byReason.get(key) ?? []), l]);
   }
   const lossReasons = [...byReason.entries()]
-    .map(([reason, ls]) => ({ reason, count: ls.length, avgPnlPct: Math.round(avg(ls) * 10) / 10 }))
-    .sort((a, b) => a.avgPnlPct - b.avgPnlPct) // worst first
+    .map(([reason, ls]) => ({ reason, count: ls.length, avgPnlPct: round1(avg(ls)) }))
+    .sort((a, b) => (a.avgPnlPct ?? Infinity) - (b.avgPnlPct ?? Infinity)) // known worst first
     .slice(0, 5);
 
   const byStrategy = new Map<string, ClosedTradeLite[]>();
   for (const r of rows) {
-    if (!r.strategyId) continue;
-    byStrategy.set(r.strategyId, [...(byStrategy.get(r.strategyId) ?? []), r]);
+    const key = JSON.stringify([r.mode ?? "unknown", r.chain ?? "unknown", r.strategyId ?? "unknown", r.accountingVersion ?? 1]);
+    byStrategy.set(key, [...(byStrategy.get(key) ?? []), r]);
   }
-  const weakStrategies = [...byStrategy.entries()]
-    .map(([strategyId, rs]) => ({
-      strategyId,
+  const weakStrategies = [...byStrategy.values()]
+    .filter((rs) => rs[0]?.strategyId)
+    .map((rs) => ({
+      strategyId: rs[0]!.strategyId!,
+      ...(rs[0]!.mode !== undefined ? { mode: rs[0]!.mode } : {}),
+      ...(rs[0]!.chain !== undefined ? { chain: rs[0]!.chain } : {}),
+      ...(rs[0]!.accountingVersion !== undefined ? { accountingVersion: rs[0]!.accountingVersion } : {}),
       trades: rs.length,
       winRatePct: Math.round((rs.filter((t) => t.pnlUsd > 0).length / rs.length) * 100),
     }))
@@ -61,23 +100,51 @@ export function summarizeClosedTrades(trades: ClosedTradeLite[]): LossStats {
     .sort((a, b) => a.winRatePct - b.winRatePct)
     .slice(0, 5);
 
-  const lossCount = new Map<string, number>();
-  for (const l of losses) lossCount.set(l.token, (lossCount.get(l.token) ?? 0) + 1);
-  const repeatLoserTokens = [...lossCount.entries()]
-    .filter(([, n]) => n >= 2)
-    .sort((a, b) => b[1] - a[1])
+  const lossCount = new Map<string, { token: string; count: number }>();
+  for (const l of losses) {
+    const key = JSON.stringify([l.mode ?? "unknown", l.chain ?? "unknown", l.accountingVersion ?? 1, l.token]);
+    lossCount.set(key, { token: l.token, count: (lossCount.get(key)?.count ?? 0) + 1 });
+  }
+  const repeatLoserTokens = [...lossCount.values()]
+    .filter((r) => r.count >= 2)
+    .sort((a, b) => b.count - a.count)
     .slice(0, 10)
-    .map(([token]) => token);
+    .map((r) => r.token);
 
-  const round1 = (n: number): number => Math.round(n * 10) / 10;
+  const cohorts = [...byStrategy.values()].map((rs) => ({
+    mode: rs[0]!.mode ?? "unknown",
+    chain: rs[0]!.chain ?? "unknown",
+    strategyId: rs[0]!.strategyId ?? "unknown",
+    accountingVersion: rs[0]!.accountingVersion ?? 1,
+    sampleSize: rs.length,
+    netPnlUsd: net(rs),
+    expectancyUsd: net(rs) / rs.length,
+    profitFactor: profitFactor(rs),
+    winRatePct: Math.round(rs.filter((t) => t.pnlUsd > 0).length / rs.length * 1000) / 10,
+    evaluationStatus: rs.length < 100 ? "insufficient-samples" as const : "not-validated" as const,
+  }));
+
   return {
     sampleSize: rows.length,
-    winRatePct: round1((wins.length / (rows.length || 1)) * 100),
+    winRatePct: Math.round((wins.length / (rows.length || 1)) * 1000) / 10,
+    breakevens: rows.length - wins.length - losses.length,
     avgWinPct: round1(avg(wins)),
     avgLossPct: round1(avg(losses)),
     expectancyPct: round1(avg(rows)),
+    percentageSampleSize: rows.filter((t) => Number.isFinite(t.pnlPct)).length,
+    netPnlUsd: net(rows),
+    expectancyUsd: rows.length ? net(rows) / rows.length : 0,
+    profitFactor: profitFactor(rows),
+    invalidPnlRows: trades.length - rows.length,
+    legacyRows: rows.filter((t) => t.accountingVersion !== 2).length,
+    unverifiedRows: rows.filter((t) => !t.dataQuality || t.dataQuality.length > 0).length,
+    scope: "supplied-completed-positions",
+    feedbackEligible: rows.length > 0 && rows.length === trades.length && rows.every((t) => t.mode === "PAPER" && t.accountingVersion === 2),
+    evaluationStatus: cohorts.every((c) => c.sampleSize < 100) ? "insufficient-samples" : cohorts.length > 1 ? "cohort-only" : "not-validated",
+    costCaution: "Trading net already includes transaction costs; AI operating costs are not included. Positive after-cost expectancy, PF >1.3 and full-cohort drawdown need cost-sensitive forward evaluation. At least 100 completed positions per compatible cohort is a minimum, not proof or LIVE approval. Legacy/unknown inputs are not corrected learning evidence.",
     lossReasons,
     weakStrategies,
     repeatLoserTokens,
+    cohorts,
   };
 }

@@ -19,7 +19,7 @@
  * - The whole multi-round tool exchange runs under ONE deadline
  *   (ai.timeoutMs), so tool loops can't stall the decision cycle.
  */
-import type { AIConfig, Chain, Logger } from "@autonomous-trader/shared";
+import { CHAIN_VALUES, type AIConfig, type Chain, type Logger } from "@autonomous-trader/shared";
 import { AiBudget } from "./ai-budget.js";
 
 export type AiVerdictType = "APPROVE" | "REJECT" | "UNKNOWN";
@@ -74,13 +74,15 @@ const MAX_TOOL_ROUNDS = 3;        // ponytail: raise if agents need deeper resea
 const TOOL_RESULT_MAX_CHARS = 4_000;
 
 const SYSTEM_PROMPT =
-  "You are a brutally conservative risk reviewer for micro-cap token trades on Solana/TON. " +
+  "You are a conservative risk reviewer for micro-cap token trades on Solana/TON/EVM chains. " +
   "You receive one candidate that already passed quantitative strategy and risk screens. " +
   "Your ONLY job is to spot red flags the numbers missed: obvious rug patterns, honeypot hints, " +
   "wash-traded volume, bundler/sniper dominance, manipulated holder counts. " +
   "You may call the provided read-only data tools to refresh or deepen your view of the candidate " +
   "(fresh snapshots, price history) before deciding — use them when the supplied data looks stale, " +
   "contradictory, or suspicious. " +
+  "Tools always review the candidate's chain. Provider errors, missing pairs, and unknown data " +
+  "are missing evidence, not verified liquidity collapse or a rug. " +
   "Default to APPROVE unless you see a concrete, evidence-based red flag in the data. " +
   "Respond with STRICT JSON only, no markdown fences: " +
   '{"verdict":"APPROVE"|"REJECT","confidence":<number 0-1>,"reason":"<one short sentence>"}';
@@ -96,6 +98,51 @@ export interface ChatMessage {
 export interface ChatResponse {
   choices?: { message?: ChatMessage }[];
   usage?: { prompt_tokens?: number; completion_tokens?: number };
+}
+
+export interface AiConversationOptions {
+  signal?: AbortSignal;
+  /** Optional earlier deadline supplied by the snapshot/proposal task. */
+  deadlineAt?: number;
+}
+
+/** Race the entire exchange, not just fetch: tools and response bodies may ignore abort.
+ * Every continuation must check before starting more work or returning a proposal. */
+export async function withAiDeadline<T>(
+  timeoutMs: number,
+  options: AiConversationOptions,
+  run: (signal: AbortSignal, check: () => void) => Promise<T>,
+): Promise<T> {
+  const deadlineAt = Math.min(Date.now() + timeoutMs, options.deadlineAt ?? Infinity);
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || !Number.isFinite(deadlineAt) ||
+      deadlineAt <= Date.now() || options.signal?.aborted) {
+    throw new DOMException("AI deadline exceeded or cancelled", "AbortError");
+  }
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  const check = () => {
+    if (Date.now() >= deadlineAt) abort();
+    controller.signal.throwIfAborted();
+  };
+  let rejectOnAbort: () => void;
+  const stopped = new Promise<never>((_resolve, reject) => {
+    rejectOnAbort = () => reject(new DOMException("AI deadline exceeded or cancelled", "AbortError"));
+    controller.signal.addEventListener("abort", rejectOnAbort, { once: true });
+  });
+  options.signal?.addEventListener("abort", abort, { once: true });
+  const timer = setTimeout(abort, deadlineAt - Date.now());
+  try {
+    const result = await Promise.race([
+      Promise.resolve().then(() => { check(); return run(controller.signal, check); }),
+      stopped,
+    ]);
+    check();
+    return result;
+  } finally {
+    clearTimeout(timer);
+    options.signal?.removeEventListener("abort", abort);
+    controller.signal.removeEventListener("abort", rejectOnAbort!);
+  }
 }
 
 /**
@@ -154,13 +201,22 @@ export interface ToolDef {
   function: { name: keyof AiToolContext; description: string; parameters: Record<string, unknown> };
 }
 
+const TOOL_PARAMETERS = {
+  type: "object",
+  properties: {
+    token: { type: "string", description: "Token mint/address" },
+    chain: { type: "string", enum: [...CHAIN_VALUES], description: "Chain containing this token" },
+  },
+  required: ["token", "chain"],
+};
+
 export const TOOL_DEFS: ToolDef[] = [
   {
     type: "function",
     function: {
       name: "getMarketSnapshot",
       description: "Fetch a FRESH market snapshot for the token right now: price, market cap, volumes, price changes, buyer/seller counts.",
-      parameters: { type: "object", properties: { token: { type: "string", description: "Token mint/address" } }, required: ["token"] },
+      parameters: TOOL_PARAMETERS,
     },
   },
   {
@@ -168,7 +224,7 @@ export const TOOL_DEFS: ToolDef[] = [
     function: {
       name: "getSecurityAnalysis",
       description: "Fetch a FRESH on-chain security analysis: honeypot/rug flags, mint authority, freeze authority, LP lock status.",
-      parameters: { type: "object", properties: { token: { type: "string", description: "Token mint/address" } }, required: ["token"] },
+      parameters: TOOL_PARAMETERS,
     },
   },
   {
@@ -176,7 +232,7 @@ export const TOOL_DEFS: ToolDef[] = [
     function: {
       name: "getLiquiditySnapshot",
       description: "Fetch a FRESH liquidity snapshot: pool liquidity USD, pool age, slippage estimates, recent liquidity changes.",
-      parameters: { type: "object", properties: { token: { type: "string", description: "Token mint/address" } }, required: ["token"] },
+      parameters: TOOL_PARAMETERS,
     },
   },
   {
@@ -184,7 +240,7 @@ export const TOOL_DEFS: ToolDef[] = [
     function: {
       name: "getMarketHistory",
       description: "Recent historical market snapshots for the token (price/volume over time) — use to verify trend quality and spot pump-and-dump shapes.",
-      parameters: { type: "object", properties: { token: { type: "string", description: "Token mint/address" } }, required: ["token"] },
+      parameters: TOOL_PARAMETERS,
     },
   },
 ];
@@ -210,91 +266,90 @@ export class AiVetoAgent {
    * Veto check for one candidate. Cached; UNKNOWN on any failure — the caller
    * only acts on REJECT.
    */
-  async veto(c: AiCandidate): Promise<AiVerdict> {
-    const cached = this.cache.get(c.tokenAddress);
+  async veto(c: AiCandidate, options: AiConversationOptions = {}): Promise<AiVerdict> {
+    const cacheKey = `${c.chain}:${c.tokenAddress}`;
+    const cached = this.cache.get(cacheKey);
     if (cached && cached.expiresAt > Date.now()) return cached.verdict;
 
     const verdict = this.cfg.provider === "mock"
       ? { tokenAddress: c.tokenAddress, verdict: "APPROVE" as AiVerdictType, confidence: 1, reason: "mock provider" }
-      : await this.exchange(c);
+      : await this.exchange(c, options);
 
-    this.cache.set(c.tokenAddress, { verdict, expiresAt: Date.now() + CACHE_TTL_MS });
+    this.cache.set(cacheKey, { verdict, expiresAt: Date.now() + CACHE_TTL_MS });
     return verdict;
   }
 
   /** The full multi-round conversation: prompt → optional tool calls → verdict.
    *  One absolute deadline covers every round. */
-  private async exchange(c: AiCandidate): Promise<AiVerdict> {
+  private async exchange(c: AiCandidate, options: AiConversationOptions): Promise<AiVerdict> {
     const unknown = (reason: string): AiVerdict =>
       ({ tokenAddress: c.tokenAddress, verdict: "UNKNOWN", confidence: 0, reason });
 
     if (this.budget.overCostCap()) return unknown("daily AI cost cap reached — no veto");
 
-    const messages: ChatMessage[] = [
-      { role: "system", content: SYSTEM_PROMPT },
-      { role: "user", content: JSON.stringify(this.payload(c)) },
-    ];
-    const deadline = Date.now() + this.cfg.timeoutMs;
-
     try {
-      for (let round = 0; round <= MAX_TOOL_ROUNDS; round++) {
-        const remaining = deadline - Date.now();
-        if (remaining <= 0) return unknown("deadline exceeded");
+      return await withAiDeadline(this.cfg.timeoutMs, options, async (signal, check) => {
+        const messages: ChatMessage[] = [
+          { role: "system", content: SYSTEM_PROMPT },
+          { role: "user", content: JSON.stringify(this.payload(c)) },
+        ];
+        for (let round = 0; round <= MAX_TOOL_ROUNDS; round++) {
+          check();
+          if (this.budget.overCostCap()) return unknown("daily AI cost cap reached - no veto");
+          const body = await this.request(c.tokenAddress, messages, signal);
+          check();
 
-        const body = await this.request(c.tokenAddress, messages, remaining);
-        this.budget.trackCost(body.usage);
-
-        const msg = body.choices?.[0]?.message;
-        const calls = msg?.tool_calls ?? [];
-        if (calls.length > 0 && round < MAX_TOOL_ROUNDS) {
-          messages.push({ role: "assistant", content: msg?.content ?? "", tool_calls: calls });
-          for (const tc of calls) {
-            messages.push({ role: "tool", tool_call_id: tc.id, content: await this.runTool(tc, c) });
+          const msg = body.choices?.[0]?.message;
+          const calls = msg?.tool_calls ?? [];
+          if (calls.length > 0 && round < MAX_TOOL_ROUNDS) {
+            messages.push({ role: "assistant", content: msg?.content ?? "", tool_calls: calls });
+            for (const tc of calls) {
+              check();
+              const content = await this.runTool(tc, c);
+              check();
+              messages.push({ role: "tool", tool_call_id: tc.id, content });
+            }
+            continue;
           }
-          continue; // model re-answers with the tool results in context
-        }
 
-        // Final round or no tool calls: content must hold the verdict
-        return this.parse(msg?.content, c.tokenAddress) ?? unknown("malformed AI response");
-      }
-      return unknown("no final verdict after tool rounds");
+          return this.parse(msg?.content, c.tokenAddress) ?? unknown("malformed AI response");
+        }
+        return unknown("no final verdict after tool rounds");
+      });
     } catch (err) {
-      const e = err as Error;
+      const e = err instanceof Error ? err : new Error(String(err));
       this.log.warn("AI veto call error", { token: c.tokenAddress, error: e.message });
       return unknown(e.name === "AbortError" ? "timeout" : "network error");
     }
   }
 
-  private async request(token: string, messages: ChatMessage[], timeoutMs: number): Promise<ChatResponse> {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-    try {
-      const res = await fetch(`${this.cfg.baseUrl.replace(/\/$/, "")}/chat/completions`, {
-        method: "POST",
-        signal: controller.signal,
-        headers: {
-          "content-type": "application/json",
-          ...(this.cfg.apiKey ? { authorization: `Bearer ${this.cfg.apiKey}` } : {}),
-        },
-        body: JSON.stringify({
-          model: this.cfg.model,
-          temperature: 0,
-          // reasoning models spend tokens on thinking before the JSON —
-          // 200 truncated every verdict to empty content (finish_reason length)
-          max_tokens: 2000,
-          messages,
-          ...this.toolField(),
-        }),
-      });
-      if (!res.ok) {
-        const detail = await res.text().then((t) => t.slice(0, 200)).catch(() => "");
-        this.log.warn("AI veto call failed", { status: res.status, token, error: detail });
-        throw new Error(`HTTP ${res.status}${detail ? `: ${detail}` : ""}`);
-      }
-      return parseChatCompletion(await res.text());
-    } finally {
-      clearTimeout(timer);
+  private async request(token: string, messages: ChatMessage[], signal: AbortSignal): Promise<ChatResponse> {
+    const acknowledge = this.budget.beginRequest();
+    const res = await fetch(`${this.cfg.baseUrl.replace(/\/$/, "")}/chat/completions`, {
+      method: "POST",
+      signal,
+      headers: {
+        "content-type": "application/json",
+        ...(this.cfg.apiKey ? { authorization: `Bearer ${this.cfg.apiKey}` } : {}),
+      },
+      body: JSON.stringify({
+        model: this.cfg.model,
+        temperature: 0,
+        // reasoning models spend tokens on thinking before the JSON -
+        // 200 truncated every verdict to empty content (finish_reason length)
+        max_tokens: 2000,
+        messages,
+        ...this.toolField(),
+      }),
+    });
+    if (!res.ok) {
+      const detail = await res.text().then((t) => t.slice(0, 200)).catch(() => "");
+      this.log.warn("AI veto call failed", { status: res.status, token, error: detail });
+      throw new Error(`HTTP ${res.status}${detail ? `: ${detail}` : ""}`);
     }
+    const body = parseChatCompletion(await res.text());
+    acknowledge(body.usage);
+    return body;
   }
 
   /** `tools` only when enabled AND at least one tool is actually wired. */
@@ -308,20 +363,21 @@ export class AiVetoAgent {
   private async runTool(tc: NonNullable<ChatMessage["tool_calls"]>[number], c: AiCandidate): Promise<string> {
     const name = tc.function.name as keyof AiToolContext;
     const fn = this.tools[name];
-    if (typeof fn !== "function") return `error: unknown tool ${tc.function.name}`;
+    if (!this.cfg.toolsEnabled || !TOOL_DEFS.some((t) => t.function.name === name) || typeof fn !== "function") return `error: unknown tool ${tc.function.name}`;
     let args: { token?: unknown } = {};
     try {
-      args = JSON.parse(tc.function.arguments || "{}") as { token?: unknown };
+      const parsed: unknown = JSON.parse(tc.function.arguments || "{}");
+      if (parsed && typeof parsed === "object") args = parsed;
     } catch {
       // malformed arguments → fall back to the candidate token
     }
-    const token = typeof args.token === "string" && args.token.length > 0 ? args.token : c.tokenAddress;
+    const token = typeof args.token === "string" && args.token.trim().length > 0 ? args.token.trim() : c.tokenAddress;
     try {
       const result = await fn(token, c.chain);
       const text = JSON.stringify(result ?? null);
       return text.length > TOOL_RESULT_MAX_CHARS ? text.slice(0, TOOL_RESULT_MAX_CHARS) : text;
     } catch (err) {
-      return `error: ${(err as Error).message}`;
+      return `error: ${err instanceof Error ? err.message : String(err)}`;
     }
   }
 
