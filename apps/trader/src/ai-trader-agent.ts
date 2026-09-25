@@ -123,8 +123,11 @@ const SYSTEM_PROMPT =
   "screens see; jevScore, when present, is an independent classifier's 0-1 entry score from " +
   "a rug/momentum review — " +
   "the same advisory role. ENTER only with evidence of positive expected net value after " +
-  "trading fees, slippage, and AI operating costs. Abstention preserves capital when evidence " +
-  "or the after-cost opportunity is insufficient; there is no requirement to trade. " +
+  "trading fees and slippage (AI operating costs are a budgeted fixed overhead — never net them " +
+  "against an individual entry). Abstention preserves capital when the evidence " +
+  "is insufficient; there is no requirement to trade, but in PAPER mode a plausible entry " +
+  "with adequate evidence teaches more than abstention — do not abstain solely because " +
+  "the edge is small or the sample is thin. " +
   "You may call the provided read-only data tools to refresh data on any token before acting. " +
   "Always specify the token's chain in tool calls. Provider errors, missing pairs, and unknown " +
   "data are missing evidence, not verified liquidity collapse or a rug. " +
