@@ -98,7 +98,7 @@ export class JevAgent {
     if (candidates.length === 0 || this.budget.overCostCap()) return new Map();
     try {
       return await withAiDeadline(this.cfg.jevTimeoutMs, options, async (signal, check) => {
-        const picked = candidates.slice(0, MAX_CANDIDATES);
+        const picked = candidates.slice(0, Math.min(MAX_CANDIDATES, this.cfg.maxCandidatesPerCycle));
         const questions: Record<string, { type: string; instructions: string; criteria?: string[] }> = {};
         picked.forEach((c, i) => {
           const t = `candidate ${i} (${card(c, i).token}${c.symbol ? " " + c.symbol : ""})`;

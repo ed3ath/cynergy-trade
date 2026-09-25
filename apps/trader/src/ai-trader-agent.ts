@@ -103,6 +103,7 @@ export interface AiTraderSnapshot {
 
 const MAX_TOOL_ROUNDS = 3;        // ponytail: raise if the agent needs deeper research
 const TOOL_RESULT_MAX_CHARS = 4_000;
+const MAX_COMPLETION_TOKENS = 2_000;
 const TEXT_MAX = 300;
 const LESSON_MAX = 200;
 const STOP_LOSS_PCT: [number, number] = [1, 50];
@@ -149,12 +150,83 @@ const SYSTEM_PROMPT =
   "with its evidence, replacing stale ones). Omit lessons when nothing changed. " +
   "Respond with STRICT JSON only, no markdown fences: " +
   '{"actions":[{"type":"ENTER","tokenAddress":"...","chain":"solana|ton|bsc|base|polygon|arbitrum",' +
-  '"confidence":0.0,"rationale":"one short sentence","profile":"scalp|shortterm",' +
+  '"confidence":0.0,"rationale":"one short sentence",' +
   '"suggestedStopLossPct":10,"suggestedTakeProfitPct":5},' +
   '{"type":"EXIT","tokenAddress":"...","chain":"...","positionId":"...","rationale":"..."},' +
   '{"type":"TIGHTEN","tokenAddress":"...","chain":"...","positionId":"...","tightenStopLossPct":5,' +
   '"tightenTp1Pct":3,"tightenTrailingPct":8}],"summary":"one sentence market read",' +
   '"lessons":["short actionable rule learned from a loss"]}';
+
+function compactCandidate(candidate: AiCandidate): AiCandidate {
+  return {
+    tokenAddress: candidate.tokenAddress,
+    chain: candidate.chain,
+    ...(candidate.symbol ? { symbol: candidate.symbol } : {}),
+    ...(candidate.market ? {
+      market: {
+        priceUsd: candidate.market.priceUsd,
+        ...(candidate.market.marketCapUsd !== undefined ? { marketCapUsd: candidate.market.marketCapUsd } : {}),
+        volumeUsd5m: candidate.market.volumeUsd5m,
+        volumeUsd1h: candidate.market.volumeUsd1h,
+        priceChange5m: candidate.market.priceChange5m,
+        priceChange1h: candidate.market.priceChange1h,
+        buyVolumeUsd1m: candidate.market.buyVolumeUsd1m,
+        sellVolumeUsd1m: candidate.market.sellVolumeUsd1m,
+        uniqueBuyers1m: candidate.market.uniqueBuyers1m,
+        uniqueSellers1m: candidate.market.uniqueSellers1m,
+      },
+    } : {}),
+    ...(candidate.liquidity ? {
+      liquidity: {
+        liquidityUsd: candidate.liquidity.liquidityUsd,
+        poolAgeMs: candidate.liquidity.poolAgeMs,
+        estimatedSlippageBps500: candidate.liquidity.estimatedSlippageBps500,
+        liquidityChange5m: candidate.liquidity.liquidityChange5m,
+      },
+    } : {}),
+    ...(candidate.holders ? {
+      holders: {
+        totalHolders: candidate.holders.totalHolders,
+        top10Pct: candidate.holders.top10Pct,
+        creatorPct: candidate.holders.creatorPct,
+        insiderPct: candidate.holders.insiderPct,
+        sniperPct: candidate.holders.sniperPct,
+        bundlerPct: candidate.holders.bundlerPct,
+      },
+    } : {}),
+    ...(candidate.security ? {
+      security: {
+        status: candidate.security.status,
+        score: candidate.security.score,
+        reasons: candidate.security.reasons.slice(0, 5),
+      },
+    } : {}),
+    ...(candidate.scores ? {
+      scores: {
+        opportunity: candidate.scores.opportunity,
+        security: candidate.scores.security,
+        momentum: candidate.scores.momentum,
+        risk: candidate.scores.risk,
+      },
+    } : {}),
+    ...(candidate.strategyViews ? {
+      strategyViews: candidate.strategyViews.map((view) => ({
+        strategyId: view.strategyId,
+        decision: view.decision,
+        confidence: view.confidence,
+        reasons: view.reasons.slice(0, 3),
+      })),
+    } : {}),
+    ...(candidate.jevScore !== undefined ? { jevScore: candidate.jevScore } : {}),
+  };
+}
+
+function compactSnapshot(snapshot: AiTraderSnapshot, maxCandidates: number): AiTraderSnapshot {
+  return {
+    ...snapshot,
+    candidates: snapshot.candidates.slice(0, maxCandidates).map(compactCandidate),
+  };
+}
 
 export class AiTraderAgent {
   constructor(
@@ -184,7 +256,7 @@ export class AiTraderAgent {
       return await withAiDeadline(this.cfg.timeoutMs, options, async (signal, check) => {
         const messages: ChatMessage[] = [
           { role: "system", content: SYSTEM_PROMPT },
-          { role: "user", content: JSON.stringify(snapshot) },
+          { role: "user", content: JSON.stringify(compactSnapshot(snapshot, this.cfg.maxCandidatesPerCycle)) },
         ];
         for (let round = 0; round <= MAX_TOOL_ROUNDS; round++) {
           check();
@@ -229,7 +301,7 @@ export class AiTraderAgent {
         model: this.cfg.model,
         temperature: 0,
         // reasoning models spend tokens on thinking before the actions JSON
-        max_tokens: 4000,
+        max_tokens: MAX_COMPLETION_TOKENS,
         messages,
         ...this.toolField(),
       }),
@@ -340,7 +412,9 @@ export class AiTraderAgent {
         ? Math.min(1, Math.max(0, r["confidence"]))
         : undefined;
       if (confidence !== undefined) action.confidence = confidence;
-      if (r["profile"] === "scalp" || r["profile"] === "shortterm") action.profile = r["profile"];
+      if (r["chain"] === "ton" && (r["profile"] === "scalp" || r["profile"] === "shortterm")) {
+        action.profile = r["profile"];
+      }
     }
     if (r["type"] === "ENTER" || r["type"] === "TIGHTEN") {
       const sl = num(r[r["type"] === "ENTER" ? "suggestedStopLossPct" : "tightenStopLossPct"], STOP_LOSS_PCT);

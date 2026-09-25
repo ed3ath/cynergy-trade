@@ -605,7 +605,7 @@ if (aiAgent) {
   });
 }
 const aiTrader = config.ai.enabled && config.ai.autonomy === "auto"
-  ? new AiTraderAgent(config.ai, log.child({ component: "ai-trader" }), aiBudget, aiTools)
+  ? new AiTraderAgent(config.ai, log.child({ component: "ai-trader" }), aiBudget)
   : null;
 if (aiTrader) {
   aiLog.info("AIautonomy enabled", {
@@ -1488,21 +1488,34 @@ async function buildAiProposal({ signal, deadlineAt }: { signal: AbortSignal; sn
   if (!aiTrader || shuttingDown) return empty("AI inactive");
   if (!config.ai.liveEnabled && config.trading.mode === "LIVE") return empty("AI LIVE disabled");
 
+  let stage = "snapshot";
   try {
     const agg = aggregatePortfolio();
     const openPositions = runtimes.flatMap((rt) => rt.positions.getExposurePositions());
-    const candidates: AiCandidate[] = runtimes.flatMap((rt) =>
-      rt.scanner.getTradeCandidates().slice(0, 5).map((c) => {
+    const candidatePools = runtimes.map((rt) =>
+      rt.scanner.getTradeCandidates().slice(0, config.ai.maxCandidatesPerCycle).map((c) => {
         const aiCand: AiCandidate = structuredClone(c);
+        const symbol = c.liquidity?.baseTokenSymbol;
+        if (symbol) aiCand.symbol = symbol;
         const views = strategyViewsFor(rt.chain, c.tokenAddress);
         if (views) aiCand.strategyViews = views;
         return aiCand;
       }));
+    const candidates: AiCandidate[] = [];
+    for (let rank = 0; rank < config.ai.maxCandidatesPerCycle; rank++) {
+      for (const pool of candidatePools) {
+        const candidate = pool[rank];
+        if (candidate) candidates.push(candidate);
+        if (candidates.length >= config.ai.maxCandidatesPerCycle) break;
+      }
+      if (candidates.length >= config.ai.maxCandidatesPerCycle) break;
+    }
     // Jev pre-filter: one batched classifier call before the main AI — weak
     // candidates never reach it (cheaper cycles), survivors carry jevScore
     // (guidance for the model, sizing damper for the host). Failures = no
     // scores = pass-through, so a dead Jev never blocks entries.
     if (jevAgent && candidates.length > 0) {
+      stage = "Jev review";
       const jevReviews = await jevAgent.score(candidates, { signal, deadlineAt });
       signal.throwIfAborted();
       const pct = (p: number | undefined): string => (p === undefined ? "?" : Math.round(p * 100) + "%");
@@ -1535,6 +1548,7 @@ async function buildAiProposal({ signal, deadlineAt }: { signal: AbortSignal; sn
     }
     // Closed-trade window: 200 per chain feeds the loss stats, the newest 20
     // ride along as recentTrades for concrete pattern-matching.
+    stage = "closed trades";
     const closed = db && config.trading.mode === "PAPER"
       ? (await Promise.all(runtimes.map((rt) =>
           journal.getClosedTrades("PAPER", rt.chain, 200, { accountingVersion: 2 }))))
@@ -1605,14 +1619,16 @@ async function buildAiProposal({ signal, deadlineAt }: { signal: AbortSignal; sn
     })) : undefined;
     if (copySignals && copySignals.length > 0) snapshot.copySignals = copySignals;
 
+    stage = "main AI proposal";
     const result = await aiTrader.propose(snapshot, { signal, deadlineAt });
     signal.throwIfAborted();
     return { ...result, dataComplete: true, closedIds: closed.map((r) => r.id), candidates: candidates.map((c) => ({
       tokenAddress: c.tokenAddress, chain: c.chain, ...(c.jevScore !== undefined ? { jevScore: c.jevScore } : {}),
     })) };
   } catch (err) {
-    aiLog.warn("AItrader cycle failed", { error: (err as Error).message });
-    return empty("AI research unavailable");
+    const e = err instanceof Error ? err : new Error(String(err));
+    aiLog.warn("AItrader cycle failed", { stage, error: e.message });
+    return empty(`${stage} ${e.name === "AbortError" ? "timed out" : "failed"}`);
   }
 }
 
@@ -1664,7 +1680,6 @@ async function runAiAction(action: AiAction, candidates: readonly AiCandidateHin
     if (held.some((p) => p.strategyId === AI_STRATEGY_ID)) return skip("ai slot already held");
     if (blacklist.isListed(action.tokenAddress)) return skip("token blacklisted (sus)");
     if (onCooldown) return skip("token cooldown");
-    if (action.profile && (!config.copytrade.enabled || action.chain !== "ton")) return skip("copy profile not enabled");
     // Profiles are for copy-trade slots only: honored when the token traces to a
     // fresh (age-filtered) tracked-wallet BUY, not just because the model asked —
     // otherwise `profile:"scalp"` on any token would bypass AI_MAX_OPEN_POSITIONS.
@@ -1674,7 +1689,7 @@ async function runAiAction(action: AiAction, candidates: readonly AiCandidateHin
         .filter((s) => s.swap.side === "BUY" && nowSec >= s.swap.timestampSec && nowSec - s.swap.timestampSec <= config.copytrade.maxSignalAgeSec)
         .map((s) => s.swap.jettonMaster),
     );
-    const profile = action.chain === "ton" && action.profile && trackedBuys.has(action.tokenAddress)
+    const profile = action.chain === "ton" && config.copytrade.enabled && action.profile && trackedBuys.has(action.tokenAddress)
       ? COPYTRADE_PROFILES[action.profile]
       : null;
     if (profile) {

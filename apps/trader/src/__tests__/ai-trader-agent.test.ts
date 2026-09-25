@@ -79,6 +79,72 @@ describe("AiTraderAgent", () => {
     expect(summary).toBe("risk-on, rotating");
   });
 
+  it("preserves copy profiles only for TON actions", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(okResponse(
+      '{"actions":[' +
+      '{"type":"ENTER","tokenAddress":"SolToken","chain":"solana","profile":"scalp"},' +
+      '{"type":"ENTER","tokenAddress":"BaseToken","chain":"base","profile":"shortterm"},' +
+      '{"type":"ENTER","tokenAddress":"TonToken","chain":"ton","profile":"shortterm"}],' +
+      '"summary":"profile-qualified"}'));
+    const { actions } = await agent().propose(snapshot());
+    expect(actions.map((action) => action.profile)).toEqual([undefined, undefined, "shortterm"]);
+  });
+
+  it("caps and compacts candidate evidence before the model request", async () => {
+    const source = snapshot();
+    source.candidates = Array.from({ length: 12 }, (_, index) => ({
+      tokenAddress: `Token${index}`,
+      chain: "solana" as const,
+      symbol: `SYM${index}`,
+      market: {
+        priceUsd: index + 1,
+        marketCapUsd: 1_000_000,
+        volumeUsd5m: 10,
+        volumeUsd1h: 100,
+        priceChange5m: 1,
+        priceChange1h: 2,
+        buyVolumeUsd1m: 5,
+        sellVolumeUsd1m: 4,
+        uniqueBuyers1m: 3,
+        uniqueSellers1m: 2,
+      },
+      ...({
+        status: "TRADE_CANDIDATE",
+        features: { oversized: "must-not-reach-model" },
+        liquidity: {
+          liquidityUsd: 100_000,
+          poolAgeMs: 60_000,
+          estimatedSlippageBps500: 50,
+          liquidityChange5m: 1,
+          oversized: "nested-liquidity-must-not-reach-model",
+        },
+        scores: {
+          opportunity: 80,
+          security: 90,
+          momentum: 70,
+          risk: 60,
+          oversized: "nested-score-must-not-reach-model",
+        },
+      } as object),
+    }));
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(okResponse('{"actions":[],"summary":"bounded"}'));
+    await agent(cfg({ maxCandidatesPerCycle: 2 })).propose(source);
+    const request = JSON.parse(String(fetchSpy.mock.calls[0]?.[1]?.body));
+    const payload = JSON.parse(request.messages[1].content) as { candidates: Record<string, unknown>[] };
+    expect(payload.candidates).toHaveLength(2);
+    expect(payload.candidates[0]).toMatchObject({
+      tokenAddress: "Token0",
+      chain: "solana",
+      symbol: "SYM0",
+      market: expect.objectContaining({ priceUsd: 1 }),
+    });
+    expect(request.messages[1].content).not.toContain("oversized");
+    expect(request.messages[1].content).not.toContain("status");
+    expect(request.messages[1].content).not.toContain("nested-liquidity-must-not-reach-model");
+    expect(request.messages[1].content).not.toContain("nested-score-must-not-reach-model");
+    expect(request).toMatchObject({ max_tokens: 2000 });
+  });
+
   it("drops invalid actions and keeps valid ones", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(okResponse(
       '{"actions":[' +
@@ -305,7 +371,7 @@ describe("AiTraderAgent", () => {
     expect(prompt).not.toContain("passing on a good setup loses money");
     expect(prompt).toContain("empty action list is a valid, cost-aware decision");
     expect(prompt).toContain("missing evidence, not verified liquidity collapse");
-    expect(request).toMatchObject({ model: "test-model", temperature: 0, max_tokens: 4000 });
+    expect(request).toMatchObject({ model: "test-model", temperature: 0, max_tokens: 2000 });
     expect(fetchSpy.mock.calls[0]?.[1]?.headers).toMatchObject({ authorization: "Bearer sk-test" });
   });
 

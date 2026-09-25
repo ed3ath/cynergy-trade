@@ -124,6 +124,18 @@ describe("JevAgent", () => {
     expect(state.tokens[0]!.token).toBe("TokVer…6789");
   });
 
+  it("honors the configured cycle candidate cap", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ answers: {} })));
+    const candidates = Array.from({ length: 15 }, (_, index) => cand(`Token${index}`));
+    await agent(cfg({ maxCandidatesPerCycle: 3 })).score(candidates);
+    const body = JSON.parse((fetchSpy.mock.calls[0]?.[1] as RequestInit).body as string) as {
+      questions: Record<string, unknown>;
+      state: string;
+    };
+    expect(Object.keys(body.questions)).toHaveLength(9);
+    expect(JSON.parse(body.state).tokens).toHaveLength(3);
+  });
+
   it("returns an empty map on HTTP failure, timeout, or garbage — never throws", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("nope", { status: 402 }));
     expect(await agent().score([cand("TokA")])).toEqual(new Map());
