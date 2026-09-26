@@ -3,6 +3,7 @@ export * from "./risk/risk-engine.js";
 export * from "./risk/emergency-controller.js";
 export * from "./risk/strategy-performance.js";
 export * from "./db/database.js";
+export * from "./db/sqlite-database.js";
 export * from "./db/journal.js";
 export * from "./db/pg-emergency-persistence.js";
 export * from "./db/null-journal.js";

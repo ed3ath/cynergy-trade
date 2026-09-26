@@ -22,6 +22,19 @@ import type {
 } from "@autonomous-trader/shared";
 import type { Database } from "./database.js";
 
+/** JSON-array columns come back parsed (pg jsonb) or as raw text (SQLite TEXT).
+ *  Never spread/inspect the raw value before normalising it. */
+function asStringArray(value: string[] | string | null | undefined): string[] {
+  if (Array.isArray(value)) return value;
+  if (typeof value !== "string") return [];
+  try {
+    const parsed: unknown = JSON.parse(value);
+    return Array.isArray(parsed) ? (parsed as string[]) : [];
+  } catch {
+    return [];
+  }
+}
+
 export interface AccountingFilter {
   mode: TradeMode;
   chain?: Chain;
@@ -267,8 +280,7 @@ export class JournalRepository {
         position.accountingVersion ?? 1, position.initialSizeUsd ?? null, position.initialSizeTokens?.toString() ?? null,
         position.entryFeeUsd ?? null, position.remainingEntryFeeUsd ?? null, position.realizedPnlUsd ?? 0,
         position.realizedGrossPnlUsd ?? null, position.totalFeesUsd ?? null,
-        position.exitOrderId ?? null, position.closedAt ?? null, position.unrealizedPnlUsd,
-        position.unrealizedPnlPct, position.drawdownFromPeakPct, JSON.stringify(position.dataQuality ?? [])],
+        position.exitOrderId ?? null, position.closedAt ?? null,        position.unrealizedPnlUsd, position.unrealizedPnlPct, position.drawdownFromPeakPct, JSON.stringify(position.dataQuality ?? [])],
     );
   }
 
@@ -550,7 +562,7 @@ export class JournalRepository {
         sizeTokens: r.size_tokens !== null ? BigInt(r.size_tokens) : 0n,
         accountingVersion: r.accounting_version,
         realizedPnlUsd: Number(r.realized_pnl_usd),
-        dataQuality: r.data_quality ?? [],
+        dataQuality: asStringArray(r.data_quality),
         stopLoss: parseFloat(r.stop_loss),
         peakPrice: r.peak_price !== null ? parseFloat(r.peak_price) : parseFloat(r.entry_price),
         unrealizedPnlUsd: r.unrealized_pnl_usd !== null ? parseFloat(r.unrealized_pnl_usd) : 0,
@@ -620,31 +632,34 @@ export class JournalRepository {
        LIMIT $3`,
       [mode, chain, limit, filter.from ?? null, filter.to ?? null, filter.strategyId ?? null, filter.accountingVersion ?? null],
     );
-    return rows.map((r) => ({
-      id: r.id,
-      tokenAddress: r.token_address,
-      chain: r.chain as Chain,
-      strategyId: r.strategy_id,
-      mode,
-      accountingVersion: r.accounting_version,
-      entryPrice: parseFloat(r.entry_price),
-      sizeUsd: parseFloat(r.size_usd),
-      sizeTokens: r.size_tokens,
-      initialSizeUsd: r.initial_size_usd === null ? null : Number(r.initial_size_usd),
-      pnlUsd: r.data_quality?.includes("legacy-realized-pnl-unknown") ? null : parseFloat(r.realized_pnl_usd),
-      pnlPct: r.accounting_version === 2 && Number(r.initial_size_usd) > 0
-        ? Number(r.realized_pnl_usd) / Number(r.initial_size_usd) * 100
-        : r.unrealized_pnl_pct !== null ? parseFloat(r.unrealized_pnl_pct) : 0,
-      realizedGrossPnlUsd: r.realized_gross_pnl_usd === null ? null : Number(r.realized_gross_pnl_usd),
-      totalFeesUsd: r.total_fees_usd === null ? null : Number(r.total_fees_usd),
-      entryOrderId: r.entry_order_id,
-      exitOrderId: r.exit_order_id,
-      dataQuality: r.accounting_version === 1
-        ? [...new Set([...(r.data_quality ?? []), "legacy-unreconciled"])] : r.data_quality ?? [],
-      exitReason: r.exit_reason,
-      openedAt: new Date(r.opened_at),
-      closedAt: r.closed_at !== null ? new Date(r.closed_at) : null,
-    }));
+    return rows.map((r) => {
+      const dataQuality = asStringArray(r.data_quality);
+      return {
+        id: r.id,
+        tokenAddress: r.token_address,
+        chain: r.chain as Chain,
+        strategyId: r.strategy_id,
+        mode,
+        accountingVersion: r.accounting_version,
+        entryPrice: parseFloat(r.entry_price),
+        sizeUsd: parseFloat(r.size_usd),
+        sizeTokens: r.size_tokens,
+        initialSizeUsd: r.initial_size_usd === null ? null : Number(r.initial_size_usd),
+        pnlUsd: dataQuality.includes("legacy-realized-pnl-unknown") ? null : parseFloat(r.realized_pnl_usd),
+        pnlPct: r.accounting_version === 2 && Number(r.initial_size_usd) > 0
+          ? Number(r.realized_pnl_usd) / Number(r.initial_size_usd) * 100
+          : r.unrealized_pnl_pct !== null ? parseFloat(r.unrealized_pnl_pct) : 0,
+        realizedGrossPnlUsd: r.realized_gross_pnl_usd === null ? null : Number(r.realized_gross_pnl_usd),
+        totalFeesUsd: r.total_fees_usd === null ? null : Number(r.total_fees_usd),
+        entryOrderId: r.entry_order_id,
+        exitOrderId: r.exit_order_id,
+        dataQuality: r.accounting_version === 1
+          ? [...new Set([...dataQuality, "legacy-unreconciled"])] : dataQuality,
+        exitReason: r.exit_reason,
+        openedAt: new Date(r.opened_at),
+        closedAt: r.closed_at !== null ? new Date(r.closed_at) : null,
+      };
+    });
   }
 
   /** Date bounds are half-open [from, to), and never limited to dashboard history. */
@@ -681,7 +696,7 @@ export class JournalRepository {
       realizedGrossPnlDeltaUsd: row.realized_gross_pnl_delta_usd === null ? null : Number(row.realized_gross_pnl_delta_usd),
       soldCostBasisUsd: row.sold_cost_basis_usd === null ? null : Number(row.sold_cost_basis_usd),
       allocatedEntryFeeUsd: row.allocated_entry_fee_usd === null ? null : Number(row.allocated_entry_fee_usd),
-      dataQuality: row.data_quality ?? [],
+      dataQuality: asStringArray(row.data_quality),
     }));
   }
 

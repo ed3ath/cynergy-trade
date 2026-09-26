@@ -19,7 +19,9 @@ PAPER-only), `HELIUS_API_KEY`,
 `MONITOR_TOKEN` (required for emergency POSTs), `SERVER_PORT` (default 3000 — must
 match the watchdog's `MONITOR_PORT`).
 
-No postgres running → journal falls back to NullJournal with a warning. Expected, not a failure.
+No database configured → journal falls back to NullJournal with a warning. Expected, not a failure.
+(SQLite by default: `data/trader.db`, self-migrated at boot; `DATABASE_URL=postgresql://…`
+switches dialect — `infra/migrations` vs `infra/migrations-sqlite`.)
 
 ## Production boot (24/7, this machine)
 
@@ -64,7 +66,7 @@ curl -X POST -H "Authorization: Bearer $MONITOR_TOKEN" "localhost:3000/emergency
 ```
 
 Without `MONITOR_TOKEN` set, POSTs are refused (fail-safe). Kill switch persists
-across restarts when postgres is up.
+across restarts when the database is up (SQLite default, postgres when DATABASE_URL says so).
 
 ## NEVER
 

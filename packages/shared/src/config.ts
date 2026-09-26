@@ -184,7 +184,9 @@ export const AppConfigSchema = z.object({
   ai: AIConfigSchema.default({}),
   copytrade: CopyTradeConfigSchema.default({}),
   database: z.object({
-    url: z.string().default("postgresql://trader:trader@localhost:5432/trader"),
+    // SQLite (node:sqlite, zero-dependency) by default; set DATABASE_URL to
+    // postgresql://… to switch dialect (infra/migrations vs infra/migrations-sqlite).
+    url: z.string().default("sqlite:data/trader.db"),
     poolMin: z.number().int().positive().default(2),
     poolMax: z.number().int().positive().default(10),
   }),
@@ -295,7 +297,7 @@ export function loadConfig(overrides: Partial<Record<string, unknown>> = {}): Ap
       maxSignalAgeSec: parseInt(process.env["COPYTRADE_MAX_SIGNAL_AGE_SEC"] ?? "600", 10),
     },
     database: {
-      url: process.env["DATABASE_URL"] ?? "postgresql://trader:trader@localhost:5432/trader",
+      url: process.env["DATABASE_URL"] ?? "sqlite:data/trader.db",
     },
     redis: {
       url: process.env["REDIS_URL"] ?? "redis://localhost:6379",

@@ -7,10 +7,12 @@ import { fileURLToPath } from "node:url";
 import { Database, runMigrations } from "../../packages/core/dist/index.js";
 
 const __dir = dirname(fileURLToPath(import.meta.url));
-const MIGRATIONS_DIR = join(__dir, "../migrations");
-const DATABASE_URL = process.env["DATABASE_URL"] ?? "postgresql://trader:trader@localhost:5432/trader";
+const DATABASE_URL = process.env["DATABASE_URL"] ?? "sqlite:data/trader.db";
 
 const db = new Database(DATABASE_URL);
+// Dialect owns its migration dir: Postgres DDL uses enums/ALTER TYPE, SQLite
+// uses TEXT/AUTOINCREMENT — same filenames, one history.
+const MIGRATIONS_DIR = join(__dir, db.dialect === "sqlite" ? "../migrations-sqlite" : "../migrations");
 try {
   await db.connect();
   const n = await runMigrations(db, MIGRATIONS_DIR);

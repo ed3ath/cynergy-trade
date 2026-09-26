@@ -26,7 +26,7 @@ DISCOVERY → SCANNER → STRATEGY ENSEMBLE → RISK ENGINE → EXECUTION → PO
 |---|---|
 | `@autonomous-trader/shared` | Domain types, config (zod-validated), structured logger, ID generators |
 | `@autonomous-trader/providers` | Provider interfaces + mock and live implementations (GoPlus, Jupiter, Birdeye, SolanaRPC, Raydium discovery, TON: TonAPI + GeckoTerminal, EVM: GeckoTerminal + DexScreener + GoPlus), health tracking |
-| `@autonomous-trader/core` | State machines, risk engine, emergency controller, performance tracker, regime detector, Postgres journal |
+| `@autonomous-trader/core` | State machines, risk engine, emergency controller, performance tracker, regime detector, trade journal (SQLite by default via `node:sqlite`, Postgres when `DATABASE_URL` is `postgresql://…`) |
 | `@autonomous-trader/scanner` | Token lifecycle, feature engine, hard-gate filters, scoring |
 | `@autonomous-trader/strategy` | Strategy interface, ensemble engine (Fresh Momentum, Micro Scalp) |
 | `@autonomous-trader/execution` | Paper/Shadow/Live execution routers, durable idempotency guard, wallet signing |

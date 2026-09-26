@@ -1,22 +1,41 @@
 /**
  * Idempotent migration runner — shared by trader boot and the CLI script.
  * Applies *.sql from a directory in order, tracked in _migrations.
+ * Postgres and SQLite DDL diverge (enum types, ALTER TYPE, BIGSERIAL…), so
+ * each dialect ships its own directory with identical filenames.
  */
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createLogger } from "@autonomous-trader/shared";
 import type { Database } from "./database.js";
+import type { Dialect } from "./sqlite-database.js";
 
 const log = createLogger({ component: "migrations" });
 
+/** Migrations live in infra/migrations (Postgres) or infra/migrations-sqlite,
+ *  both relative to the repo root (process.cwd() at trader boot). */
+export function resolveMigrationsDir(cwd: string, dialect: Dialect): string {
+  return join(cwd, dialect === "sqlite" ? "infra/migrations-sqlite" : "infra/migrations");
+}
+
 export async function runMigrations(db: Database, migrationsDir: string): Promise<number> {
-  await db.query(`
-    CREATE TABLE IF NOT EXISTS _migrations (
-      id          SERIAL      PRIMARY KEY,
-      filename    TEXT        NOT NULL UNIQUE,
-      applied_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    )
-  `);
+  if (db.dialect === "sqlite") {
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS _migrations (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        filename    TEXT    NOT NULL UNIQUE,
+        applied_at  TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+      )
+    `);
+  } else {
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS _migrations (
+        id          SERIAL      PRIMARY KEY,
+        filename    TEXT        NOT NULL UNIQUE,
+        applied_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+  }
 
   const { rows } = await db.query<{ filename: string }>(
     "SELECT filename FROM _migrations ORDER BY id",

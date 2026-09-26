@@ -23,7 +23,7 @@ const minRows = parseInt(flag("min-rows") ?? "20", 10);
 // regime_history rows joined by entry time — until that table has data, this
 // only measures strategy gate behavior across regimes.
 const regime = flag("regime") as MarketRegime | undefined;
-const dbUrl = process.env["DATABASE_URL"] ?? "postgresql://trader:trader@localhost:5432/trader";
+const dbUrl = process.env["DATABASE_URL"] ?? "sqlite:data/trader.db";
 
 const db = new Database(dbUrl, 1, 2);
 try {

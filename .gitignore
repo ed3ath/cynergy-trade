@@ -6,6 +6,7 @@ dist/
 *.key
 *.pem
 logs/
+data/
 .claude/worktrees/
 .turbo/
 .env.dev

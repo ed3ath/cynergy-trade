@@ -12,6 +12,7 @@ Autonomous multi-chain trading system (`TRADING_CHAIN` = comma list of `solana|t
 - `TRADING_MODE=LIVE` only after the Phase-6 checklist in `docs/deployment.md`. Enforced in code: Solana LIVE refuses to boot without a healthy Redis idempotency guard; TON LIVE is refused outright (no signing path); EVM chains (bsc/base/polygon/arbitrum/ethereum/avalanche/optimism/linea/mantle/blast/zksync/scroll) are PAPER-only — no quote aggregator or signing path yet
 - Risk limits are per-chain books (capital splits evenly across `TRADING_CHAIN`); cross-chain aggregate exposure is not gated — see the ponytail in `apps/trader/src/index.ts`
 - All env lives in the root `.env` — no per-app env files. `SERVER_PORT` must match the watchdog's `MONITOR_PORT` (default 3000)
+- Persistence defaults to SQLite (`node:sqlite`, `DATABASE_URL` unset → `data/trader.db`, auto-created + self-migrated). `DATABASE_URL=postgresql://…` selects the Postgres dialect; each has its own migrations dir with identical filenames (`infra/migrations-sqlite` vs `infra/migrations`, picked by `resolveMigrationsDir(cwd, db.dialect)`). Journal SQL is Postgres dialect and translated for SQLite in `packages/core/src/db/sqlite-database.ts` — big-integer columns (size_tokens, actual_input/output) are TEXT for exact round trips
 
 ## Coding standards
 

@@ -1,0 +1,3 @@
+-- EVM chain support (bsc, base, polygon, arbitrum). No-op on SQLite — chain
+-- is unconstrained TEXT (see 004). Exists to keep one migration history
+-- across dialects.

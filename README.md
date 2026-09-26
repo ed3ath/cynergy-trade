@@ -23,7 +23,9 @@ docker compose -f infra/docker/docker-compose.yml up -d
 pnpm db:migrate
 ```
 
-No postgres running → the journal falls back to NullJournal with a warning. Expected, not a failure.
+Journal defaults to SQLite (`data/trader.db`, auto-created and self-migrated — no
+postgres needed). `DATABASE_URL=postgresql://…` switches to Postgres; an unreachable
+database → NullJournal fallback with a warning. Expected, not a failure.
 
 ## Run
 
@@ -83,7 +85,7 @@ curl -X POST -H "Authorization: Bearer $MONITOR_TOKEN" localhost:3000/emergency/
 curl -X POST -H "Authorization: Bearer $MONITOR_TOKEN" "localhost:3000/emergency/resume?confirm=yes"
 ```
 
-Kill-switch state persists across restarts when postgres is up.
+Kill-switch state persists across restarts when the database is up (SQLite by default).
 
 ## Tests
 

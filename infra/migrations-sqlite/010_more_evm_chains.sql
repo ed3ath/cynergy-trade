@@ -1,0 +1,3 @@
+-- More EVM chains (ethereum, avalanche, optimism, linea, mantle, blast,
+-- zksync, scroll). No-op on SQLite — chain is unconstrained TEXT (see 004).
+-- Exists to keep one migration history across dialects.

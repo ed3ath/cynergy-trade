@@ -1,0 +1,4 @@
+-- TON chain support: widen the chain enum. No-op on SQLite — chain is plain
+-- TEXT with no CHECK constraint (it cannot be ALTERed; see 001 header), and
+-- 'ton' is already a valid value there. The file exists so both dialects
+-- share one migration history.

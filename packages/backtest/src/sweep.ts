@@ -23,7 +23,7 @@ const flag = (name: string) => {
 const chains = (flag("chain") ?? "ton,bsc,base").split(",") as Chain[];
 const minRows = parseInt(flag("min-rows") ?? "20", 10);
 const minTrades = parseInt(flag("min-trades") ?? "20", 10);
-const dbUrl = process.env["DATABASE_URL"] ?? "postgresql://trader:trader@localhost:5432/trader";
+const dbUrl = process.env["DATABASE_URL"] ?? "sqlite:data/trader.db";
 
 // Entry-gate grid — each axis independent, defaults always included as baseline
 const GRID: Record<string, number[]> = {

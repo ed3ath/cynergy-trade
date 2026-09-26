@@ -117,14 +117,14 @@ try {
   db = new Database(config.database.url, config.database.poolMin, config.database.poolMax);
   await db.connect();
   // Self-migrate: schema always current at boot (also covers fresh containers)
-  const { runMigrations } = await import("@autonomous-trader/core");
-  await runMigrations(db, join(process.cwd(), "infra/migrations"));
+  const { runMigrations, resolveMigrationsDir } = await import("@autonomous-trader/core");
+  await runMigrations(db, resolveMigrationsDir(process.cwd(), db.dialect));
   journal = new JournalRepository(db);
 } catch (err) {
   db = null;
   log.warn("Database unavailable — running without persistence", {
     error: (err as Error).message || String(err),
-    hint: "Run infra/docker/docker-compose.yml + npm run db:migrate for full journaling",
+    hint: "Default is sqlite:data/trader.db (auto-created); DATABASE_URL=postgresql://… needs infra/docker/docker-compose.yml",
   });
   journal = createNullJournal();
 }
@@ -2144,8 +2144,10 @@ const httpServerOpts: Parameters<typeof startHttpServer>[0] = {
       if (detail) break;
     }
     if (!detail) return null;
+    // Scope history to the chain whose scanner surfaced this detail — the same
+    // address can exist on several chains and their histories must not mix.
     const history = db
-      ? await (journal as JournalRepository).getMarketSnapshotHistory(token)
+      ? await (journal as JournalRepository).getMarketSnapshotHistory(token, 240, detail.chain)
       : [];
     return { ...detail, history };
   },
