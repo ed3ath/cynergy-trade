@@ -10,3 +10,4 @@ data/
 .claude/worktrees/
 .turbo/
 .env.dev
+.kilo/
