@@ -189,6 +189,38 @@ describe("AiTraderAgent", () => {
     expect(result.actions).toEqual([]);
   });
 
+  it("retries one transient gateway failure and still parses actions", async () => {
+    vi.useFakeTimers();
+    const fetchSpy = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response("overloaded", { status: 503 }))
+      .mockResolvedValueOnce(okResponse('{"actions":[],"summary":"recovered"}'));
+    const config = cfg({ costPer1kTokensUsd: 1 });
+    const log = createLogger({ t: "test" });
+    const budget = new AiBudget(config, log);
+    const pending = new AiTraderAgent(config, log, budget).propose(snapshot());
+    await vi.advanceTimersByTimeAsync(600); // first attempt fails, backoff, retry lands
+    const result = await pending;
+    expect(result.summary).toBe("recovered");
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    expect(budget.snapshot().calls).toBe(2); // every attempt is budgeted
+  });
+
+  it("does not retry permanent client errors", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("bad request", { status: 400 }));
+    const result = await agent().propose(snapshot());
+    expect(result.actions).toEqual([]);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("aborts a retry whose backoff crosses the conversation deadline", async () => {
+    vi.useFakeTimers();
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(new Response("overloaded", { status: 503 }));
+    const pending = agent(cfg({ timeoutMs: 20 })).propose(snapshot());
+    await vi.advanceTimersByTimeAsync(20);
+    expect(await pending).toEqual({ actions: [], summary: "timeout" });
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
   it("maps timeout (abort) to empty actions", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation((_u, init) =>
       new Promise((_res, rej) => {
@@ -371,6 +403,8 @@ describe("AiTraderAgent", () => {
     expect(prompt).not.toContain("passing on a good setup loses money");
     expect(prompt).toContain("empty action list is a valid, cost-aware decision");
     expect(prompt).toContain("missing evidence, not verified liquidity collapse");
+    expect(prompt).toContain("EXIT to realize it");
+    expect(prompt).toContain('"suggestedTakeProfitPct":3');
     expect(request).toMatchObject({ model: "test-model", temperature: 0, max_tokens: 2000 });
     expect(fetchSpy.mock.calls[0]?.[1]?.headers).toMatchObject({ authorization: "Bearer sk-test" });
   });

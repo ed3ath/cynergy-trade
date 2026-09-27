@@ -1674,6 +1674,9 @@ async function runAiAction(action: AiAction, candidates: readonly AiCandidateHin
     if (!rt) return skip(`chain ${action.chain} not trading`);
     if (emergency.isStopNewEntries()) return skip("new entries stopped");
     if (accountingProblems(rt).length > 0) return skip("accounting reconciliation required");
+    // The prompt demands a concrete evidence-based thesis per ENTER — a
+    // rationale-less entry is a compliance failure, not a sizing question.
+    if (!action.rationale || action.rationale.trim().length === 0) return skip("no rationale — thesis required");
     // One slot per (token, strategy): core strategies holding the token don't
     // block the AI's own slot — only an existing ai-autonomous position does.
     const held = rt.positions.getExposurePositions().filter((p) => p.tokenAddress === action.tokenAddress);
@@ -1736,7 +1739,7 @@ async function runAiAction(action: AiAction, candidates: readonly AiCandidateHin
       risks: [],
       invalidationConditions: [],
       suggestedStopLoss: price * (1 - (profile?.stopLossPct ?? action.suggestedStopLossPct ?? 10) / 100),
-      suggestedTakeProfit1: price * (1 + (profile?.takeProfit1Pct ?? action.suggestedTakeProfitPct ?? 5) / 100),
+      suggestedTakeProfit1: price * (1 + (profile?.takeProfit1Pct ?? action.suggestedTakeProfitPct ?? 3) / 100),
       ...(profile
         ? {
             suggestedTakeProfit2: price * (1 + profile.takeProfit2Pct / 100),

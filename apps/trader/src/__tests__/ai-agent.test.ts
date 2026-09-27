@@ -76,6 +76,18 @@ describe("AiVetoAgent", () => {
     expect((await agent.veto(candidate())).verdict).toBe("UNKNOWN");
   });
 
+  it("retries one transient gateway failure and still returns the verdict", async () => {
+    vi.useFakeTimers();
+    const fetchSpy = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response("overloaded", { status: 503 }))
+      .mockResolvedValueOnce(okResponse('{"verdict":"APPROVE","confidence":0.9,"reason":"ok"}'));
+    const agent = new AiVetoAgent(cfg(), createLogger({ t: "test" }));
+    const pending = agent.veto(candidate());
+    await vi.advanceTimersByTimeAsync(600);
+    expect(await pending).toMatchObject({ verdict: "APPROVE" });
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+
   it("maps timeout (abort) to UNKNOWN", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation((_u, init) =>
       new Promise((_res, rej) => {

@@ -17,7 +17,7 @@
  */
 import { CHAIN_VALUES, type AIConfig, type Chain, type Logger } from "@autonomous-trader/shared";
 import type { AiCandidate, AiConversationOptions, AiToolContext, ChatMessage, ChatResponse } from "./ai-agent.js";
-import { TOOL_DEFS, type ToolDef, parseChatCompletion, withAiDeadline } from "./ai-agent.js";
+import { TOOL_DEFS, type ToolDef, parseChatCompletion, requestChatCompletion, withAiDeadline } from "./ai-agent.js";
 import { AiBudget } from "./ai-budget.js";
 import type { LossStats } from "./loss-stats.js";
 
@@ -32,7 +32,7 @@ export interface AiAction {
   rationale?: string;
   /** ENTER: pct below entry price for the hard stop (default 10). */
   suggestedStopLossPct?: number;
-  /** ENTER: pct above entry for take-profit (default 5, matching policy). */
+  /** ENTER: pct above entry for take-profit (default 3 — realize-early policy). */
   suggestedTakeProfitPct?: number;
   /** EXIT: position id; tokenAddress+chain is the fallback resolver. */
   positionId?: string;
@@ -143,7 +143,9 @@ const SYSTEM_PROMPT =
   "concrete evidence-based thesis — a tracked wallet's BUY is a lead to verify (tools), not a reason " +
   "by itself, and their SELL of a token you hold is a take-profit hint; you may EXIT any position or " +
   "TIGHTEN its exits (raise stop, lower take-profit/trailing) but you can " +
-  "never loosen risk; prefer evidence-backed actions over marginal ones. An empty action list " +
+  "never loosen risk; this book values realized profit over open gain — once a " +
+  "position's unrealized gain reaches your take-profit thesis, EXIT to realize it " +
+  "instead of stacking TIGHTENs; prefer evidence-backed actions over marginal ones. An empty action list " +
   "is a valid, cost-aware decision. Avoid repeated research without new decision-relevant evidence. " +
   "LEARNING: evaluate reconciled net outcomes rather than a target win rate; a small sample " +
   "does not establish an edge. Refuse marginal entries that match supported loss lessons, " +
@@ -154,7 +156,7 @@ const SYSTEM_PROMPT =
   "Respond with STRICT JSON only, no markdown fences: " +
   '{"actions":[{"type":"ENTER","tokenAddress":"...","chain":"solana|ton|bsc|base|polygon|arbitrum",' +
   '"confidence":0.0,"rationale":"one short sentence",' +
-  '"suggestedStopLossPct":10,"suggestedTakeProfitPct":5},' +
+  '"suggestedStopLossPct":10,"suggestedTakeProfitPct":3},' +
   '{"type":"EXIT","tokenAddress":"...","chain":"...","positionId":"...","rationale":"..."},' +
   '{"type":"TIGHTEN","tokenAddress":"...","chain":"...","positionId":"...","tightenStopLossPct":5,' +
   '"tightenTp1Pct":3,"tightenTrailingPct":8}],"summary":"one sentence market read",' +
@@ -292,31 +294,18 @@ export class AiTraderAgent {
   }
 
   private async request(messages: ChatMessage[], signal: AbortSignal): Promise<ChatResponse> {
-    const acknowledge = this.budget.beginRequest();
-    const res = await fetch(`${this.cfg.baseUrl.replace(/\/$/, "")}/chat/completions`, {
-      method: "POST",
+    return requestChatCompletion({
+      baseUrl: this.cfg.baseUrl,
+      ...(this.cfg.apiKey ? { apiKey: this.cfg.apiKey } : {}),
+      model: this.cfg.model,
+      maxTokens: MAX_COMPLETION_TOKENS,
+      messages,
       signal,
-      headers: {
-        "content-type": "application/json",
-        ...(this.cfg.apiKey ? { authorization: `Bearer ${this.cfg.apiKey}` } : {}),
-      },
-      body: JSON.stringify({
-        model: this.cfg.model,
-        temperature: 0,
-        // reasoning models spend tokens on thinking before the actions JSON
-        max_tokens: MAX_COMPLETION_TOKENS,
-        messages,
-        ...this.toolField(),
-      }),
+      budget: this.budget,
+      log: this.log,
+      label: "AI trader",
+      ...this.toolField(),
     });
-    if (!res.ok) {
-      const detail = await res.text().then((t) => t.slice(0, 200)).catch(() => "");
-      this.log.warn("AI trader call failed", { status: res.status, error: detail });
-      throw new Error(`HTTP ${res.status}${detail ? `: ${detail}` : ""}`);
-    }
-    const body = parseChatCompletion(await res.text());
-    acknowledge(body.usage);
-    return body;
   }
 
   /** `tools` only when enabled AND at least one tool is actually wired. */
