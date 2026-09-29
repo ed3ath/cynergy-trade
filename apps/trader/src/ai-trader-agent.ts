@@ -15,7 +15,9 @@
  * malformed response / cost-cap hit → empty action list. The agent never
  * throws and never blocks the deterministic loop.
  */
-import { CHAIN_VALUES, type AIConfig, type Chain, type Logger } from "@autonomous-trader/shared";
+import { CHAIN_VALUES, estimatePaperSlippageBps, type AIConfig, type Chain, type Logger, type StrategyDecision } from "@autonomous-trader/shared";
+import type { GatedCohort } from "./cohort-gate.js";
+import type { ShadowDecision } from "./shadow-tracker.js";
 import type { AiCandidate, AiConversationOptions, AiToolContext, ChatMessage, ChatResponse } from "./ai-agent.js";
 import { TOOL_DEFS, type ToolDef, parseChatCompletion, withAiDeadline } from "./ai-agent.js";
 import { AiBudget } from "./ai-budget.js";
@@ -85,8 +87,11 @@ export interface AiTraderSnapshot {
   /** Your own persisted lessons from past losses — read, apply, refine. */
   lessons?: string[];
   /** Host-enforced constraints and previous application outcomes. */
-  entryRules?: { minimumLiquidityUsd: number; copyTradingEnabled: boolean };
+  entryRules?: { minimumLiquidityUsd: number; copyTradingEnabled: boolean; approxPositionSizeUsd: number };
   entryBlocks?: { chain: Chain; reasons: string[] }[];
+  /** Strategy×chain cohorts disproven by shadow measurement — their ENTER
+   *  views are noise, never evidence (see gatedCohorts prompt rule). */
+  gatedCohorts?: GatedCohort[];
   actionOutcomes?: { type: string; token: string; chain: Chain; outcome: string; at: string; reason?: string }[];
   /** Recent swaps by tracked high-PNL wallets (copy-trade feed), newest last.
    *  BUYs are candidate entries for the agent's own analysis; SELLs of held
@@ -122,12 +127,15 @@ const SYSTEM_PROMPT =
   "Scores and strategyViews are GUIDANCE, not gates: they tell you what the quantitative " +
   "screens see; jevScore, when present, is an independent classifier's 0-1 entry score from " +
   "a rug/momentum review — " +
-  "the same advisory role. ENTER only with evidence of positive expected net value after " +
+  "the same advisory role. gatedCohorts names strategy families disproven by shadow measurement " +
+  "(100+ evaluated signals, median return at or below zero) — an ENTER view from a gated " +
+  "cohort is noise, never evidence. ENTER only with evidence of positive expected net value after " +
   "trading fees and slippage (AI operating costs are a budgeted fixed overhead — never net them " +
-  "against an individual entry). Abstention preserves capital when the evidence " +
-  "is insufficient; there is no requirement to trade, but in PAPER mode a plausible entry " +
-  "with adequate evidence teaches more than abstention — do not abstain solely because " +
-  "the edge is small or the sample is thin. " +
+  "against an individual entry). Each candidate carries roundTripCostBps — entry plus exit " +
+  "slippage at the typical position size. ENTER only when the thesis exceeds that hurdle " +
+  "with room to spare; thin edges below it are abstentions in every mode, PAPER included — " +
+  "a 50bps thesis against a 60bps round trip is a certain loss, not a learning opportunity. " +
+  "Abstention preserves capital when the evidence is insufficient; there is no requirement to trade. " +
   "You may call the provided read-only data tools to refresh data on any token before acting. " +
   "Always specify the token's chain in tool calls. Provider errors, missing pairs, and unknown " +
   "data are missing evidence, not verified liquidity collapse or a rug. " +
@@ -143,14 +151,19 @@ const SYSTEM_PROMPT =
   "concrete evidence-based thesis — a tracked wallet's BUY is a lead to verify (tools), not a reason " +
   "by itself, and their SELL of a token you hold is a take-profit hint; you may EXIT any position or " +
   "TIGHTEN its exits (raise stop, lower take-profit/trailing) but you can " +
-  "never loosen risk; prefer evidence-backed actions over marginal ones. An empty action list " +
+  "never loosen risk; EXIT pays the exit leg of the round-trip cost and forfeits the entry leg " +
+  "already sunk, so prefer TIGHTEN for stale-but-intact holds and rotate into a new entry only " +
+  "when its edge exceeds the sunk round trip; prefer evidence-backed actions over marginal ones. " +
+  "An empty action list " +
   "is a valid, cost-aware decision. Avoid repeated research without new decision-relevant evidence. " +
   "LEARNING: evaluate reconciled net outcomes rather than a target win rate; a small sample " +
   "does not establish an edge. Refuse marginal entries that match supported loss lessons, " +
   "and use EXIT/TIGHTEN only on current evidence, not unknown provider data. " +
   "Every cycle, apply your lessons; when recentTrades/lossStats reveal a new loss pattern, or a " +
   "lesson no longer holds, return an updated lessons array (max 10, each one short actionable rule " +
-  "with its evidence, replacing stale ones). Omit lessons when nothing changed. " +
+  "with its evidence, replacing stale ones). Omit lessons when nothing changed — except when " +
+  "lossStats holds 3+ closed trades and lessons is empty: then you MUST return at least one lesson " +
+  "distilled from the worst loss pattern, because an empty memory with a loss history teaches nothing. " +
   "Respond with STRICT JSON only, no markdown fences: " +
   '{"actions":[{"type":"ENTER","tokenAddress":"...","chain":"solana|ton|bsc|base|polygon|arbitrum",' +
   '"confidence":0.0,"rationale":"one short sentence",' +
@@ -160,8 +173,8 @@ const SYSTEM_PROMPT =
   '"tightenTp1Pct":3,"tightenTrailingPct":8}],"summary":"one sentence market read",' +
   '"lessons":["short actionable rule learned from a loss"]}';
 
-function compactCandidate(candidate: AiCandidate): AiCandidate {
-  return {
+function compactCandidate(candidate: AiCandidate, approxSizeUsd: number | undefined): AiCandidate {
+  const compacted: AiCandidate = {
     tokenAddress: candidate.tokenAddress,
     chain: candidate.chain,
     ...(candidate.symbol ? { symbol: candidate.symbol } : {}),
@@ -222,12 +235,38 @@ function compactCandidate(candidate: AiCandidate): AiCandidate {
     } : {}),
     ...(candidate.jevScore !== undefined ? { jevScore: candidate.jevScore } : {}),
   };
+  // Round-trip cost at the typical size — the entry rule's hurdle rate.
+  const liquidityUsd = candidate.liquidity?.liquidityUsd;
+  if (approxSizeUsd !== undefined && liquidityUsd !== undefined) {
+    const leg = estimatePaperSlippageBps(approxSizeUsd, liquidityUsd);
+    if (leg !== undefined) compacted.roundTripCostBps = leg * 2;
+  }
+  return compacted;
 }
 
 function compactSnapshot(snapshot: AiTraderSnapshot, maxCandidates: number): AiTraderSnapshot {
+  const approxSizeUsd = snapshot.entryRules?.approxPositionSizeUsd;
   return {
     ...snapshot,
-    candidates: snapshot.candidates.slice(0, maxCandidates).map(compactCandidate),
+    candidates: snapshot.candidates.slice(0, maxCandidates).map((c) => compactCandidate(c, approxSizeUsd)),
+  };
+}
+
+/**
+ * Maps an AI ENTER decision to its shadow-tracking payload so AI edge is
+ * measured like any strategy (strategyId ai-autonomous, or the copy-trade
+ * profile id). Null when there is no valid signal price — the host skips
+ * recording instead of journaling a zero-price row.
+ */
+export function aiEnterShadowDecision(decision: StrategyDecision, decisionPrice: number): ShadowDecision | null {
+  if (decision.decision !== "ENTER") return null;
+  if (!Number.isFinite(decisionPrice) || decisionPrice <= 0) return null;
+  return {
+    tokenAddress: decision.tokenAddress,
+    strategyId: decision.strategyId,
+    decisionPrice,
+    confidence: decision.confidence,
+    decidedAt: new Date(),
   };
 }
 

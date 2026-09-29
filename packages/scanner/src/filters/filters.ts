@@ -20,7 +20,9 @@ export const SecurityFilter: Filter = {
     if (!sec) return "SECURITY_DATA_MISSING";
     if (sec.status === "REJECT") return `SECURITY_REJECTED`;
     // Data-missing (provider never indexed the token) skips the hard reject —
-    // the risk engine still halves size via the security_unverified multiplier.
+    // the money firewall decides downstream: half-size on solana/ton via the
+    // security_unverified multiplier, hard reject on EVM chains. Scanner and
+    // shadow measurement stay permissive so signals keep scoring.
     if (sec.status === "UNKNOWN" && sec.confidence < 0.5 && !isSecurityDataMissing(sec)) {
       return "SECURITY_UNKNOWN_LOW_CONFIDENCE";
     }

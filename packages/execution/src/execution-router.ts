@@ -57,7 +57,14 @@ export class PaperExecutionRouter implements ExecutionRouter {
     // Mode-specific units: PAPER buys spend USD-micro and receive token-nano;
     // sells spend the exact token-nano quantity and receive USD-micro. These
     // synthetic scales must never be used for SHADOW/LIVE provider amounts.
-    const slippageFactor = 1 - (intent.maxSlippageBps / 2) / 10_000;
+    // Fill slippage is the host's size/depth estimate when set (honest cost
+    // model); otherwise the legacy half-tolerance. Out-of-range estimates
+    // fall back rather than break the fill — a host bug must not block exits.
+    const expected = intent.expectedSlippageBps;
+    const appliedSlippageBps = expected !== undefined && Number.isFinite(expected) && expected >= 0 && expected < 10_000
+      ? expected
+      : intent.maxSlippageBps / 2;
+    const slippageFactor = 1 - appliedSlippageBps / 10_000;
     const filledPrice = intent.side === "BUY"
       ? currentPriceUsd / slippageFactor
       : currentPriceUsd * slippageFactor;
@@ -96,7 +103,7 @@ export class PaperExecutionRouter implements ExecutionRouter {
       inputAmount,
       outputAmount,
       executedPrice: filledPrice,
-      actualSlippageBps: intent.maxSlippageBps / 2,
+      actualSlippageBps: appliedSlippageBps,
       feesLamports: 5000n,
       feeUsd: 0.0005,
       confirmedAt: new Date(),

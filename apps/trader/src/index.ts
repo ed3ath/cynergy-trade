@@ -23,6 +23,7 @@ import {
   configureLogger,
   createLogger,
   generateTradeIntentId,
+  estimatePaperSlippageBps,
   COPYTRADE_PROFILES,
   copytradeProfileFor,
   type Chain,
@@ -534,8 +535,15 @@ const riskEngine = new RiskEngine(
   () => emergency.isStopNewEntries(),
 );
 
+// ─── Cohort gate (shadow-disproven strategy×chain cohorts never trade) ─────
+// Shared across chains (caches per chain internally). Gated ENTERs keep
+// shadow-tracking so cohorts can rehabilitate; only execution is blocked.
+const { CohortGate } = await import("./cohort-gate.js");
+const cohortGate = new CohortGate(journal, log.child({ component: "cohort-gate" }));
+
 // ─── AI agents (optional LLM: veto second opinion + autonomous trader) ───────
 import type { AiCandidate } from "./ai-agent.js";
+import type { GatedCohort } from "./cohort-gate.js";
 import type { AiAction, AiTraderSnapshot, AiTraderCycleResult } from "./ai-trader-agent.js";
 import type { AiBudgetState } from "./ai-budget.js";
 import type { CopyTradeSignal } from "./copytrade-tracker.js";
@@ -546,9 +554,9 @@ import type { CopyTradeSignal } from "./copytrade-tracker.js";
 // Tools = read-only data pulls (fresh snapshots + history) — no trade actions.
 // Providers dispatch by chain param to the matching runtime.
 // One shared AiBudget: both agents draw a single AI_MAX_COST_PER_DAY_USD cap.
-const { AiVetoAgent } = await import("./ai-agent.js");
+const { AiVetoAgent, toReviewCandidate, vetoConfigFor } = await import("./ai-agent.js");
 const { AiBudget } = await import("./ai-budget.js");
-const { AiTraderAgent } = await import("./ai-trader-agent.js");
+const { AiTraderAgent, aiEnterShadowDecision } = await import("./ai-trader-agent.js");
 const aiTools = {
   getMarketSnapshot: (t: string, chain: Chain) => runtimeFor(chain).providers.marketData.getMarketSnapshot(t, chain),
   getSecurityAnalysis: (t: string, chain: Chain) => runtimeFor(chain).providers.security.analyzeToken(t, chain),
@@ -594,14 +602,15 @@ if (db) {
 const { JevAgent } = await import("./jev-agent.js");
 const jevAgent = config.ai.jevApiKey ? new JevAgent(config.ai, aiLog, aiBudget) : null;
 if (jevAgent) aiLog.info("Jev second opinion enabled", { model: config.ai.jevModel, minScore: config.ai.jevMinScore });
+const vetoCfg = vetoConfigFor(config.ai);
 const aiAgent = config.ai.enabled && config.ai.autonomy !== "off"
-  ? new AiVetoAgent(config.ai, log.child({ component: "ai" }), aiTools, aiBudget)
+  ? new AiVetoAgent(vetoCfg, log.child({ component: "ai" }), aiTools, aiBudget)
   : null;
 if (aiAgent) {
   aiLog.info("AIveto agent enabled", {
     provider: config.ai.provider,
-    model: config.ai.model,
-    baseUrl: config.ai.baseUrl,
+    model: vetoCfg.model,
+    baseUrl: vetoCfg.baseUrl,
   });
 }
 const aiTrader = config.ai.enabled && config.ai.autonomy === "auto"
@@ -645,6 +654,12 @@ if (db && aiTrader) {
 // ponytail: if the ensemble grows per-strategy state worth advising on (e.g.
 // regime fit), widen the view shape then — not before.
 const STRATEGY_GUIDANCE_TTL_MS = 15 * 60_000;
+/** Second-opinion budget for one AI ENTER review — observed tool-less
+ *  reasoning latency runs 11-57s, so 60s covers the slow mode; tool rounds
+ *  may exceed it. Expiry maps to UNKNOWN and the entry proceeds, and the
+ *  budget is clamped to the proposal's remaining TTL so a doomed review is
+ *  skipped instead of waited out. */
+const AI_VETO_REVIEW_MS = 60_000;
 const strategyGuidance = new Map<string, { at: number; views: NonNullable<AiCandidate["strategyViews"]> }>();
 
 function recordStrategyGuidance(chain: Chain, token: string, decisions: StrategyDecision[]): void {
@@ -937,9 +952,9 @@ async function decisionCycle(rt: ChainRuntime): Promise<void> {
         // let the remainder run under stop/trailing/TP2/time-stop. Everything
         // else exits in full.
         if (exitSignal.reason.startsWith("Take profit 1") && position.status === "OPEN") {
-          await executePartialTp1(rt, position, exitSignal, marketSnap);
+          await executePartialTp1(rt, position, exitSignal, marketSnap, observations.liquidity?.liquidityUsd);
         } else {
-          await executeExit(rt, position, exitSignal, marketSnap);
+          await executeExit(rt, position, exitSignal, marketSnap, observations.liquidity?.liquidityUsd);
         }
       }
     } catch (err) {
@@ -954,6 +969,7 @@ async function decisionCycle(rt: ChainRuntime): Promise<void> {
   refreshPortfolio(rt);
   await updateRegime(rt);
   await rt.shadow.evaluateDue();
+  await cohortGate.refresh(rt.chain); // 5-min TTL cache; never throws (fail-open)
 
   // 3. Evaluate new trade candidates (if not stopped)
   if (emergency.isStopNewEntries()) return;
@@ -1000,14 +1016,40 @@ async function decisionCycle(rt: ChainRuntime): Promise<void> {
       };
 
       const ensembleResult = strategyEngine.evaluate(strategyCtx);
+      // Cohort gate: ENTERs from shadow-disproven cohorts are annotated as
+      // noise for the AI and excluded from entries — but still measured.
+      const gated = new Map<string, GatedCohort>();
+      for (const d of ensembleResult.enterDecisions) {
+        const g = cohortGate.isGated(d.strategyId, rt.chain);
+        if (g) gated.set(d.strategyId, g);
+      }
       // auto mode: the AI trader decides every entry — the ensemble only
       // advises. Its view (fires and declines, with reasons) rides along on
       // the AI cycle's candidates; nothing enters deterministically.
       if (aiTrader) {
-        recordStrategyGuidance(rt.chain, candidate.tokenAddress, ensembleResult.decisions);
+        recordStrategyGuidance(rt.chain, candidate.tokenAddress, ensembleResult.decisions.map((d) => {
+          const g = d.decision === "ENTER" ? gated.get(d.strategyId) : undefined;
+          return g
+            ? { ...d, reasons: [...d.reasons, `cohort shadow-gated (n=${g.samples}, med=${g.medianReturnPct}%) — disproven signal, treat as noise`] }
+            : d;
+        }));
       }
       const enterDecisions = ensembleResult.enterDecisions.filter(
         (d) => !heldStrategies.has(d.strategyId));
+      const liveDecisions = enterDecisions.filter((d) => !gated.has(d.strategyId));
+      for (const d of enterDecisions) {
+        const g = gated.get(d.strategyId);
+        if (!g) continue;
+        log.info("Strategy ENTER gated by shadow cohort", {
+          chain: rt.chain,
+          token: candidate.tokenAddress,
+          strategy: d.strategyId,
+          samples: g.samples,
+          medianReturnPct: g.medianReturnPct,
+        });
+        activity.publish("skip", `cohort gated · med ${g.medianReturnPct}% (n=${g.samples})`,
+          { token: candidate.tokenAddress, chain: candidate.chain });
+      }
       if (enterDecisions.length === 0) {
         for (const d of ensembleResult.decisions) {
           const reason = (d.risks.length ? d.risks : d.reasons).join("; ");
@@ -1075,7 +1117,8 @@ async function decisionCycle(rt: ChainRuntime): Promise<void> {
 
       // One risk-gated entry per ENTER decision — multiple strategies may open
       // their own slot on the same token; the risk engine caps the aggregate.
-      for (const strategyDecision of enterDecisions) {
+      // Gated cohorts were shadow-recorded above but never reach this loop.
+      for (const strategyDecision of liveDecisions) {
         // Journal the strategy decision with full feature snapshot for reproducibility
         await journal.recordStrategyDecision(strategyDecision, candidate.features, candidate.chain);
 
@@ -1144,15 +1187,15 @@ async function recordPaperFill(rt: ChainRuntime, result: ExecutionResult, intent
   return facts;
 }
 
-async function executePartialTp1(rt: ChainRuntime, position: Position, exitSignal: ExitSignal, marketSnap: MarketSnapshot): Promise<void> {
-  await executeSale(rt, position, exitSignal, marketSnap, 0.5);
+async function executePartialTp1(rt: ChainRuntime, position: Position, exitSignal: ExitSignal, marketSnap: MarketSnapshot, liquidityUsd: number | undefined): Promise<void> {
+  await executeSale(rt, position, exitSignal, marketSnap, 0.5, liquidityUsd);
 }
 
-async function executeExit(rt: ChainRuntime, position: Position, exitSignal: ExitSignal, marketSnap: MarketSnapshot): Promise<void> {
-  await executeSale(rt, position, exitSignal, marketSnap, 1);
+async function executeExit(rt: ChainRuntime, position: Position, exitSignal: ExitSignal, marketSnap: MarketSnapshot, liquidityUsd: number | undefined): Promise<void> {
+  await executeSale(rt, position, exitSignal, marketSnap, 1, liquidityUsd);
 }
 
-async function executeSale(rt: ChainRuntime, position: Position, exitSignal: ExitSignal, marketSnap: MarketSnapshot, fraction: 0.5 | 1): Promise<void> {
+async function executeSale(rt: ChainRuntime, position: Position, exitSignal: ExitSignal, marketSnap: MarketSnapshot, fraction: 0.5 | 1, liquidityUsd: number | undefined): Promise<void> {
   if (shuttingDown) return;
   if (!currentObservation(marketSnap, position.tokenAddress, position.chain, config.dataFreshness.priceMs)
       || !Number.isFinite(marketSnap.priceUsd) || marketSnap.priceUsd <= 0) throw new Error("Exit has no fresh valid price");
@@ -1175,6 +1218,13 @@ async function executeSale(rt: ChainRuntime, position: Position, exitSignal: Exi
     createdAt: new Date(),
     expiresAt: new Date(Date.now() + 30_000),
   };
+  // PAPER exits fill at the size/depth estimate like entries; without a fresh
+  // liquidity observation the router falls back to half-tolerance (legacy).
+  // Rugged pools haircut honestly here instead of fabricating full proceeds.
+  if (config.trading.mode === "PAPER" && liquidityUsd !== undefined) {
+    const estimate = estimatePaperSlippageBps(intent.positionSizeUsd, liquidityUsd);
+    if (estimate !== undefined) intent.expectedSlippageBps = estimate;
+  }
 
   try {
     await journal.recordTradeIntent(intent);
@@ -1291,6 +1341,9 @@ async function executeEntry(
     candidate?: TokenCandidate;
     proposalExpiresAt?: number;
     audit?: Record<string, unknown>;
+    /** Outbox: screening + risk rejection reasons for the caller's own audit
+     *  (the AI host feeds these back into actionOutcomes so refusals teach). */
+    rejectionOut?: { reasons: string[] };
   },
 ): Promise<boolean> {
   try {
@@ -1303,6 +1356,7 @@ async function executeEntry(
     const candidate = input.candidate ?? await freshEntryCandidate(rt, input.tokenAddress, input.chain);
     const rejections = entryRejections(candidate, input, config.market, config.dataFreshness,
       Math.max(config.risk.minLiquidityUsd, EMERGENCY_LIQUIDITY_FLOOR_USD));
+    if (rejections.length > 0) input.rejectionOut?.reasons.push(...rejections);
     if (rejections.length > 0 || !candidate?.market || !candidate.liquidity || !candidate.security) {
       activity.publish("reject", `entry screening: ${rejections.join("; ")}`, { token: input.tokenAddress, chain: input.chain });
       return false;
@@ -1371,12 +1425,19 @@ async function executeEntry(
       });
       activity.publish("reject", `risk engine · ${riskResult.rejectionReasons.join("; ")}`,
         { token: input.tokenAddress, chain: input.chain });
+      if (input.rejectionOut) input.rejectionOut.reasons.push(...riskResult.rejectionReasons);
       return false;
     }
 
     // Adjust intent size to risk-approved amount
     intent.positionSizeUsd = riskResult.approvedSizeUsd;
     intent.maxSlippageBps = riskResult.maxSlippageBps;
+    // PAPER fills at the size/depth estimate (honest cost model) — computed
+    // at the APPROVED size, after all clamps. SHADOW/LIVE quote for real.
+    if (config.trading.mode === "PAPER") {
+      const estimate = estimatePaperSlippageBps(riskResult.approvedSizeUsd, liqSnap.liquidityUsd);
+      if (estimate !== undefined) intent.expectedSlippageBps = estimate;
+    }
     if (input.proposalExpiresAt !== undefined && Date.now() >= input.proposalExpiresAt) return false;
     if (!currentObservation(candidate.market, input.tokenAddress, input.chain, config.dataFreshness.priceMs)) return false;
     if (emergency.isKillSwitchActive() || emergency.isStopNewEntries() || shuttingDown) return false;
@@ -1464,6 +1525,7 @@ interface PendingAiProposal extends AiTraderCycleResult {
   dataComplete: boolean;
 }
 const recentAiOutcomes: NonNullable<AiTraderSnapshot["actionOutcomes"]> = [];
+let aiEntriesVetoed = 0; // session count of AI ENTERs blocked by second opinion
 const aiProposals = new AiProposalRunner<PendingAiProposal>({ timeoutMs: config.ai.timeoutMs, maxAgeMs: config.ai.cycleSec * 1000 });
 let nextAiAt = Date.now() + config.ai.cycleSec * 1000;
 let lessonsBaseline: Set<string> | null = null;
@@ -1493,14 +1555,8 @@ async function buildAiProposal({ signal, deadlineAt }: { signal: AbortSignal; sn
     const agg = aggregatePortfolio();
     const openPositions = runtimes.flatMap((rt) => rt.positions.getExposurePositions());
     const candidatePools = runtimes.map((rt) =>
-      rt.scanner.getTradeCandidates().slice(0, config.ai.maxCandidatesPerCycle).map((c) => {
-        const aiCand: AiCandidate = structuredClone(c);
-        const symbol = c.liquidity?.baseTokenSymbol;
-        if (symbol) aiCand.symbol = symbol;
-        const views = strategyViewsFor(rt.chain, c.tokenAddress);
-        if (views) aiCand.strategyViews = views;
-        return aiCand;
-      }));
+      rt.scanner.getTradeCandidates().slice(0, config.ai.maxCandidatesPerCycle).map((c) =>
+        toReviewCandidate(c, { strategyViews: strategyViewsFor(rt.chain, c.tokenAddress) })));
     const candidates: AiCandidate[] = [];
     for (let rank = 0; rank < config.ai.maxCandidatesPerCycle; rank++) {
       for (const pool of candidatePools) {
@@ -1604,8 +1660,12 @@ async function buildAiProposal({ signal, deadlineAt }: { signal: AbortSignal; sn
       recentTrades,
       actionOutcomes: recentAiOutcomes.map((outcome) => ({ ...outcome })),
       entryRules: { minimumLiquidityUsd: Math.max(config.market.minLiquidityUsd, config.risk.minLiquidityUsd, EMERGENCY_LIQUIDITY_FLOOR_USD),
-        copyTradingEnabled: config.copytrade.enabled },
+        copyTradingEnabled: config.copytrade.enabled,
+        // Typical entry size — feeds each candidate's roundTripCostBps hurdle.
+        approxPositionSizeUsd: Math.min(config.risk.maxPositionValueUsd,
+          (agg.totalValueUsd / runtimes.length) * (config.risk.baseRiskPct / 100)) },
       entryBlocks: runtimes.map((rt) => ({ chain: rt.chain, reasons: accountingProblems(rt) })).filter((r) => r.reasons.length > 0),
+      gatedCohorts: runtimes.flatMap((rt) => cohortGate.gatedCohorts(rt.chain)),
     };
     if (lossStats.sampleSize > 0) snapshot.lossStats = lossStats;
     if (aiLessons.length > 0) snapshot.lessons = aiLessons;
@@ -1745,6 +1805,42 @@ async function runAiAction(action: AiAction, candidates: readonly AiCandidateHin
         : {}),
       evaluatedAt: new Date(),
     };
+    // Shadow-track the AI's own ENTER at the refreshed decision price — AI edge
+    // measured like any strategy cohort (strategyId ai-autonomous). Recording
+    // never blocks the entry: failures only warn.
+    const aiShadow = aiEnterShadowDecision(decision, price);
+    if (aiShadow) {
+      try {
+        await rt.shadow.record(aiShadow);
+      } catch (err) {
+        aiLog.warn("AI shadow record failed", { token: action.tokenAddress, error: (err as Error).message });
+      }
+    }
+    // Second opinion: the veto agent re-reviews the AI's ENTER with fresh
+    // tool pulls against the proposer's own thesis. REJECT blocks the entry;
+    // UNKNOWN (timeout/error/cap) never does. The proposal was already
+    // shadow-recorded above, so veto precision stays measurable.
+    // No TTL remaining → the entry below fails staleness anyway; save the call.
+    const vetoBudgetMs = Math.min(AI_VETO_REVIEW_MS, expiresAt - Date.now());
+    if (aiAgent && vetoBudgetMs > 0) {
+      const review = toReviewCandidate(candidate, {
+        strategyViews: strategyViewsFor(rt.chain, candidate.tokenAddress),
+        proposerThesis: action.rationale ?? `ENTER at proposer confidence ${action.confidence} (no rationale stated)`,
+      });
+      const verdict = await aiAgent.veto(review, { deadlineAt: Date.now() + vetoBudgetMs });
+      if (verdict.verdict === "REJECT") {
+        aiEntriesVetoed++;
+        aiLog.info("AIentry vetoed by second opinion", {
+          token: action.tokenAddress, chain: action.chain,
+          confidence: verdict.confidence, reason: verdict.reason,
+        });
+        activity.publish("reject", `veto · ${verdict.reason || "no reason"}`,
+          { token: action.tokenAddress, chain: action.chain });
+        audit("vetoed", { reason: verdict.reason || "vetoed without reason" });
+        return;
+      }
+    }
+    const rejectionOut = { reasons: [] as string[] };
     const entered = await executeEntry(rt, {
       tokenAddress: action.tokenAddress,
       chain: action.chain,
@@ -1755,10 +1851,13 @@ async function runAiAction(action: AiAction, candidates: readonly AiCandidateHin
       proposalExpiresAt: expiresAt,
       audit: { action, snapshotAt, expiresAt },
       ...(profile ? { timeStopMs: profile.timeStopMs } : {}),
+      rejectionOut,
     });
     aiCooldowns.set(tokenKey(action.chain, action.tokenAddress), Date.now() + config.ai.tokenCooldownSec * 1000);
-    audit(entered ? "entered" : "entry-rejected");
-    if (!entered) aiLog.info("AIentry not opened", { token: action.tokenAddress });
+    // Feed the refusal reason back — "entry-rejected" alone teaches nothing.
+    audit(entered ? "entered" : "entry-rejected",
+      entered ? {} : { reason: rejectionOut.reasons.join("; ") || "rejected without reason" });
+    if (!entered) aiLog.info("AIentry not opened", { token: action.tokenAddress, reasons: rejectionOut.reasons });
     return;
   }
 
@@ -1770,12 +1869,14 @@ async function runAiAction(action: AiAction, candidates: readonly AiCandidateHin
 
   try {
     if (action.type === "EXIT") {
-      const marketSnap = await withinDeadline(rt.providers.marketData.getMarketSnapshot(position.tokenAddress, position.chain), config.dataFreshness.priceMs);
+      // Shared observation cache (also feeds the deterministic monitor): fresh
+      // price plus best-effort liquidity for the PAPER exit cost estimate.
+      const observations = await rt.exitObservations.observe(position);
       if (Date.now() >= expiresAt || shuttingDown || emergency.isKillSwitchActive()) return skip("proposal expired or halted");
       aiLog.info("AIexiting position", { positionId: position.id, token: action.tokenAddress, rationale: action.rationale });
       await executeExit(rt, position,
         { reason: `AI exit · ${action.rationale ?? "no rationale"}`, urgency: "NORMAL", suggestedSellPct: 100 },
-        marketSnap);
+        observations.market, observations.liquidity?.liquidityUsd);
       audit("exited", { positionId: position.id, orderId: position.exitOrderId ?? null });
       return;
     }
@@ -2100,6 +2201,8 @@ const httpServerOpts: Parameters<typeof startHttpServer>[0] = {
       shadow_evaluated_total: shadowEvaluated,
       shadow_avg_return_pct: shadowEvaluated ? round(shadowStats.reduce((s, x) => s + x.avgReturnPct * x.evaluated, 0) / shadowEvaluated) : 0,
       shadow_signal_win_rate: shadowEvaluated ? round(shadowStats.reduce((s, x) => s + x.winRate * x.evaluated, 0) / shadowEvaluated * 100) : 0,
+      cohort_gates_active: runtimes.reduce((sum, rt) => sum + cohortGate.gatedCohorts(rt.chain).length, 0),
+      ai_entries_vetoed_total: aiEntriesVetoed,
     };
   },
   getReport: () => buildReport(),

@@ -116,12 +116,21 @@ export class RiskEngine {
       rejections.push(`SECURITY_REJECTED: ${input.security.reasons.map((r) => r.code).join(",")}`);
     }
     // Data-missing UNKNOWN (provider never indexed the token) skips this gate
-    // and takes the security_unverified sizing penalty below instead.
-    // ponytail: paper-phase tolerance for brand-new pools; before EVM
-    // SHADOW/LIVE require a provider that actually verifies the token.
+    // and takes the security_unverified sizing penalty below instead —
+    // solana/ton only. EVM rejects outright (next gate).
+    // ponytail: paper-phase tolerance for brand-new pools; before EVM entries
+    // resume, wire a provider that actually verifies the token.
     if (input.security.status === "UNKNOWN" && input.security.confidence < 0.5
         && !isSecurityDataMissing(input.security)) {
       rejections.push("SECURITY_UNKNOWN_LOW_CONFIDENCE");
+    }
+    // Data-missing tolerance is solana/ton-only: GoPlus barely indexes fresh
+    // EVM pools, and shadow 15-min outcomes there show -100% left tails (full
+    // rugs). Unverified EVM entries are a hard reject until a verifying
+    // provider exists — capital preserved, signals still shadow-measured.
+    const isEvm = input.intent.chain !== "solana" && input.intent.chain !== "ton";
+    if (isSecurityDataMissing(input.security) && isEvm) {
+      rejections.push("SECURITY_UNVERIFIED_EVM");
     }
 
     // ── Hard gate 4: liquidity minimum ───────────────────────────────────────
@@ -236,7 +245,8 @@ export class RiskEngine {
       multipliers["security_warning"] = 0.6;
     }
 
-    // Unverified token (data-missing security) — halve the size
+    // Unverified token (data-missing security, solana/ton only — EVM rejects
+    // at gate 3 above) — halve the size
     if (isSecurityDataMissing(input.security)) {
       multipliers["security_unverified"] = 0.5;
     }

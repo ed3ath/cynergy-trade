@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { AiVetoAgent, parseChatCompletion, type AiCandidate } from "../ai-agent.js";
+import { AiVetoAgent, parseChatCompletion, toReviewCandidate, vetoConfigFor, type AiCandidate } from "../ai-agent.js";
 import { AiBudget } from "../ai-budget.js";
 import { CHAIN_VALUES, createLogger, type AIConfig } from "@autonomous-trader/shared";
+import { createCandidate, type TokenCandidate } from "@autonomous-trader/scanner";
 
 function candidate(): AiCandidate {
   return {
@@ -300,6 +301,77 @@ describe("AiVetoAgent", () => {
     const agent = new AiVetoAgent(cfg(), createLogger({ t: "test" }));
     expect((await agent.veto(candidate(), { signal: controller.signal })).verdict).toBe("UNKNOWN");
     expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("sends the proposer thesis and a steelman instruction to the reviewer", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValue(okResponse('{"verdict":"APPROVE","confidence":0.7,"reason":"thesis holds"}'));
+    const agent = new AiVetoAgent(cfg(), createLogger({ t: "test" }));
+    const v = await agent.veto({ ...candidate(), proposerThesis: "fresh momentum, clean security" });
+    expect(v.verdict).toBe("APPROVE");
+    const [, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+    const body = JSON.parse(String(init.body));
+    expect(body.messages[0].content).toContain("steelman");
+    expect(JSON.parse(body.messages[1].content).proposerThesis).toBe("fresh momentum, clean security");
+  });
+
+  it("omits proposerThesis when absent — strategy-signal reviews judge the candidate alone", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValue(okResponse('{"verdict":"APPROVE","confidence":0.7,"reason":"clean"}'));
+    const agent = new AiVetoAgent(cfg(), createLogger({ t: "test" }));
+    await agent.veto(candidate());
+    const [, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+    const body = JSON.parse(String(init.body));
+    expect(JSON.parse(body.messages[1].content)).not.toHaveProperty("proposerThesis");
+    expect(body.messages[0].content).toContain("A missing thesis is normal");
+  });
+});
+
+describe("vetoConfigFor", () => {
+  it("returns the shared endpoint untouched when no override is set", () => {
+    const cfg = { model: "m", baseUrl: "https://x.example.com/v1", apiKey: "k" } as AIConfig;
+    expect(vetoConfigFor(cfg)).toMatchObject({ model: "m", baseUrl: "https://x.example.com/v1", apiKey: "k" });
+  });
+
+  it("overrides each field independently, falling back per field", () => {
+    const cfg = {
+      model: "m", baseUrl: "https://x.example.com/v1", apiKey: "k",
+      vetoModel: "second", vetoBaseUrl: "https://y.example.com/v1",
+    } as AIConfig;
+    expect(vetoConfigFor(cfg)).toMatchObject({
+      model: "second", baseUrl: "https://y.example.com/v1", apiKey: "k",
+    });
+  });
+});
+
+describe("toReviewCandidate", () => {
+  function tokenCandidate(): TokenCandidate {
+    return createCandidate("TokenXXX", "solana", "test");
+  }
+
+  it("deep-clones scanner state and attaches symbol, views, and thesis", () => {
+    const c = tokenCandidate();
+    const withSymbol = { ...c, liquidity: { baseTokenSymbol: "TXXX" } } as TokenCandidate;
+    const views = [{ strategyId: "s", decision: "ENTER", confidence: 0.7, reasons: ["r"] }] as const;
+    const review = toReviewCandidate(withSymbol, {
+      strategyViews: [...views],
+      proposerThesis: "fresh momentum, clean security",
+    });
+    expect(review.tokenAddress).toBe("TokenXXX");
+    expect(review.symbol).toBe("TXXX");
+    expect(review.strategyViews).toEqual([...views]);
+    expect(review.proposerThesis).toBe("fresh momentum, clean security");
+    expect(review).not.toBe(c);
+    // clone carries (but detaches) the scanner-only layers at runtime
+    expect((review as unknown as TokenCandidate).features).not.toBe(c.features);
+  });
+
+  it("omits absent optionals (exactOptionalPropertyTypes)", () => {
+    const review = toReviewCandidate(tokenCandidate());
+    expect(review).not.toHaveProperty("symbol");
+    expect(review).not.toHaveProperty("strategyViews");
+    expect(review).not.toHaveProperty("proposerThesis");
+    expect(review).not.toHaveProperty("roundTripCostBps");
   });
 });
 

@@ -131,6 +131,13 @@ export const AIConfigSchema = z.object({
   /** Drop candidates whose Jev P(entry) falls below this. */
   jevMinScore: z.number().min(0).max(1).default(0.5),
   jevTimeoutMs: z.number().int().positive().default(5_000),
+  /** Second-opinion model override (`AI_VETO_*`) — each field falls back to
+   *  the shared AI_* value when unset, so setting only AI_VETO_MODEL routes
+   *  the veto through another model on the same endpoint. A genuinely
+   *  independent reviewer wants its own provider (any OpenAI-compatible one). */
+  vetoModel: z.string().optional(),
+  vetoBaseUrl: z.string().url().optional(),
+  vetoApiKey: z.string().optional(),
 });
 export type AIConfig = z.infer<typeof AIConfigSchema>;
 
@@ -278,6 +285,9 @@ export function loadConfig(overrides: Partial<Record<string, unknown>> = {}): Ap
       jevModel: process.env["JEV_MODEL"] ?? "jev-latest",
       jevMinScore: parseFloat(process.env["JEV_MIN_SCORE"] ?? "0.5"),
       jevTimeoutMs: parseInt(process.env["JEV_TIMEOUT_MS"] ?? "5000", 10),
+      vetoModel: process.env["AI_VETO_MODEL"] || undefined,
+      vetoBaseUrl: process.env["AI_VETO_BASE_URL"] || undefined,
+      vetoApiKey: process.env["AI_VETO_API_KEY"] || undefined,
     },
     copytrade: {
       enabled: process.env["COPYTRADE_ENABLED"] === "true",

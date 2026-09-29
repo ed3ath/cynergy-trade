@@ -14,6 +14,9 @@ afterEach(() => {
   delete process.env["AI_MAX_OPEN_POSITIONS"];
   delete process.env["AI_TOKEN_COOLDOWN_SEC"];
   delete process.env["AI_LIVE_ENABLED"];
+  delete process.env["AI_VETO_MODEL"];
+  delete process.env["AI_VETO_BASE_URL"];
+  delete process.env["AI_VETO_API_KEY"];
 });
 
 describe("trading.chains config", () => {
@@ -92,6 +95,38 @@ describe("AI autonomy config", () => {
 
   it("rejects an invalid autonomy value (fail loud, not silent fallback)", () => {
     process.env["AI_AUTONOMY"] = "yolo";
+    expect(() => loadConfig()).toThrow();
+  });
+});
+
+describe("AI veto model override", () => {
+  it("leaves veto fields unset by default (shared endpoint fallback)", () => {
+    const cfg = loadConfig();
+    expect(cfg.ai.vetoModel).toBeUndefined();
+    expect(cfg.ai.vetoBaseUrl).toBeUndefined();
+    expect(cfg.ai.vetoApiKey).toBeUndefined();
+  });
+
+  it("parses each AI_VETO_* field independently", () => {
+    process.env["AI_VETO_MODEL"] = "second-model";
+    process.env["AI_VETO_BASE_URL"] = "https://second.example.com/v1";
+    process.env["AI_VETO_API_KEY"] = "sk-veto";
+    const cfg = loadConfig();
+    expect(cfg.ai.vetoModel).toBe("second-model");
+    expect(cfg.ai.vetoBaseUrl).toBe("https://second.example.com/v1");
+    expect(cfg.ai.vetoApiKey).toBe("sk-veto");
+  });
+
+  it("a lone AI_VETO_MODEL leaves endpoint and key unset (same-gateway override)", () => {
+    process.env["AI_VETO_MODEL"] = "second-model";
+    const cfg = loadConfig();
+    expect(cfg.ai.vetoModel).toBe("second-model");
+    expect(cfg.ai.vetoBaseUrl).toBeUndefined();
+    expect(cfg.ai.vetoApiKey).toBeUndefined();
+  });
+
+  it("rejects a malformed veto base URL", () => {
+    process.env["AI_VETO_BASE_URL"] = "not-a-url";
     expect(() => loadConfig()).toThrow();
   });
 });

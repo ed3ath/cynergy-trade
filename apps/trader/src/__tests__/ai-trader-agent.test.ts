@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { AiTraderAgent, type AiTraderSnapshot } from "../ai-trader-agent.js";
+import { AiTraderAgent, aiEnterShadowDecision, type AiTraderSnapshot } from "../ai-trader-agent.js";
 import { AiBudget } from "../ai-budget.js";
-import { CHAIN_VALUES, createLogger, type AIConfig } from "@autonomous-trader/shared";
+import { CHAIN_VALUES, createLogger, type AIConfig, type StrategyDecision } from "@autonomous-trader/shared";
 import { TOOL_DEFS, type AiToolContext } from "../ai-agent.js";
 
 function cfg(overrides: Partial<AIConfig> = {}): AIConfig {
@@ -54,6 +54,38 @@ function agent(c: AIConfig = cfg()): AiTraderAgent {
 afterEach(() => {
   vi.restoreAllMocks();
   vi.useRealTimers();
+});
+
+describe("aiEnterShadowDecision", () => {
+  function enterDecision(overrides: Partial<StrategyDecision> = {}): StrategyDecision {
+    return {
+      strategyId: "ai-autonomous", strategyVersion: "1.0.0", tokenAddress: "TokA",
+      decision: "ENTER", confidence: 0.7, reasons: ["thesis"], risks: [],
+      invalidationConditions: [], evaluatedAt: new Date(), ...overrides,
+    };
+  }
+
+  it("maps an AI ENTER to its shadow payload", () => {
+    const before = Date.now();
+    const shadow = aiEnterShadowDecision(enterDecision(), 1.5);
+    expect(shadow).toMatchObject({
+      tokenAddress: "TokA", strategyId: "ai-autonomous", decisionPrice: 1.5, confidence: 0.7,
+    });
+    expect(shadow?.decidedAt.getTime()).toBeGreaterThanOrEqual(before);
+  });
+
+  it("preserves copy-trade profile strategy ids", () => {
+    const shadow = aiEnterShadowDecision(enterDecision({ strategyId: "copytrade-scalp" }), 2);
+    expect(shadow?.strategyId).toBe("copytrade-scalp");
+  });
+
+  it.each([0, -1, NaN, Infinity])("returns null for invalid price %s", (price) => {
+    expect(aiEnterShadowDecision(enterDecision(), price)).toBeNull();
+  });
+
+  it("returns null for non-ENTER decisions", () => {
+    expect(aiEnterShadowDecision(enterDecision({ decision: "SKIP" }), 1.5)).toBeNull();
+  });
 });
 
 describe("AiTraderAgent", () => {
@@ -143,6 +175,55 @@ describe("AiTraderAgent", () => {
     expect(request.messages[1].content).not.toContain("nested-liquidity-must-not-reach-model");
     expect(request.messages[1].content).not.toContain("nested-score-must-not-reach-model");
     expect(request).toMatchObject({ max_tokens: 2000 });
+  });
+
+  it("attaches per-candidate round-trip cost at the typical size", async () => {
+    const source = snapshot();
+    source.entryRules = { minimumLiquidityUsd: 20_000, copyTradingEnabled: false, approxPositionSizeUsd: 3 };
+    source.candidates = [
+      { tokenAddress: "Deep", chain: "solana", liquidity: { liquidityUsd: 15_000, poolAgeMs: 1_000_000, estimatedSlippageBps500: 0, liquidityChange5m: 0 } },
+      { tokenAddress: "Rugged", chain: "base", liquidity: { liquidityUsd: 5, poolAgeMs: 1_000_000, estimatedSlippageBps500: 0, liquidityChange5m: 0 } },
+    ];
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(okResponse('{"actions":[],"summary":"costed"}'));
+    await agent().propose(source);
+    const request = JSON.parse(String(fetchSpy.mock.calls[0]?.[1]?.body));
+    const payload = JSON.parse(request.messages[1].content) as { candidates: { roundTripCostBps?: number }[] };
+    expect(payload.candidates[0]?.roundTripCostBps).toBe(24); // 12bps legs × 2
+    expect(payload.candidates[1]?.roundTripCostBps).toBe(12020); // 6010bps legs × 2
+  });
+
+  it("omits round-trip cost without sizing or depth", async () => {
+    const source = snapshot();
+    source.candidates = [{ tokenAddress: "NoDepth", chain: "solana" }];
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(okResponse('{"actions":[],"summary":"uncosted"}'));
+    await agent().propose(source);
+    const request = JSON.parse(String(fetchSpy.mock.calls[0]?.[1]?.body));
+    expect(request.messages[1].content).not.toContain("roundTripCostBps");
+  });
+
+  it("system prompt states the cost-aware entry rule", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(okResponse('{"actions":[],"summary":"s"}'));
+    await agent().propose(snapshot());
+    const request = JSON.parse(String(fetchSpy.mock.calls[0]?.[1]?.body));
+    const system = String(request.messages[0].content);
+    expect(system).toContain("roundTripCostBps");
+    expect(system).toContain("abstentions in every mode, PAPER included");
+    expect(system).toContain("prefer TIGHTEN for stale-but-intact holds");
+    expect(system).toContain("gatedCohorts");
+    expect(system).toContain("is noise, never evidence");
+    expect(system).not.toContain("teaches more than abstention");
+  });
+
+  it("passes gated cohorts through to the model snapshot", async () => {
+    const source = snapshot();
+    source.gatedCohorts = [{ strategyId: "strategy-micro-scalp", chain: "bsc", samples: 892, medianReturnPct: -3.11 }];
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(okResponse('{"actions":[],"summary":"gated"}'));
+    await agent().propose(source);
+    const request = JSON.parse(String(fetchSpy.mock.calls[0]?.[1]?.body));
+    const payload = JSON.parse(request.messages[1].content) as { gatedCohorts?: unknown };
+    expect(payload.gatedCohorts).toEqual([
+      { strategyId: "strategy-micro-scalp", chain: "bsc", samples: 892, medianReturnPct: -3.11 },
+    ]);
   });
 
   it("drops invalid actions and keeps valid ones", async () => {

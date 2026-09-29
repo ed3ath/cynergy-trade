@@ -9,6 +9,23 @@ export const CHAIN_VALUES = [
 ] as const;
 export type Chain = (typeof CHAIN_VALUES)[number];
 
+/**
+ * Expected PAPER-fill slippage in bps from first principles: a 10bp base
+ * (quote staleness + aggregator spread) plus linear price impact
+ * `size/liquidity × 10_000` (constant-product first order). Examples at $3:
+ * $566k pool → 10bps, $15k pool → 12bps, $5 rugged pool → 6010bps.
+ * Drained pools (liquidity ≤ 0) return 9500 — a 95% haircut that keeps fills
+ * positive-definite instead of fabricating proceeds. Invalid size returns
+ * undefined (caller falls back to the legacy tolerance fraction).
+ * ponytail: linear impact on headline TVL, not exit-side depth — replace with
+ * per-pool depth quotes when a provider exposes them (doc §2 liquidity depth).
+ */
+export function estimatePaperSlippageBps(tradeSizeUsd: number, poolLiquidityUsd: number): number | undefined {
+  if (!Number.isFinite(tradeSizeUsd) || tradeSizeUsd <= 0 || !Number.isFinite(poolLiquidityUsd)) return undefined;
+  if (poolLiquidityUsd <= 0) return 9500;
+  return Math.round(10 + (tradeSizeUsd / poolLiquidityUsd) * 10_000);
+}
+
 // ─── Token lifecycle ──────────────────────────────────────────────────────────
 export type TokenLifecycleStatus =
   | "DISCOVERED"
@@ -270,6 +287,11 @@ export interface TradeIntent {
   paperTokenQuantity?: bigint;
   positionId?: string;
   maxSlippageBps: number;
+  /** PAPER fill-model input: host-computed expected slippage (see
+   *  estimatePaperSlippageBps). The PAPER router fills at this estimate when
+   *  set, else the legacy maxSlippageBps/2. Never a tolerance — the risk
+   *  engine's slippage gate still owns rejection, unchanged. */
+  expectedSlippageBps?: number;
   maxPriceImpactBps: number;
   reason: string;
   createdAt: Date;

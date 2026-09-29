@@ -20,6 +20,7 @@
  *   (ai.timeoutMs), so tool loops can't stall the decision cycle.
  */
 import { CHAIN_VALUES, type AIConfig, type Chain, type Logger } from "@autonomous-trader/shared";
+import type { TokenCandidate } from "@autonomous-trader/scanner";
 import { AiBudget } from "./ai-budget.js";
 
 export type AiVerdictType = "APPROVE" | "REJECT" | "UNKNOWN";
@@ -57,6 +58,31 @@ export interface AiCandidate {
    *  the host also damps ENTER sizing confidence by it. Absent when Jev is
    *  disabled, failed, or unscored. */
   jevScore?: number;
+  /** Estimated PAPER round-trip cost (entry + exit slippage) in bps at the
+   *  host's typical position size, computed from pool depth. The cost-aware
+   *  entry rule keys off this: a thesis thinner than it is an abstention. */
+  roundTripCostBps?: number;
+  /** Proposer's entry thesis, when a specific proposal is under review (AI
+   *  ENTER second opinion). The veto reviewer steelmans then attacks it;
+   *  absent for strategy-signal reviews, which judge the candidate alone. */
+  proposerThesis?: string;
+}
+
+/**
+ * Builds the review-shaped candidate the AI agents consume: a detached clone
+ * (agents must never mutate scanner state) plus symbol, advisory strategy
+ * views, and the proposer's thesis when a concrete proposal is reviewed.
+ */
+export function toReviewCandidate(
+  candidate: TokenCandidate,
+  opts: { strategyViews?: NonNullable<AiCandidate["strategyViews"]> | undefined; proposerThesis?: string } = {},
+): AiCandidate {
+  const review: AiCandidate = structuredClone(candidate);
+  const symbol = candidate.liquidity?.baseTokenSymbol;
+  if (symbol) review.symbol = symbol;
+  if (opts.strategyViews) review.strategyViews = opts.strategyViews;
+  if (opts.proposerThesis) review.proposerThesis = opts.proposerThesis;
+  return review;
 }
 
 /** Read-only data tools the agent may call. All optional — only the ones the
@@ -84,6 +110,9 @@ const SYSTEM_PROMPT =
   "Tools always review the candidate's chain. Provider errors, missing pairs, and unknown data " +
   "are missing evidence, not verified liquidity collapse or a rug. " +
   "Default to APPROVE unless you see a concrete, evidence-based red flag in the data. " +
+  "When a proposer thesis is supplied, steelman it first, then attack it with the evidence — " +
+  "REJECT if the evidence contradicts the thesis or shows an independent red flag. " +
+  "A missing thesis is normal: judge the candidate alone. " +
   "Respond with STRICT JSON only, no markdown fences: " +
   '{"verdict":"APPROVE"|"REJECT","confidence":<number 0-1>,"reason":"<one short sentence>"}';
 
@@ -244,6 +273,19 @@ export const TOOL_DEFS: ToolDef[] = [
     },
   },
 ];
+
+/**
+ * Effective veto-agent config: per-field AI_VETO_* override with fallback to
+ * the shared endpoint, so an unset override behaves exactly as today.
+ */
+export function vetoConfigFor(cfg: AIConfig): AIConfig {
+  return {
+    ...cfg,
+    ...(cfg.vetoModel ? { model: cfg.vetoModel } : {}),
+    ...(cfg.vetoBaseUrl ? { baseUrl: cfg.vetoBaseUrl } : {}),
+    ...(cfg.vetoApiKey ? { apiKey: cfg.vetoApiKey } : {}),
+  };
+}
 
 export class AiVetoAgent {
   private readonly cache = new Map<string, { verdict: AiVerdict; expiresAt: number }>();
@@ -410,6 +452,7 @@ export class AiVetoAgent {
       token: c.tokenAddress,
       chain: c.chain,
       signalContext: c.signalContext,
+      ...(c.proposerThesis ? { proposerThesis: c.proposerThesis } : {}),
       priceUsd: m?.priceUsd,
       marketCapUsd: m?.marketCapUsd,
       volumeUsd: { m5: m?.volumeUsd5m, h1: m?.volumeUsd1h },

@@ -916,6 +916,22 @@ export class JournalRepository {
     };
   }
 
+  /** Recent evaluated shadow outcomes for one chain, newest first — feeds the
+   *  cohort gate's per-strategy medians (means are outlier-corrupted, so the
+   *  gate aggregates in JS instead of AVG() here). */
+  async getShadowOutcomes(chain: string, limit: number): Promise<Array<{ strategyId: string; returnPct: number }>> {
+    const { rows } = await this.db.query<{ strategy_id: string; outcome_return_pct: string }>(
+      `SELECT strategy_id, outcome_return_pct
+       FROM shadow_decisions
+       WHERE evaluated_at IS NOT NULL AND chain = $1::chain_type
+       ORDER BY evaluated_at DESC LIMIT $2`,
+      [chain, limit],
+    );
+    return rows
+      .map((r) => ({ strategyId: r.strategy_id, returnPct: parseFloat(r.outcome_return_pct) }))
+      .filter((r) => Number.isFinite(r.returnPct));
+  }
+
   // ─── Fill calibration (roadmap C2) ──────────────────────────────────────────
   async recordFillCalibration(row: {
     tokenAddress: string;

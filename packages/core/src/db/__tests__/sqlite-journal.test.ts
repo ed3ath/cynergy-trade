@@ -178,6 +178,29 @@ describe("sqlite journal (node:sqlite)", () => {
     expect(await journal.getShadowStats("base")).toMatchObject({ total: 1, evaluated: 1, avgReturnPct: 20, winRate: 1 });
   });
 
+  it("returns per-strategy shadow outcomes newest-first for the cohort gate", async () => {
+    for (const [strategyId, chain, ret] of [["s1", "base", -5], ["s1", "base", 10], ["s2", "base", -1]] as const) {
+      await journal.insertShadowDecision({
+        tokenAddress: "tok", chain, strategyId, decisionPrice: 1, confidence: 0.5,
+        horizonMinutes: 15, decidedAt: new Date(Date.now() - 60 * 60_000),
+      });
+      const due = await journal.getDueShadowDecisions(0, 10, chain);
+      const row = due.find((d) => d.tokenAddress === "tok");
+      await journal.updateShadowOutcome(row!.id, 1, ret);
+    }
+    // one unevaluated row must not leak into outcomes
+    await journal.insertShadowDecision({
+      tokenAddress: "tok", chain: "base", strategyId: "s1", decisionPrice: 1, confidence: 0.5,
+      horizonMinutes: 15, decidedAt: new Date(),
+    });
+    const outcomes = await journal.getShadowOutcomes("base", 100);
+    expect(outcomes).toHaveLength(3);
+    expect(outcomes.filter((o) => o.strategyId === "s1").map((o) => o.returnPct).sort((a, b) => a - b)).toEqual([-5, 10]);
+    expect(outcomes.filter((o) => o.strategyId === "s2")).toEqual([{ strategyId: "s2", returnPct: -1 }]);
+    expect(await journal.getShadowOutcomes("solana", 100)).toHaveLength(0);
+    expect(await journal.getShadowOutcomes("base", 2)).toHaveLength(2);
+  });
+
   it("upserts tokens, snapshots equity + price history, and stores regime reason arrays", async () => {
     const event: TokenDiscoveredEvent = { tokenAddress: "tok", chain: "base", firstSeenAt: new Date(), source: "test" };
     await journal.upsertToken(event, "OBSERVING");

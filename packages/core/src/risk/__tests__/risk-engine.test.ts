@@ -197,6 +197,57 @@ describe("RiskEngine", () => {
     expect(result.appliedMultipliers["security_unverified"]).toBe(0.5);
   });
 
+  it("rejects data-missing security on EVM chains (base)", () => {
+    // Same NO_DATA assessment as the solana tolerance test — on EVM it is a
+    // hard reject (shadow 15-min outcomes show -100% left tails on rugs).
+    const result = engine.evaluate(makeInput({
+      intent: makeIntent({ chain: "base" }),
+      liquidity: { ...GOOD_LIQUIDITY, chain: "base" },
+      security: {
+        ...SAFE_SECURITY, chain: "base", status: "UNKNOWN", score: 30, confidence: 0.3,
+        reasons: [{ code: "NO_DATA", message: "GoPlus returned no data for token", severity: "LOW" }],
+      },
+    }));
+    expect(result.decision).toBe("REJECTED");
+    expect(result.rejectionReasons).toContain("SECURITY_UNVERIFIED_EVM");
+    expect(result.appliedMultipliers["security_unverified"]).toBeUndefined();
+  });
+
+  it("rejects data-missing security on every EVM chain, tolerates solana/ton", () => {
+    const unverified = (chain: "solana" | "ton" | "bsc" | "base" | "polygon" | "arbitrum"): SecurityAssessment => ({
+      ...SAFE_SECURITY, chain, status: "UNKNOWN", score: 30, confidence: 0.3,
+      reasons: [{ code: "NO_DATA", message: "no data", severity: "LOW" }],
+    });
+    for (const chain of ["bsc", "base", "polygon", "arbitrum"] as const) {
+      const result = engine.evaluate(makeInput({
+        intent: makeIntent({ chain }),
+        liquidity: { ...GOOD_LIQUIDITY, chain },
+        security: unverified(chain),
+      }));
+      expect(result.decision).toBe("REJECTED");
+      expect(result.rejectionReasons).toContain("SECURITY_UNVERIFIED_EVM");
+    }
+    for (const chain of ["solana", "ton"] as const) {
+      const result = engine.evaluate(makeInput({
+        intent: makeIntent({ chain }),
+        liquidity: { ...GOOD_LIQUIDITY, chain },
+        security: unverified(chain),
+      }));
+      expect(["APPROVED", "REDUCED"]).toContain(result.decision);
+      expect(result.appliedMultipliers["security_unverified"]).toBe(0.5);
+    }
+  });
+
+  it("still approves verified (SAFE) security on EVM chains", () => {
+    const result = engine.evaluate(makeInput({
+      intent: makeIntent({ chain: "base" }),
+      liquidity: { ...GOOD_LIQUIDITY, chain: "base" },
+      security: { ...SAFE_SECURITY, chain: "base" },
+    }));
+    expect(["APPROVED", "REDUCED"]).toContain(result.decision);
+    expect(result.rejectionReasons).toHaveLength(0);
+  });
+
   it("rejects UNKNOWN data-missing mixed with a real finding", () => {
     const result = engine.evaluate(makeInput({
       security: {

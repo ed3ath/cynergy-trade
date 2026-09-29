@@ -23,6 +23,7 @@ export function createNullJournal(): NullJournal {
     getMarketSnapshotHistory: async () => [],
     getDueShadowDecisions: async () => [],
     getShadowStats: async () => ({ total: 0, evaluated: 0, avgReturnPct: 0, winRate: 0 }),
+    getShadowOutcomes: async () => [],
     getSystemState: async () => null,
     recordConfirmedPaperFill: async () => true,
   };
