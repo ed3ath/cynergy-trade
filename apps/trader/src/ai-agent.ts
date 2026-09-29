@@ -230,6 +230,85 @@ export interface ToolDef {
   function: { name: keyof AiToolContext; description: string; parameters: Record<string, unknown> };
 }
 
+// ─── Shared /chat/completions transport (both agents) ────────────────────────
+
+/** One immediate retry for transient gateway conditions. Observed in the
+ * wild on the local multi-model gateway: 503/504 overload spikes at entry
+ * moments and 404s while a model route re-registers after a restart. Other
+ * 4xx (400/401/403…) are permanent — retrying them only burns budget. */
+const RETRYABLE_STATUSES = new Set([404, 408, 425, 429, 500, 502, 503, 504]);
+const HTTP_RETRIES = 1;
+const RETRY_BACKOFF_MS = 500;
+
+export interface ChatCompletionRequest {
+  baseUrl: string;
+  apiKey?: string;
+  model: string;
+  maxTokens: number;
+  messages: ChatMessage[];
+  signal: AbortSignal;
+  budget: AiBudget;
+  log: Logger;
+  /** Log label + fields, e.g. "AI trader" / { token }. */
+  label: string;
+  logContext?: Record<string, unknown>;
+  tools?: ToolDef[];
+}
+
+/** POST /chat/completions with one bounded retry on transient failures.
+ *  Every attempt is budgeted; aborts (deadline) are never retried. */
+export async function requestChatCompletion(req: ChatCompletionRequest): Promise<ChatResponse> {
+  let lastError: Error = new Error("no request attempted");
+  for (let attempt = 0; ; attempt++) {
+    if (attempt > 0) await abortableDelay(RETRY_BACKOFF_MS, req.signal);
+    const acknowledge = req.budget.beginRequest();
+    let res: Response;
+    try {
+      res = await fetch(`${req.baseUrl.replace(/\/$/, "")}/chat/completions`, {
+        method: "POST",
+        signal: req.signal,
+        headers: {
+          "content-type": "application/json",
+          ...(req.apiKey ? { authorization: `Bearer ${req.apiKey}` } : {}),
+        },
+        body: JSON.stringify({
+          model: req.model,
+          temperature: 0,
+          // reasoning models spend tokens on thinking before the actions JSON
+          max_tokens: req.maxTokens,
+          messages: req.messages,
+          ...(req.tools && req.tools.length > 0 ? { tools: req.tools } : {}),
+        }),
+      });
+    } catch (err) {
+      if (err instanceof Error && err.name === "AbortError") throw err;
+      lastError = err instanceof Error ? err : new Error(String(err));
+      if (attempt >= HTTP_RETRIES) throw lastError;
+      req.log.warn(`${req.label} call error (retrying)`, { error: lastError.message, attempt, ...req.logContext });
+      continue;
+    }
+    if (!res.ok) {
+      const detail = await res.text().then((t) => t.slice(0, 200)).catch(() => "");
+      lastError = new Error(`HTTP ${res.status}${detail ? `: ${detail}` : ""}`);
+      req.log.warn(`${req.label} call failed`, { status: res.status, error: detail, attempt, ...req.logContext });
+      if (!RETRYABLE_STATUSES.has(res.status) || attempt >= HTTP_RETRIES) throw lastError;
+      continue;
+    }
+    const body = parseChatCompletion(await res.text());
+    acknowledge(body.usage);
+    return body;
+  }
+}
+
+function abortableDelay(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) return reject(new DOMException("AI deadline exceeded or cancelled", "AbortError"));
+    const onAbort = () => { clearTimeout(timer); reject(new DOMException("AI deadline exceeded or cancelled", "AbortError")); };
+    const timer = setTimeout(() => { signal.removeEventListener("abort", onAbort); resolve(); }, ms);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
 const TOOL_PARAMETERS = {
   type: "object",
   properties: {
@@ -366,32 +445,21 @@ export class AiVetoAgent {
   }
 
   private async request(token: string, messages: ChatMessage[], signal: AbortSignal): Promise<ChatResponse> {
-    const acknowledge = this.budget.beginRequest();
-    const res = await fetch(`${this.cfg.baseUrl.replace(/\/$/, "")}/chat/completions`, {
-      method: "POST",
+    return requestChatCompletion({
+      baseUrl: this.cfg.baseUrl,
+      ...(this.cfg.apiKey ? { apiKey: this.cfg.apiKey } : {}),
+      model: this.cfg.model,
+      // reasoning models spend tokens on thinking before the JSON -
+      // 200 truncated every verdict to empty content (finish_reason length)
+      maxTokens: 2000,
+      messages,
       signal,
-      headers: {
-        "content-type": "application/json",
-        ...(this.cfg.apiKey ? { authorization: `Bearer ${this.cfg.apiKey}` } : {}),
-      },
-      body: JSON.stringify({
-        model: this.cfg.model,
-        temperature: 0,
-        // reasoning models spend tokens on thinking before the JSON -
-        // 200 truncated every verdict to empty content (finish_reason length)
-        max_tokens: 2000,
-        messages,
-        ...this.toolField(),
-      }),
+      budget: this.budget,
+      log: this.log,
+      label: "AI veto",
+      logContext: { token },
+      ...this.toolField(),
     });
-    if (!res.ok) {
-      const detail = await res.text().then((t) => t.slice(0, 200)).catch(() => "");
-      this.log.warn("AI veto call failed", { status: res.status, token, error: detail });
-      throw new Error(`HTTP ${res.status}${detail ? `: ${detail}` : ""}`);
-    }
-    const body = parseChatCompletion(await res.text());
-    acknowledge(body.usage);
-    return body;
   }
 
   /** `tools` only when enabled AND at least one tool is actually wired. */
